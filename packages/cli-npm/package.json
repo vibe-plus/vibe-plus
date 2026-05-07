@@ -1,0 +1,26 @@
+{
+  "name": "vibe-cli",
+  "version": "0.0.1",
+  "description": "The Unified Toolchain for the Vibe — local AI API gateway CLI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vibe-plus/vibe-plus"
+  },
+  "bin": {
+    "vibe": "./bin/vibe.js"
+  },
+  "scripts": {
+    "postinstall": "node ./bin/vibe.js --version || true"
+  },
+  "optionalDependencies": {
+    "@vibe-cli/darwin-arm64": "0.0.1",
+    "@vibe-cli/darwin-x64": "0.0.1",
+    "@vibe-cli/linux-arm64": "0.0.1",
+    "@vibe-cli/linux-x64": "0.0.1",
+    "@vibe-cli/win32-x64": "0.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

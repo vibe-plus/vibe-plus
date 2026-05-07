@@ -1,0 +1,15 @@
+{
+  "name": "@vibe-cli/darwin-x64",
+  "version": "0.0.1",
+  "description": "vibe-cli binary for darwin-x64",
+  "license": "MIT",
+  "files": [
+    "bin/"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ]
+}

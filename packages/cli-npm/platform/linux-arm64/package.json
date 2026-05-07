@@ -1,0 +1,15 @@
+{
+  "name": "@vibe-cli/linux-arm64",
+  "version": "0.0.1",
+  "description": "vibe-cli binary for linux-arm64",
+  "license": "MIT",
+  "files": [
+    "bin/"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ]
+}

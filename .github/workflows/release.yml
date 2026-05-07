@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------- build matrix ---------------------------------------------------
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15 # arm runner
+            npm_plat: darwin-arm64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            npm_plat: darwin-x64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            npm_plat: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            npm_plat: linux-arm64
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            npm_plat: win32-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux ARM64)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: cargo build --release --target ${{ matrix.target }} -p vibe
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} -p vibe
+
+      - name: Stage binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p stage/bin
+          cp target/${{ matrix.target }}/release/vibe stage/bin/vibe
+          chmod +x stage/bin/vibe
+
+      - name: Stage binary (windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir stage\bin
+          copy target\${{ matrix.target }}\release\vibe.exe stage\bin\vibe.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibe-${{ matrix.npm_plat }}
+          path: stage/
+
+  # ---------- publish to npm -------------------------------------------------
+  publish:
+    name: Publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Populate platform packages
+        run: |
+          for PLAT in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+            DEST="packages/cli-npm/platform/$PLAT/bin"
+            mkdir -p "$DEST"
+            SRC="artifacts/vibe-$PLAT"
+            if [ -f "$SRC/bin/vibe" ]; then
+              cp "$SRC/bin/vibe" "$DEST/vibe"
+              chmod +x "$DEST/vibe"
+            elif [ -f "$SRC/bin/vibe.exe" ]; then
+              cp "$SRC/bin/vibe.exe" "$DEST/vibe.exe"
+            fi
+          done
+
+      - name: Stamp versions
+        run: |
+          # Set version in all packages
+          for PKG in \
+            packages/cli-npm/package.json \
+            packages/cli-npm/platform/darwin-arm64/package.json \
+            packages/cli-npm/platform/darwin-x64/package.json \
+            packages/cli-npm/platform/linux-x64/package.json \
+            packages/cli-npm/platform/linux-arm64/package.json \
+            packages/cli-npm/platform/win32-x64/package.json; do
+            sed -i "s/\"version\": \"0.0.1\"/\"version\": \"$VERSION\"/" "$PKG"
+            sed -i "s/\"0.0.1\"/\"$VERSION\"/g" "$PKG"
+          done
+
+      - name: Publish platform packages first
+        run: |
+          for PLAT in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+            cd packages/cli-npm/platform/$PLAT
+            npm publish --access public || true
+            cd ../../../../
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish vibe-cli wrapper
+        run: |
+          cd packages/cli-npm
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
