@@ -1042,6 +1042,33 @@ fn provider_to_input(p: &Provider) -> ProviderInput {
     }
 }
 
+/// Re-import 同指纹时合并 token / 缓存身份，避免跳过导致无法刷新本机新 OAuth 材料。
+fn merge_codex_credential_on_reimport(
+    existing: &Credential,
+    incoming: CredentialInput,
+) -> CredentialInput {
+    CredentialInput {
+        label: existing.label.clone(),
+        auth_ref: existing.auth_ref.clone(),
+        plan_type: existing.plan_type.clone(),
+        notes: existing.notes.clone(),
+        enabled: existing.enabled,
+        priority: existing.priority,
+        oauth_access_token: incoming.oauth_access_token.or(existing.oauth_access_token.clone()),
+        oauth_refresh_token: incoming.oauth_refresh_token,
+        oauth_expires_at: incoming.oauth_expires_at.or(existing.oauth_expires_at),
+        oauth_cached_email: incoming
+            .oauth_cached_email
+            .or(existing.oauth_account_email.clone()),
+        oauth_cached_subject: incoming
+            .oauth_cached_subject
+            .or(existing.oauth_account_subject.clone()),
+        oauth_cached_plan_slug: incoming
+            .oauth_cached_plan_slug
+            .or(existing.oauth_chatgpt_plan_slug.clone()),
+    }
+}
+
 /// `POST /_vp/providers/import-local`
 /// body: `["claude", "codex"]`  — 指定要导入的 client 名称列表
 ///
@@ -1082,11 +1109,34 @@ async fn import_local_providers(
                     })
                     .await?;
                     if has {
-                        tracing::info!(
-                            provider_id = %pid,
-                            fingerprint = %fp,
-                            "import-local: skip credential (fingerprint already on provider)"
-                        );
+                        let existing_opt = run_blocking(state.clone(), {
+                            let pid = pid.clone();
+                            let fp = fp.clone();
+                            move |s| s.db.credential_get_by_provider_and_fingerprint(&pid, &fp)
+                        })
+                        .await?;
+                        if let Some(existing) = existing_opt {
+                            let cred_id_log = existing.id.clone();
+                            let cred_id = existing.id.clone();
+                            let merged = merge_codex_credential_on_reimport(&existing, cred);
+                            run_blocking(state.clone(), {
+                                let fp = fp.clone();
+                                move |s| s.db.credential_update(&cred_id, merged, Some(fp))
+                            })
+                            .await?;
+                            tracing::info!(
+                                provider_id = %pid,
+                                fingerprint = %fp,
+                                cred_id = %cred_id_log,
+                                "import-local: merged OAuth material into existing credential (same fingerprint)"
+                            );
+                        } else {
+                            tracing::warn!(
+                                provider_id = %pid,
+                                fingerprint = %fp,
+                                "import-local: fingerprint reported duplicate but credential row missing"
+                            );
+                        }
                         continue;
                     }
                     let pid2 = pid.clone();

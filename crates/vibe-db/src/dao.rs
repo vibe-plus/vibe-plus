@@ -3,6 +3,7 @@
 use crate::Db;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
+use std::collections::HashMap;
 use vibe_protocol::*;
 
 fn now_secs() -> i64 {
@@ -610,6 +611,53 @@ impl Db {
                 )
                 .optional()?;
             Ok(snap)
+        })
+    }
+
+    /// Latest plan snapshot per credential id (batch). Missing ids are omitted from the map.
+    pub fn plan_snapshot_latest_map(&self, credential_ids: &[String]) -> Result<HashMap<String, vibe_protocol::CredentialPlanSnapshot>> {
+        if credential_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.with(|c| {
+            let mut out = HashMap::with_capacity(credential_ids.len());
+            for id in credential_ids {
+                let snap = c
+                    .query_row(
+                        "SELECT id, credential_id, captured_at,
+                                codex_5h_used_percent, codex_7d_used_percent,
+                                codex_5h_reset_after_seconds, codex_7d_reset_after_seconds,
+                                codex_primary_used_percent, codex_secondary_used_percent,
+                                summary, source
+                         FROM credential_plan_snapshots
+                         WHERE credential_id = ?1
+                         ORDER BY captured_at DESC LIMIT 1",
+                        params![id],
+                        row_to_plan_snapshot,
+                    )
+                    .optional()?;
+                if let Some(s) = snap {
+                    out.insert(id.clone(), s);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn credential_get_by_provider_and_fingerprint(
+        &self,
+        provider_id: &str,
+        fingerprint: &str,
+    ) -> Result<Option<vibe_protocol::Credential>> {
+        self.with(|c| {
+            let q = format!(
+                "SELECT {} FROM credentials WHERE provider_id = ?1 AND auth_fingerprint = ?2 LIMIT 1",
+                Self::CRED_COLS
+            );
+            let r = c
+                .query_row(&q, params![provider_id, fingerprint], row_to_credential)
+                .optional()?;
+            Ok(r)
         })
     }
 

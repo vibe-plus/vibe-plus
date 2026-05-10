@@ -5,9 +5,10 @@
 //! 2. For each candidate, check the circuit breaker — skip if Open.
 //! 3. Optionally inject Anthropic cache_control into the body.
 //! 4. Send the request.
-//!    - Connection error / 5xx / 429 → record failure, try next provider.
-//!    - 4xx                          → record failure, return immediately (caller's fault).
-//!    - 2xx                          → record success, stream or buffer response.
+//!    - Connection error / 5xx / 401 / 402 → record failure, try next provider.
+//!    - 429 (quota / rate-limit) → rotate credential; **do not** trip circuit breaker.
+//!    - Other 4xx                  → return immediately (caller's fault); no breaker trip.
+//!    - 2xx                        → record success, stream or buffer response.
 //! 5. If every candidate is exhausted, return 503.
 
 use crate::cache;
@@ -113,7 +114,7 @@ fn dedupe_key_from_headers(headers: &HeaderMap, route_prefix: Option<&str>) -> O
 
 fn maybe_record_codex_plan(
     state: &AppState,
-    headers: &HeaderMap,
+    headers: &http::HeaderMap,
     provider: &vibe_protocol::Provider,
     credential_id: Option<&str>,
 ) {
@@ -176,11 +177,13 @@ struct ExpandedPick {
 /// For providers with enabled credentials, each credential becomes one entry.
 /// For providers without credentials, a single entry using provider.auth_ref is created.
 ///
-/// Credentials known to be rate-limited (remaining==0 and reset_at is in the future)
-/// are moved to the end so they're only tried if every other credential is exhausted.
+/// Credentials known to be rate-limited (remaining==0 and reset_at is in the future),
+/// or ChatGPT Codex plan snapshots showing **100%** on the UI-primary window (same order as
+/// `primaryPlanPercent`: primary → 5h → 7d), are moved to the end so upstream is not hit only to 429.
 fn expand_picks(
     picks: Vec<router::Pick>,
     creds_by_provider: &HashMap<String, Vec<Credential>>,
+    plan_by_cred: &HashMap<String, CredentialPlanSnapshot>,
     counter: usize,
 ) -> Vec<ExpandedPick> {
     let now = chrono::Utc::now().timestamp();
@@ -214,13 +217,18 @@ fn expand_picks(
                         credential_id: Some(c.id.clone()),
                     };
                     // Proactively defer credentials whose remaining quota is zero and
-                    // whose reset time hasn't arrived yet.
-                    if cred_is_rate_limited(c, now) {
+                    // whose reset time hasn't arrived yet, or Codex plan snapshot at 100%.
+                    let defer_plan = router::provider_is_chatgpt_codex_official(&pick.provider)
+                        && plan_by_cred
+                            .get(&c.id)
+                            .is_some_and(credential_plan_display_exhausted);
+                    if cred_is_rate_limited(c, now) || defer_plan {
                         tracing::debug!(
                             cred_id = %c.id, label = %c.label,
                             reqs_remaining = ?c.rl_requests_remaining,
                             tokens_remaining = ?c.rl_tokens_remaining,
-                            "deferring rate-limited credential"
+                            defer_plan,
+                            "deferring credential (rate-limit state or exhausted Codex plan snapshot)"
                         );
                         deferred.push(epick);
                     } else {
@@ -254,6 +262,24 @@ fn cred_is_rate_limited(c: &Credential, now_secs: i64) -> bool {
     let tok_exhausted = c.rl_tokens_remaining == Some(0)
         && c.rl_tokens_reset_at.map_or(false, |r| r > now_secs);
     req_exhausted || tok_exhausted
+}
+
+/// Matches website `primaryPlanPercent`: primary → 5h → 7d, clamped to `[0, 100]`.
+fn credential_plan_display_percent(snap: &CredentialPlanSnapshot) -> Option<f64> {
+    fn clamp_pct(v: Option<f64>) -> Option<f64> {
+        let v = v?;
+        if v.is_nan() {
+            return None;
+        }
+        Some(v.clamp(0.0, 100.0))
+    }
+    clamp_pct(snap.codex_primary_used_percent)
+        .or_else(|| clamp_pct(snap.codex_5h_used_percent))
+        .or_else(|| clamp_pct(snap.codex_7d_used_percent))
+}
+
+fn credential_plan_display_exhausted(snap: &CredentialPlanSnapshot) -> bool {
+    credential_plan_display_percent(snap).is_some_and(|p| p >= 100.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +387,25 @@ fn fire_credential_failure(state: &AppState, credential_id: String, error: Optio
     });
 }
 
+/// Persist RL headers from a non-success response without counting success/failure streaks.
+fn fire_credential_rate_limit_only(state: &AppState, credential_id: String, rl: RlHeaders) {
+    if rl.is_empty() {
+        return;
+    }
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = db.credential_update_rate_limit(
+            &credential_id,
+            rl.requests_limit,
+            rl.requests_remaining,
+            rl.requests_reset_at,
+            rl.tokens_limit,
+            rl.tokens_remaining,
+            rl.tokens_reset_at,
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -453,7 +498,39 @@ pub async fn forward(
             .into_response();
     }
 
-    let expanded_picks = expand_picks(candidates, &creds_by_provider, counter);
+    let mut codex_plan_cred_ids: Vec<String> = Vec::new();
+    for pick in &candidates {
+        if !router::provider_is_chatgpt_codex_official(&pick.provider) {
+            continue;
+        }
+        if let Some(creds) = creds_by_provider.get(&pick.provider.id) {
+            for c in creds {
+                codex_plan_cred_ids.push(c.id.clone());
+            }
+        }
+    }
+    codex_plan_cred_ids.sort();
+    codex_plan_cred_ids.dedup();
+
+    let plan_by_cred: HashMap<String, CredentialPlanSnapshot> = if codex_plan_cred_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let db = state.db.clone();
+        let ids = codex_plan_cred_ids.clone();
+        match tokio::task::spawn_blocking(move || db.plan_snapshot_latest_map(&ids)).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(e)) => {
+                tracing::warn!(?e, "batch load credential_plan_snapshots failed");
+                HashMap::new()
+            }
+            Err(e) => {
+                tracing::warn!(?e, "batch load credential_plan_snapshots join error");
+                HashMap::new()
+            }
+        }
+    };
+
+    let expanded_picks = expand_picks(candidates, &creds_by_provider, &plan_by_cred, counter);
     let mut last_error = String::from("all providers unavailable or circuit open");
     let mut cb_skipped_total: usize = 0;
     let mut cb_skipped_provider_ids: Vec<String> = Vec::new();
@@ -588,17 +665,49 @@ pub async fn forward(
         let status = upstream.status();
 
         // ── retryable errors ──────────────────────────────────────────────
-        // 429: rate-limited on this provider → try next
-        // 5xx: server fault → try next
-        // 401: auth invalid for this provider key → try next with another provider's key
-        // 402: subscription/payment issue → try next provider
+        // 429: quota / rate-limit → rotate credential; do **not** trip circuit breaker.
+        // 5xx / 401 / 402: record failure and try next pick.
         if status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::UNAUTHORIZED
             || status == StatusCode::PAYMENT_REQUIRED
         {
+            let headers = upstream.headers().clone();
+            let body_bytes = upstream.bytes().await.unwrap_or_default();
             let msg = format!("upstream {} from {}", status, provider.id);
-            tracing::warn!(%msg, "retryable upstream error, trying next provider");
+
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                tracing::warn!(
+                    %msg,
+                    bytes = body_bytes.len(),
+                    "upstream 429; rotating credential without circuit breaker trip"
+                );
+                maybe_record_codex_plan(
+                    &state,
+                    &headers,
+                    &provider,
+                    epick.credential_id.as_deref(),
+                );
+                let rl = extract_rl_headers(&headers);
+                if let Some(cid) = &epick.credential_id {
+                    fire_credential_rate_limit_only(&state, cid.clone(), rl);
+                }
+                fire_health(
+                    &state,
+                    &provider.id,
+                    false,
+                    started_instant.elapsed().as_millis() as i64,
+                    Some(format!("HTTP {status}")),
+                );
+                last_error = msg;
+                continue;
+            }
+
+            tracing::warn!(
+                %msg,
+                error_body_bytes = body_bytes.len(),
+                "retryable upstream error, trying next provider"
+            );
             state.cb.record_failure(&cb_key);
             fire_health(&state, &provider.id, false,
                 started_instant.elapsed().as_millis() as i64, Some(format!("HTTP {status}")));
@@ -1190,4 +1299,44 @@ async fn do_oauth_refresh(client: &reqwest::Client, refresh_token: &str) -> anyh
         .map(|secs| chrono::Utc::now().timestamp() + secs as i64);
 
     Ok(FreshTokens { access_token, refresh_token: new_refresh, expires_at })
+}
+
+#[cfg(test)]
+mod plan_pct_tests {
+    use super::{credential_plan_display_exhausted, credential_plan_display_percent};
+    use vibe_protocol::CredentialPlanSnapshot;
+
+    fn snap(pp: Option<f64>, h5: Option<f64>, h7: Option<f64>) -> CredentialPlanSnapshot {
+        CredentialPlanSnapshot {
+            id: "i".into(),
+            credential_id: "c".into(),
+            captured_at: 0,
+            codex_5h_used_percent: h5,
+            codex_7d_used_percent: h7,
+            codex_5h_reset_after_seconds: None,
+            codex_7d_reset_after_seconds: None,
+            codex_primary_used_percent: pp,
+            codex_secondary_used_percent: None,
+            summary: None,
+            source: "t".into(),
+        }
+    }
+
+    #[test]
+    fn display_pct_follows_primary_then_5h_then_7d() {
+        assert_eq!(
+            credential_plan_display_percent(&snap(Some(12.0), Some(100.0), None)),
+            Some(12.0)
+        );
+        assert_eq!(
+            credential_plan_display_percent(&snap(None, Some(100.0), Some(50.0))),
+            Some(100.0)
+        );
+    }
+
+    #[test]
+    fn exhausted_when_display_hundred() {
+        assert!(credential_plan_display_exhausted(&snap(None, Some(100.0), None)));
+        assert!(!credential_plan_display_exhausted(&snap(None, Some(99.0), None)));
+    }
 }
