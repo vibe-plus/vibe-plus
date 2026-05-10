@@ -1,7 +1,6 @@
 //! axum HTTP server: routes, handlers, listener.
 
 use crate::circuit_breaker::State as CbState;
-use crate::embedded::Ui;
 use crate::forward;
 use crate::local_import;
 use crate::providers::Wire;
@@ -115,10 +114,6 @@ pub fn router(state: AppState) -> Router {
         .route("/_vp/stats/dashboard", get(dashboard_stats))
         // websocket
         .route("/_vp/ws", any(ws_handler))
-        // embedded UI
-        .route("/_vp/ui", get(ui_index))
-        .route("/_vp/ui/", get(ui_index))
-        .route("/_vp/ui/*path", get(ui_asset))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -1624,43 +1619,6 @@ async fn ws_session(socket: WebSocket, state: AppState) {
             }
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Embedded UI
-// ---------------------------------------------------------------------------
-
-async fn ui_index() -> Response {
-    serve_asset("index.html").await
-}
-
-async fn ui_asset(Path(path): Path<String>) -> Response {
-    serve_asset(&path).await
-}
-
-async fn serve_asset(path: &str) -> Response {
-    let candidates = [path, "index.html"];
-    for c in candidates {
-        if let Some(file) = Ui::get(c) {
-            let mime = mime_guess::from_path(c).first_or_octet_stream();
-            let mut resp = (StatusCode::OK, file.data.into_owned()).into_response();
-            resp.headers_mut().insert(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_str(mime.as_ref()).unwrap(),
-            );
-            let cache: &'static str = if c.ends_with(".html") {
-                "no-store, must-revalidate"
-            } else {
-                "max-age=0, must-revalidate"
-            };
-            resp.headers_mut().insert(
-                axum::http::header::CACHE_CONTROL,
-                HeaderValue::from_static(cache),
-            );
-            return resp;
-        }
-    }
-    (StatusCode::NOT_FOUND, "asset not found").into_response()
 }
 
 // ---------------------------------------------------------------------------

@@ -34,7 +34,9 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }
 keyring = { workspace = true }
-rust-embed = { workspace = true }
-mime_guess = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.27.0"

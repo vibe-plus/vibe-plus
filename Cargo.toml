@@ -54,9 +54,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "5"
 keyring = "3"
-rust-embed = { version = "8", features = ["mime-guess"] }
 ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
-mime_guess = "2"
+base64 = "0.22"
 
 [profile.release]
 lto = "thin"
