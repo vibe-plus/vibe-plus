@@ -143,6 +143,18 @@ impl CircuitBreakers {
         let map = self.inner.lock().unwrap();
         map.get(provider_id).map(|b| b.consecutive_failures).unwrap_or(0)
     }
+
+    /// 手动重置熔断状态（用于 UI 运维操作）。
+    /// 将状态强制置为 Closed，并清空失败/成功计数与打开时间。
+    pub fn reset(&self, provider_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        let b = map.entry(provider_id.to_string()).or_insert_with(Breaker::new);
+        b.state = State::Closed;
+        b.consecutive_failures = 0;
+        b.consecutive_successes = 0;
+        b.opened_at = None;
+        tracing::info!(provider_id, "circuit manually reset to closed");
+    }
 }
 
 #[cfg(test)]
