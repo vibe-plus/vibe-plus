@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import {
   api,
   type Provider,
   type ProviderInput,
   type ProviderHealthSummary,
+  type ProviderAuthPoolSummary,
+  type CredentialPoolStatus,
   type Credential,
   type CredentialInput,
   type CredentialPlanSnapshot,
@@ -12,7 +14,13 @@ import {
   type LocalCandidate,
   isProviderHealthSummary,
 } from "../api/client.ts";
-import { CLIENT_TOOLS, toolProviderStats, toolProxyExample } from "../utils/client-tools.ts";
+import { getCodexClientTool, providerServesCodexCliRoute } from "../utils/client-tools.ts";
+import { useRoute } from "vue-router";
+import { resolvePageAccent } from "../utils/page-accent.ts";
+import { mapUpstreamUserMessage, displayProviderName } from "../utils/providers-display.ts";
+import { hintsFromAuthJsonTokens } from "../utils/codex-oauth-hints.ts";
+import VpIcon from "../components/vp-icon.vue";
+import ProviderCredentialRow from "../components/provider-credential-row.vue";
 
 // ---------------------------------------------------------------------------
 // Provider presets
@@ -143,16 +151,52 @@ function applyPreset(p: Preset) {
 }
 
 const showPresets = ref(false);
+const PRESET_MENU_W = 288;
+const presetTriggerWrap = ref<HTMLElement | null>(null);
+const presetPanelRef = ref<HTMLElement | null>(null);
+const presetMenuPos = ref({ top: 0, left: 0 });
+
+function measurePresetMenu() {
+  const wrap = presetTriggerWrap.value;
+  if (!wrap) return;
+  const r = wrap.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(8, r.right - PRESET_MENU_W),
+    Math.max(8, window.innerWidth - PRESET_MENU_W - 8),
+  );
+  presetMenuPos.value = { top: r.bottom + 4, left };
+}
+
+function onPresetViewportChange() {
+  if (showPresets.value) measurePresetMenu();
+}
+
+function onPresetGlobalPointerDown(ev: PointerEvent) {
+  if (!showPresets.value) return;
+  const n = ev.target as Node | null;
+  if (!n) return;
+  if (presetTriggerWrap.value?.contains(n)) return;
+  if (presetPanelRef.value?.contains(n)) return;
+  showPresets.value = false;
+}
+
+watch(showPresets, async (open) => {
+  if (open) {
+    document.addEventListener("pointerdown", onPresetGlobalPointerDown, true);
+    await nextTick();
+    measurePresetMenu();
+  } else {
+    document.removeEventListener("pointerdown", onPresetGlobalPointerDown, true);
+  }
+});
 
 const providers = ref<Provider[]>([]);
-/** Codex / Claude Code / OpenCode vs provider kind coverage. */
-const clientToolSummaries = computed(() =>
-  CLIENT_TOOLS.map((tool) => ({
-    tool,
-    stats: toolProviderStats(providers.value, tool),
-  })),
-);
 const healthMap = ref<Record<string, ProviderHealthSummary>>({});
+/** `GET /_vp/pools` — 凭证级熔断/限流摘要（与列表并行加载） */
+const poolByProviderId = ref<Record<string, ProviderAuthPoolSummary>>({});
+const route = useRoute();
+const pageAccent = computed(() => resolvePageAccent(route.name));
+const codexRouteTool = computed(() => getCodexClientTool());
 /** Hours for `GET /_vp/providers/:id/health?hours=` — gateway `request_logs` rollup only (not Codex plan windows). */
 const GATEWAY_ROLLING_STAT_HOURS = 24;
 const planSnapByCred = ref<Record<string, CredentialPlanSnapshot | null>>({});
@@ -185,8 +229,7 @@ const emptyForm = (): ProviderInput => ({
 });
 const form = ref<ProviderInput>(emptyForm());
 
-// Credential management
-const expandedProvider = ref<string | null>(null);
+// Credential management（列表默认加载，见 load()）
 const credsByProvider = ref<Record<string, Credential[]>>({});
 const loadingCreds = ref<Record<string, boolean>>({});
 const showCredForm = ref(false);
@@ -202,6 +245,9 @@ const emptyCredForm = (): CredentialInput => ({
   oauth_access_token: null,
   oauth_refresh_token: null,
   oauth_expires_at: null,
+  oauth_cached_email: null,
+  oauth_cached_subject: null,
+  oauth_cached_plan_slug: null,
 });
 const credForm = ref<CredentialInput>(emptyCredForm());
 // Credential form auth mode: "apikey" or "oauth"
@@ -239,12 +285,22 @@ function extractOauthTriple(v: Record<string, unknown>): OauthTriple | null {
   return { access: access.trim(), refresh, exp };
 }
 
-function fillOauthFromTriple(triple: OauthTriple) {
+function fillOauthFromTriple(triple: OauthTriple, rawDoc?: Record<string, unknown>) {
   credForm.value.oauth_access_token = triple.access;
   credForm.value.oauth_refresh_token = triple.refresh;
   credForm.value.oauth_expires_at = triple.exp ?? jwtExp(triple.access);
   credForm.value.auth_ref = null;
   credAuthMode.value = "oauth";
+  if (rawDoc) {
+    const h = hintsFromAuthJsonTokens(rawDoc.tokens);
+    credForm.value.oauth_cached_email = h.oauth_cached_email;
+    credForm.value.oauth_cached_subject = h.oauth_cached_subject;
+    credForm.value.oauth_cached_plan_slug = h.oauth_cached_plan_slug;
+  } else {
+    credForm.value.oauth_cached_email = null;
+    credForm.value.oauth_cached_subject = null;
+    credForm.value.oauth_cached_plan_slug = null;
+  }
 }
 
 function applyAuthJsonText(raw: string, clearPaste: boolean) {
@@ -262,7 +318,7 @@ function applyAuthJsonText(raw: string, clearPaste: boolean) {
         authJsonPasteErr.value = "ChatGPT OAuth requires tokens.access_token in JSON.";
         return;
       }
-      fillOauthFromTriple(triple);
+      fillOauthFromTriple(triple, v);
       if (clearPaste) authJsonPaste.value = "";
       return;
     }
@@ -273,13 +329,16 @@ function applyAuthJsonText(raw: string, clearPaste: boolean) {
         credForm.value.oauth_access_token = null;
         credForm.value.oauth_refresh_token = null;
         credForm.value.oauth_expires_at = null;
+        credForm.value.oauth_cached_email = null;
+        credForm.value.oauth_cached_subject = null;
+        credForm.value.oauth_cached_plan_slug = null;
         credAuthMode.value = "apikey";
         if (clearPaste) authJsonPaste.value = "";
         return;
       }
       const triple = extractOauthTriple(v);
       if (triple) {
-        fillOauthFromTriple(triple);
+        fillOauthFromTriple(triple, v);
         if (clearPaste) authJsonPaste.value = "";
         return;
       }
@@ -438,26 +497,27 @@ async function refreshCodexPlanFromChatgpt(providerId: string, opts?: { silent?:
       if (r.attempted === 0) {
         codexRefreshNote.value = {
           ...codexRefreshNote.value,
-          [providerId]: "No OAuth credentials on this provider — use Import local or Keys.",
+          [providerId]: "本供应商尚无 OAuth 凭证，请用「本机导入」或下方「添加密钥」。",
         };
       } else {
         codexRefreshNote.value = {
           ...codexRefreshNote.value,
           [providerId]: errPart
-            ? `Updated ${r.ok}/${r.attempted} · ${errPart}`
-            : `Updated ${r.ok}/${r.attempted} credential(s).`,
+            ? `已更新 ${r.ok}/${r.attempted} · ${errPart}`
+            : `已更新 ${r.ok}/${r.attempted} 条凭证。`,
         };
       }
     } else if (errPart || (r.attempted > 0 && r.ok === 0)) {
       codexRefreshNote.value = {
         ...codexRefreshNote.value,
-        [providerId]: errPart || `Could not refresh membership (${r.ok}/${r.attempted}).`,
+        [providerId]: errPart || `套餐同步失败（${r.ok}/${r.attempted}）。`,
       };
     } else {
       codexRefreshNote.value = { ...codexRefreshNote.value, [providerId]: "" };
     }
     await loadCodexPlanRowsForProvider(providerId);
-    if (expandedProvider.value === providerId) await loadCreds(providerId);
+    await loadCreds(providerId);
+    await refreshSinglePool(providerId);
   } catch (e) {
     codexRefreshNote.value = { ...codexRefreshNote.value, [providerId]: String(e) };
   } finally {
@@ -474,8 +534,18 @@ async function runCodexWhamBackgroundRefresh() {
   }
 }
 
+/** 尝试合并本机 Codex / Claude：已有同名上游时补充凭证或刷新 auth_ref，幂等。 */
+async function mergeLocalToolsFromDisk() {
+  try {
+    await api.providers.importLocal(["codex", "claude"]);
+  } catch {
+    /* 网关未启动或无 ~/.codex / ~/.claude */
+  }
+}
+
 async function load() {
   try {
+    await mergeLocalToolsFromDisk();
     providers.value = await api.providers.list();
     error.value = "";
     const results = await Promise.allSettled(
@@ -488,14 +558,27 @@ async function load() {
       const body = r.value;
       if (!isProviderHealthSummary(body)) {
         error.value =
-          "Gateway API upgraded: the running vibe process is still the old binary (health has no `cumulative`). Stop it, run this repo’s `vibe` build, then hard-refresh. Frontend HMR does not replace the Rust process.";
+          "网关 API 已升级：正在运行的 vibe 进程仍是旧二进制（health 无 cumulative）。请停止进程、用本仓库重新构建并启动 vibe，再硬刷新页面；前端 HMR 不会替换 Rust 进程。";
         healthMap.value = {};
+        poolByProviderId.value = {};
         return;
       }
       map[providers.value[i].id] = body;
     }
     healthMap.value = map;
+    let pools: ProviderAuthPoolSummary[] = [];
+    try {
+      pools = await api.providers.pools(GATEWAY_ROLLING_STAT_HOURS);
+    } catch {
+      pools = [];
+    }
+    const poolMap: Record<string, ProviderAuthPoolSummary> = {};
+    for (const pool of pools) {
+      poolMap[pool.provider_id] = pool;
+    }
+    poolByProviderId.value = poolMap;
     await loadCodexPlanRowsAll();
+    await Promise.all(providers.value.map((p) => loadCreds(p.id)));
     void runCodexWhamBackgroundRefresh();
   } catch (e) {
     error.value = String(e);
@@ -527,15 +610,28 @@ async function loadCreds(providerId: string) {
   }
 }
 
-async function toggleCreds(providerId: string) {
-  if (expandedProvider.value === providerId) {
-    expandedProvider.value = null;
-    return;
+async function refreshSinglePool(providerId: string) {
+  try {
+    const pool = await api.providers.pool(providerId, GATEWAY_ROLLING_STAT_HOURS);
+    poolByProviderId.value = { ...poolByProviderId.value, [providerId]: pool };
+  } catch {
+    /* 保留旧池快照 */
   }
-  expandedProvider.value = providerId;
-  if (!credsByProvider.value[providerId]) {
-    await loadCreds(providerId);
-  }
+}
+
+async function reloadProviderCreds(providerId: string) {
+  await Promise.all([loadCreds(providerId), refreshSinglePool(providerId)]);
+}
+
+function poolCred(providerId: string, credentialId: string): CredentialPoolStatus | undefined {
+  return poolByProviderId.value[providerId]?.credentials.find(
+    (x) => x.credential_id === credentialId,
+  );
+}
+
+function codexCliRouteAriaLabel(provider: Provider): string {
+  const t = codexRouteTool.value;
+  return `Codex CLI：经网关前缀 ${t.pathPrefix} 的到达请求可路由到此前端供应商「${displayProviderName(provider.name)}」，上游类型为 ${provider.kind}。`;
 }
 
 function startAdd() {
@@ -592,6 +688,7 @@ async function toggleProviderEnabled(p: Provider) {
       await api.providers.resetCircuit(p.id);
       const fresh = await api.providers.health(p.id, GATEWAY_ROLLING_STAT_HOURS);
       healthMap.value = { ...healthMap.value, [p.id]: fresh };
+      await refreshSinglePool(p.id);
     }
     error.value = "";
   } catch (e) {
@@ -609,6 +706,7 @@ async function resetProviderCircuit(providerId: string) {
     await api.providers.resetCircuit(providerId);
     const fresh = await api.providers.health(providerId, GATEWAY_ROLLING_STAT_HOURS);
     healthMap.value = { ...healthMap.value, [providerId]: fresh };
+    await refreshSinglePool(providerId);
     error.value = "";
   } catch (e) {
     error.value = String(e);
@@ -667,6 +765,7 @@ async function saveCred() {
     }
     showCredForm.value = false;
     await loadCreds(credProviderId.value);
+    await refreshSinglePool(credProviderId.value);
   } catch (e) {
     error.value = String(e);
   }
@@ -677,338 +776,294 @@ async function removeCred(cred: Credential) {
   try {
     await api.credentials.delete(cred.id);
     await loadCreds(cred.provider_id);
+    await refreshSinglePool(cred.provider_id);
   } catch (e) {
     error.value = String(e);
   }
 }
 
-function isDupFingerprint(c: Credential, creds: Credential[] | undefined): boolean {
-  if (!creds?.length || !c.auth_fingerprint) return false;
-  return creds.filter((x) => x.auth_fingerprint === c.auth_fingerprint).length > 1;
-}
-
-function planPctClass(p: number | null | undefined): string {
-  if (p == null || Number.isNaN(p)) return "bg-gray-600";
-  if (p < 60) return "bg-emerald-500";
-  if (p < 85) return "bg-yellow-500";
-  return "bg-red-500";
-}
-
 function circuitBadge(state: string) {
-  if (state === "closed") return { label: "healthy", cls: "bg-emerald-900 text-emerald-400" };
-  if (state === "half-open") return { label: "probing", cls: "bg-yellow-900 text-yellow-400" };
-  return { label: "circuit open", cls: "bg-red-900 text-red-400" };
+  if (state === "closed")
+    return { label: "正常", cls: "bg-emerald-50 text-emerald-800 border-emerald-200" };
+  if (state === "half-open")
+    return { label: "探测中", cls: "bg-amber-50 text-amber-900 border-amber-200" };
+  return { label: "熔断", cls: "bg-red-50 text-red-800 border-red-200" };
 }
 
 function isCircuitResettable(state: string): boolean {
   return state === "open" || state === "half-open";
 }
 
-function rlPercent(remaining: number | null, limit: number | null): number {
-  if (remaining == null || limit == null || limit === 0) return 100;
-  return Math.round((remaining / limit) * 100);
-}
-
-function rlClass(pct: number) {
-  if (pct > 50) return "bg-emerald-500";
-  if (pct > 20) return "bg-yellow-500";
-  return "bg-red-500";
-}
-
-function fmtTs(ts: number | null) {
-  if (!ts) return "—";
-  return new Date(ts * 1000).toLocaleTimeString();
-}
-
-onMounted(load);
+onMounted(() => {
+  void load();
+  window.addEventListener("scroll", onPresetViewportChange, true);
+  window.addEventListener("resize", onPresetViewportChange);
+});
+onUnmounted(() => {
+  document.removeEventListener("pointerdown", onPresetGlobalPointerDown, true);
+  window.removeEventListener("scroll", onPresetViewportChange, true);
+  window.removeEventListener("resize", onPresetViewportChange);
+});
 </script>
 
 <template>
   <div>
     <div
-      class="relative overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-br from-violet-600/12 via-[#1a1a1f] to-cyan-600/8 p-5 mb-6"
+      class="relative rounded-2xl border border-slate-200/90 bg-gradient-to-br from-violet-100/80 via-white to-cyan-50/60 mb-6 shadow-sm"
     >
-      <div class="absolute -right-20 -top-24 size-64 rounded-full bg-violet-500/12 blur-3xl" />
-      <div class="absolute -bottom-24 left-24 size-72 rounded-full bg-cyan-500/8 blur-3xl" />
-      <div class="relative z-10 flex items-center justify-between flex-wrap gap-4">
-        <div>
-          <span class="text-xs font-mono text-violet-300 tracking-[0.15em] uppercase"
-            >Gateway stack</span
-          >
-          <h1 class="text-3xl font-bold text-white tracking-tight">Providers</h1>
-          <p class="text-sm text-zinc-500 mt-1.5 max-w-2xl leading-relaxed">
-            Manage upstream AI providers, credentials, circuit health, and local client routing for
-            Codex, Claude Code, and OpenCode.
+      <div
+        aria-hidden="true"
+        class="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl"
+      >
+        <div class="absolute -right-20 -top-24 size-64 rounded-full bg-violet-200/40 blur-3xl" />
+        <div class="absolute -bottom-24 left-24 size-72 rounded-full bg-cyan-200/30 blur-3xl" />
+      </div>
+      <div
+        class="relative z-10 flex flex-col gap-4 p-5 sm:flex-row sm:items-start sm:justify-between sm:gap-6"
+      >
+        <div class="min-w-0 flex-1">
+          <span :class="['text-xs uppercase', pageAccent.kicker]">网关 · 上游</span>
+          <h1 :class="['text-3xl font-bold tracking-tight', pageAccent.heading]">Providers</h1>
+          <p class="text-sm text-slate-600 mt-1.5 max-w-2xl leading-relaxed">
+            优先服务 <strong class="text-slate-800">Codex</strong>：OAuth 与密钥池走网关，CLI 将
+            <code
+              class="font-mono text-violet-800 bg-violet-50 px-1 rounded border border-violet-200"
+              >/codex/v1</code
+            >
+            指到本机端口；其它客户端路由在下方列表中为每个上游单独配置。
           </p>
         </div>
-        <div class="flex gap-2">
+        <div class="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:w-auto">
           <button
+            type="button"
+            class="btn-ghost flex min-h-11 min-w-11 items-center justify-center gap-2 px-2.5 py-2 text-sm rounded-lg border border-vp-border/80 sm:px-3.5 sm:py-1.5"
+            title="从本机已安装工具导入（Claude Code、Codex CLI 等）"
+            aria-label="从本机已安装工具导入"
             @click="openImport"
-            class="px-3.5 py-1.5 btn-ghost text-sm"
-            title="Import from installed tools (Claude Code, Codex CLI…)"
           >
-            ↓ Import local
+            <VpIcon name="folder-input" size-class="size-4 shrink-0" />
+            <span class="hidden sm:inline">本机导入</span>
           </button>
-          <div class="relative">
-            <button @click="showPresets = !showPresets" class="px-3.5 py-1.5 btn-ghost text-sm">
-              ⚡ Presets
-            </button>
-            <div
-              v-if="showPresets"
-              class="absolute right-0 top-full mt-1 z-40 bg-[#1a1a1f] border border-white/[0.1] rounded-xl shadow-xl shadow-black/40 p-3 w-72"
+          <div ref="presetTriggerWrap" class="relative">
+            <button
+              type="button"
+              class="btn-ghost flex min-h-11 min-w-11 items-center justify-center gap-2 px-2.5 py-2 text-sm rounded-lg border border-vp-border/80 sm:px-3.5 sm:py-1.5"
+              aria-label="打开上游预设列表"
+              title="预设"
+              @click="showPresets = !showPresets"
             >
-              <p class="text-xs text-zinc-500 mb-2 px-1">Quick-fill a known provider</p>
-              <button
-                v-for="p in PRESETS"
-                :key="p.label"
-                @click="applyPreset(p)"
-                class="w-full text-left px-3 py-2 rounded-lg hover:bg-white/[0.04] text-sm flex items-center gap-2 transition-colors"
-              >
-                <span>{{ p.icon }}</span>
-                <div>
-                  <div class="font-medium text-white">{{ p.label }}</div>
-                  <div class="text-xs text-zinc-500">priority {{ p.priority }} · {{ p.kind }}</div>
-                </div>
-              </button>
-            </div>
+              <VpIcon name="sparkles" size-class="size-4 shrink-0" />
+              <span class="hidden sm:inline">预设</span>
+            </button>
           </div>
-          <button @click="startAdd" class="px-3 py-1.5 btn-primary text-sm">+ Add provider</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Client tools -->
-    <div v-if="!loading" class="mb-6 grid grid-cols-1 md:grid-cols-3 gap-3">
-      <div
-        v-for="{ tool, stats } in clientToolSummaries"
-        :key="tool.id"
-        class="group relative overflow-hidden rounded-2xl border border-white/[0.06] bg-[#1a1a1f]/80 p-4 flex flex-col gap-3 card-lift"
-      >
-        <div
-          class="absolute inset-0 bg-gradient-to-br from-violet-500/8 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500"
-        />
-        <div class="relative z-10 flex items-center gap-3">
-          <span
-            aria-hidden="true"
-            class="grid size-9 place-items-center rounded-xl bg-white/[0.04] text-lg ring-1 ring-white/[0.06]"
-            >{{ tool.icon }}</span
+          <button
+            type="button"
+            :class="[
+              'flex min-h-11 min-w-11 items-center justify-center gap-2 px-3 py-2 sm:py-1.5 rounded-lg text-sm font-medium',
+              pageAccent.btnPrimary,
+            ]"
+            aria-label="添加上游供应商"
+            @click="startAdd"
           >
-          <div class="min-w-0">
-            <span class="block font-semibold text-zinc-100">{{ tool.label }}</span>
-            <span class="text-[10px] uppercase tracking-wider text-zinc-600">client route</span>
-          </div>
-        </div>
-        <code
-          class="relative z-10 text-[11px] text-violet-300/95 font-mono break-all leading-snug rounded-xl border border-violet-500/15 bg-violet-500/8 px-3 py-2"
-          >{{ toolProxyExample(tool) }}</code
-        >
-        <p class="relative z-10 text-[11px] text-zinc-500 leading-snug">
-          Upstream kinds:
-          <span class="text-zinc-300 font-mono">{{ tool.consumesKinds.join(" · ") }}</span>
-        </p>
-        <p class="relative z-10 text-xs text-zinc-400 leading-snug">{{ tool.setupHint }}</p>
-        <div class="relative z-10 mt-auto pt-1 flex flex-wrap items-center gap-2 text-[11px]">
-          <span
-            class="px-2 py-0.5 rounded-md border"
-            :class="
-              stats.total === 0
-                ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
-                : stats.enabledCount > 0
-                  ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-400'
-                  : 'border-zinc-700 bg-zinc-800/80 text-zinc-500'
-            "
-          >
-            providers:
-            {{ stats.enabledCount }}
-            /
-            {{ stats.total }}
-            enabled
-          </span>
-          <span v-if="stats.total === 0" class="text-amber-500/90">
-            no compatible provider yet
-          </span>
+            <VpIcon name="plus" size-class="size-4 shrink-0 text-white" />
+            <span class="hidden sm:inline">添加上游</span>
+          </button>
         </div>
       </div>
     </div>
 
     <div
       v-if="error"
-      class="mb-4 text-sm text-red-400 bg-red-950/50 border border-red-500/20 rounded-lg px-4 py-2"
+      class="mb-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-2"
     >
       {{ error }}
     </div>
 
-    <div v-if="loading" class="text-zinc-500 text-sm">Loading…</div>
-    <div v-else-if="providers.length === 0" class="text-zinc-500 text-sm py-12 text-center">
-      No providers yet. Click <strong>+ Add provider</strong> to get started.
+    <div v-if="loading" class="text-slate-500 text-sm">加载中…</div>
+    <div v-else-if="providers.length === 0" class="text-slate-500 text-sm py-12 text-center">
+      尚无上游。点击 <strong>+ 添加上游</strong> 开始配置。
     </div>
     <div v-else class="space-y-3">
-      <div v-for="p in providers" :key="p.id" class="card-base overflow-hidden card-lift">
+      <div v-for="p in providers" :key="p.id" class="card-base min-w-0 overflow-hidden card-lift">
         <!-- Provider row -->
-        <div class="px-5 py-4 bg-gradient-to-r from-white/[0.025] to-transparent">
-          <div class="flex items-start gap-4">
+        <div
+          class="px-4 py-4 bg-gradient-to-r from-slate-50/80 to-transparent border-b border-slate-100 sm:px-5"
+        >
+          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
             <div
-              class="grid size-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-violet-500/20 to-cyan-500/10 text-lg ring-1 ring-white/[0.08]"
+              class="grid size-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-violet-100 to-cyan-50 text-lg ring-1 ring-slate-200"
             >
               <span v-if="p.kind === 'anthropic'">🔮</span>
               <span v-else-if="p.kind === 'gemini-native'">✨</span>
               <span v-else-if="p.kind === 'openai-responses'">🤖</span>
               <span v-else>⚡</span>
             </div>
-            <div class="flex-1 min-w-0">
+            <div class="w-full min-w-0 flex-1">
               <div class="flex items-center gap-2 flex-wrap">
-                <span class="font-semibold text-white">{{ p.name }}</span>
+                <span class="min-w-0 break-words font-semibold text-slate-900">{{
+                  displayProviderName(p.name)
+                }}</span>
                 <span
-                  class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-white/[0.08] bg-zinc-800/60 text-zinc-400"
+                  class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-slate-200 bg-slate-100 text-slate-600"
                   >{{ p.kind }}</span
                 >
                 <span
+                  v-if="providerServesCodexCliRoute(p)"
+                  class="inline-flex items-center gap-0.5 rounded-md border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800"
+                  role="img"
+                  :aria-label="codexCliRouteAriaLabel(p)"
+                >
+                  <span aria-hidden="true">{{ codexRouteTool.icon }}</span>
+                  <span aria-hidden="true">Codex</span>
+                </span>
+                <span
                   v-if="!p.enabled"
-                  class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-400"
-                  >paused</span
+                  class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-amber-200 bg-amber-50 text-amber-900"
+                  >已暂停</span
                 >
                 <template v-if="healthMap[p.id]?.cumulative">
                   <span
                     :class="circuitBadge(healthMap[p.id].cumulative.circuit_state).cls"
-                    class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-current/20"
+                    class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border"
                   >
                     {{ circuitBadge(healthMap[p.id].cumulative.circuit_state).label }}
                   </span>
                 </template>
               </div>
 
-              <div class="text-xs text-zinc-500 mt-1 truncate font-mono">
-                {{ p.base_url }} · priority {{ p.priority }}
-              </div>
-
               <div
-                v-if="healthMap[p.id]?.rolling"
-                class="mt-1 flex flex-wrap gap-3 text-xs text-zinc-400"
+                v-if="isOfficialCodexProvider(p)"
+                class="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600"
               >
-                <span class="text-zinc-500"
-                  >Proxy rollup · last {{ healthMap[p.id]?.rolling_hours }}h</span
+                <span class="font-medium text-slate-800 shrink-0">Codex</span>
+                <button
+                  type="button"
+                  class="shrink-0 vp-icon-btn border border-violet-200 text-violet-700"
+                  :disabled="!!codexPlanRefreshing[p.id]"
+                  aria-label="同步 Codex 用量"
+                  title="同步用量"
+                  @click.stop="refreshCodexPlanFromChatgpt(p.id)"
                 >
-                <span>{{ healthMap[p.id].rolling!.requests.toLocaleString() }} req</span>
-                <span :class="healthMap[p.id].rolling!.success_rate < 0.9 ? 'text-red-400' : ''">
-                  {{ (healthMap[p.id].rolling!.success_rate * 100).toFixed(1) }}% ok
-                </span>
-                <span v-if="healthMap[p.id].rolling!.avg_latency_ms != null">
-                  {{ healthMap[p.id].rolling!.avg_latency_ms }}ms avg
-                </span>
-                <span v-if="(healthMap[p.id].rolling!.err_429 ?? 0) > 0" class="text-amber-400">
-                  429 ×{{ healthMap[p.id].rolling!.err_429 }}
-                </span>
-              </div>
-
-              <div
-                v-if="healthMap[p.id]?.cumulative"
-                class="mt-1 text-[10px] leading-snug text-zinc-600 flex flex-wrap gap-x-3 gap-y-0.5"
-              >
-                <span>
-                  All-time (SQLite)
-                  {{ healthMap[p.id].cumulative.total_requests.toLocaleString() }} req ·
-                  {{ (healthMap[p.id].cumulative.success_rate * 100).toFixed(1) }}% ok
-                  <span v-if="healthMap[p.id].cumulative.avg_latency_ms != null">
-                    · {{ healthMap[p.id].cumulative.avg_latency_ms }}ms avg
+                  <VpIcon
+                    name="refresh-cw"
+                    size-class="size-4"
+                    :spin="!!codexPlanRefreshing[p.id]"
+                  />
+                </button>
+                <span v-if="codexPlanRefreshing[p.id]" class="text-slate-500">同步中…</span>
+                <template v-else>
+                  <span v-if="!codexPlanRowsByProvider[p.id]?.length" class="min-w-0">
+                    尚无 OAuth 凭证，请本机导入或下方添加。
                   </span>
-                </span>
-                <span
-                  v-if="healthMap[p.id].cumulative.consecutive_failures > 0"
-                  class="text-red-400"
-                >
-                  {{ healthMap[p.id].cumulative.consecutive_failures }} failures
-                </span>
-                <span
-                  v-if="healthMap[p.id].cumulative.last_error"
-                  class="text-red-400/90 truncate max-w-xs"
-                  :title="healthMap[p.id].cumulative.last_error ?? ''"
-                >
-                  {{ healthMap[p.id].cumulative.last_error }}
-                </span>
-                <span
-                  v-if="isCircuitResettable(healthMap[p.id].cumulative.circuit_state)"
-                  class="text-amber-300/90"
-                >
-                  requests are currently being blocked by circuit breaker
-                </span>
+                  <span v-else class="text-slate-600">
+                    已同步 {{ codexPlanRowsByProvider[p.id].length }} 条
+                  </span>
+                </template>
+                <p v-if="codexRefreshNote[p.id]" class="w-full text-amber-800 break-words">
+                  {{ codexRefreshNote[p.id] }}
+                </p>
               </div>
 
-              <div v-if="isOfficialCodexProvider(p)" class="mt-3 pt-3 border-t border-zinc-800/80">
-                <div class="flex items-start justify-between gap-3 card-lift">
-                  <div class="min-w-0 flex-1 space-y-1">
-                    <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
-                      <span class="text-zinc-300 font-medium">Codex membership</span>
-                      <span v-if="codexPlanRefreshing[p.id]" class="text-zinc-600">Syncing…</span>
-                    </div>
+              <p
+                class="mt-1 truncate text-xs text-slate-500"
+                :title="`${p.base_url} · priority ${p.priority}`"
+              >
+                {{ p.base_url }} · 优先级 {{ p.priority }}
+              </p>
 
-                    <p
-                      v-if="!codexPlanRowsByProvider[p.id]?.length"
-                      class="text-[11px] text-zinc-600 leading-snug"
+              <details
+                v-if="
+                  healthMap[p.id]?.rolling || healthMap[p.id]?.cumulative || p.model_aliases.length
+                "
+                class="mt-2 rounded-lg border border-slate-200 bg-white/70 px-3 py-2 text-[11px] text-slate-600"
+              >
+                <summary
+                  class="cursor-pointer select-none font-medium text-slate-700 list-none marker:content-none [&::-webkit-details-marker]:hidden"
+                >
+                  网关与模型别名
+                </summary>
+                <div class="mt-2 space-y-2 border-t border-slate-100 pt-2">
+                  <div v-if="healthMap[p.id]?.rolling" class="flex flex-wrap gap-x-3 gap-y-0.5">
+                    <span class="text-slate-500">近 {{ healthMap[p.id]?.rolling_hours }}h</span>
+                    <span>{{ healthMap[p.id]!.rolling!.requests.toLocaleString() }} 次</span>
+                    <span
+                      :class="healthMap[p.id]!.rolling!.success_rate < 0.9 ? 'text-red-600' : ''"
                     >
-                      No credentials with stored OAuth yet — use
-                      <strong class="text-zinc-500">Import local</strong>
-                      or add a key under Keys.
-                    </p>
-
-                    <ul v-else class="space-y-1">
-                      <li
-                        v-for="row in codexPlanRowsByProvider[p.id]"
-                        :key="row.credential_id"
-                        class="text-[11px] leading-snug"
-                      >
-                        <span class="text-zinc-500">{{ row.label }}</span>
-                        <span
-                          v-if="row.plan?.summary"
-                          class="text-zinc-300 font-mono ml-2 break-words"
-                          :title="row.plan.source ?? ''"
-                        >
-                          {{ row.plan.summary }}
-                        </span>
-                        <span v-else class="text-zinc-600 ml-2">No snapshot</span>
-                      </li>
-                    </ul>
-
-                    <p
-                      v-if="codexRefreshNote[p.id]"
-                      class="text-[11px] text-amber-500/90 break-words"
+                      {{ (healthMap[p.id]!.rolling!.success_rate * 100).toFixed(1) }}% 成功
+                    </span>
+                    <span v-if="healthMap[p.id]!.rolling!.avg_latency_ms != null">
+                      {{ healthMap[p.id]!.rolling!.avg_latency_ms }}ms
+                    </span>
+                    <span
+                      v-if="(healthMap[p.id]!.rolling!.err_429 ?? 0) > 0"
+                      class="text-amber-700"
                     >
-                      {{ codexRefreshNote[p.id] }}
-                    </p>
+                      429 ×{{ healthMap[p.id]!.rolling!.err_429 }}
+                    </span>
                   </div>
-
-                  <button
-                    type="button"
-                    class="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300 underline-offset-4 hover:underline disabled:opacity-40"
-                    :disabled="!!codexPlanRefreshing[p.id]"
-                    @click.stop="refreshCodexPlanFromChatgpt(p.id)"
+                  <div
+                    v-if="healthMap[p.id]?.cumulative"
+                    class="flex flex-wrap gap-x-2 gap-y-0.5 text-slate-500"
                   >
-                    Retry
-                  </button>
+                    <span>
+                      累计 {{ healthMap[p.id]!.cumulative.total_requests.toLocaleString() }} 次 ·
+                      {{ (healthMap[p.id]!.cumulative.success_rate * 100).toFixed(1) }}% 成功
+                    </span>
+                    <span
+                      v-if="healthMap[p.id]!.cumulative.consecutive_failures > 0"
+                      class="text-red-600"
+                    >
+                      连失败 {{ healthMap[p.id]!.cumulative.consecutive_failures }}
+                    </span>
+                    <span
+                      v-if="healthMap[p.id]!.cumulative.last_error"
+                      class="max-w-full truncate text-red-600"
+                      :title="healthMap[p.id]!.cumulative.last_error ?? ''"
+                    >
+                      {{
+                        mapUpstreamUserMessage(healthMap[p.id]!.cumulative.last_error) ??
+                        healthMap[p.id]!.cumulative.last_error
+                      }}
+                    </span>
+                    <span
+                      v-if="isCircuitResettable(healthMap[p.id]!.cumulative.circuit_state)"
+                      class="text-amber-800"
+                    >
+                      熔断拦截中
+                    </span>
+                  </div>
+                  <div v-if="p.model_aliases.length" class="flex flex-wrap gap-1.5">
+                    <span
+                      v-for="a in p.model_aliases"
+                      :key="a.alias"
+                      class="max-w-full break-words rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-700"
+                    >
+                      {{ a.alias }}→{{ a.upstream_model }}
+                    </span>
+                  </div>
                 </div>
-              </div>
-
-              <div class="flex gap-2 mt-2 flex-wrap">
-                <span
-                  v-for="a in p.model_aliases"
-                  :key="a.alias"
-                  class="text-[11px] bg-zinc-800/60 text-zinc-400 rounded-lg border border-white/[0.05] px-2 py-1 font-mono"
-                >
-                  {{ a.alias }} → {{ a.upstream_model }}
-                </span>
-              </div>
+              </details>
             </div>
 
-            <div class="flex gap-2 shrink-0 items-start flex-wrap justify-end">
+            <div
+              class="flex w-full shrink-0 flex-wrap items-start justify-start gap-2 sm:w-auto sm:justify-end"
+            >
               <button
                 v-if="
                   healthMap[p.id]?.cumulative &&
                   isCircuitResettable(healthMap[p.id].cumulative.circuit_state)
                 "
-                @click="resetProviderCircuit(p.id)"
+                type="button"
+                class="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2 py-2 text-xs text-amber-900 transition-colors hover:bg-amber-100 disabled:opacity-50 sm:px-3 sm:py-1.5"
                 :disabled="!!circuitResetBusy[p.id]"
-                class="text-xs px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/15 text-amber-300 transition-colors disabled:opacity-50"
+                aria-label="重置熔断器"
+                title="重置熔断"
+                @click="resetProviderCircuit(p.id)"
               >
-                {{ circuitResetBusy[p.id] ? "Resetting…" : "Reset circuit" }}
+                <VpIcon name="rotate-ccw" size-class="size-3.5 shrink-0" />
+                <span class="hidden sm:inline">{{
+                  circuitResetBusy[p.id] ? "重置中…" : "重置熔断"
+                }}</span>
               </button>
               <button
                 type="button"
@@ -1016,8 +1071,8 @@ onMounted(load);
                 :aria-checked="p.enabled"
                 :aria-label="p.enabled ? `Disable provider ${p.name}` : `Enable provider ${p.name}`"
                 :disabled="!!toggleBusy[p.id]"
-                class="relative w-11 h-6 shrink-0 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 disabled:opacity-50 shadow-inner"
-                :class="p.enabled ? 'bg-emerald-500 shadow-emerald-900/50' : 'bg-zinc-700'"
+                class="relative w-11 h-6 shrink-0 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:opacity-50 shadow-inner"
+                :class="p.enabled ? 'bg-emerald-500 shadow-emerald-600/20' : 'bg-slate-300'"
                 @click.stop="toggleProviderEnabled(p)"
               >
                 <span
@@ -1026,589 +1081,577 @@ onMounted(load);
                 />
               </button>
               <button
-                @click="toggleCreds(p.id)"
-                class="text-xs px-3 py-1.5 rounded-lg transition-colors border"
-                :class="
-                  expandedProvider === p.id
-                    ? 'bg-violet-500/15 text-violet-300 border-violet-500/25'
-                    : 'bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300 border-white/[0.06]'
-                "
+                type="button"
+                class="vp-icon-btn border border-vp-border/80"
+                :disabled="!!loadingCreds[p.id]"
+                aria-label="重新拉取凭证与密钥池"
+                title="同步凭证"
+                @click="reloadProviderCreds(p.id)"
               >
-                Keys ({{ credsByProvider[p.id]?.length ?? "…" }})
+                <VpIcon name="refresh-cw" size-class="size-4" :spin="!!loadingCreds[p.id]" />
               </button>
               <button
+                type="button"
+                class="vp-icon-btn border border-vp-border/80"
+                aria-label="编辑供应商"
+                title="编辑"
                 @click="startEdit(p)"
-                class="text-xs px-3 py-1.5 rounded-lg bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300 border border-white/[0.06] transition-colors"
               >
-                Edit
+                <VpIcon name="pencil" size-class="size-4" />
               </button>
               <button
+                type="button"
+                class="vp-icon-btn border border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                aria-label="删除供应商"
+                title="删除"
                 @click="remove(p.id)"
-                class="text-xs px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/15 text-red-300 border border-red-500/20 transition-colors"
               >
-                Remove
+                <VpIcon name="trash-2" size-class="size-4" />
               </button>
             </div>
           </div>
         </div>
 
-        <!-- Credentials section -->
+        <!-- 凭证：单行摘要 + 每行内「高级」 -->
         <div
-          v-if="expandedProvider === p.id"
-          class="border-t border-white/[0.06] px-5 py-4 bg-[#09090b]/80 rounded-b-xl"
+          class="border-t border-solid border-default surface-muted px-4 py-3 rounded-b-xl sm:px-5"
         >
-          <div class="flex items-center justify-between mb-3">
-            <span class="text-sm font-medium text-zinc-300">API Keys / Credentials</span>
+          <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <span class="text-sm font-medium text-slate-800">凭证</span>
             <button
+              type="button"
+              :class="[
+                'flex min-h-11 items-center gap-2 text-xs px-3 py-2 sm:py-1.5 rounded-lg font-medium transition-colors shadow-sm',
+                pageAccent.btnPrimary,
+              ]"
+              aria-label="添加密钥"
               @click="startAddCred(p.id)"
-              class="text-xs px-3 py-1.5 rounded-lg bg-violet-500/15 hover:bg-violet-500/20 text-violet-300 border border-violet-500/25 transition-colors"
             >
-              + Add key
+              <VpIcon name="key" size-class="size-3.5 shrink-0 text-white" />
+              <span>添加密钥</span>
             </button>
           </div>
 
-          <div v-if="loadingCreds[p.id]" class="text-xs text-zinc-500">Loading…</div>
+          <div v-if="loadingCreds[p.id]" class="text-xs text-slate-500">加载中…</div>
           <div
             v-else-if="!credsByProvider[p.id] || credsByProvider[p.id].length === 0"
-            class="text-xs text-zinc-600"
+            class="text-xs text-slate-600"
           >
-            No credentials. Provider uses its built-in
-            <code class="font-mono">auth_ref</code>.
+            无独立凭证；将使用供应商默认密钥（在「编辑上游」中配置）。
           </div>
           <div v-else class="space-y-2">
-            <div
+            <ProviderCredentialRow
               v-for="c in credsByProvider[p.id]"
               :key="c.id"
-              class="flex items-start gap-3 bg-gray-900 rounded-lg px-3 py-2.5"
-            >
-              <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="text-sm font-medium text-white">{{ c.label }}</span>
-                  <span
-                    v-if="c.plan_type"
-                    class="text-xs px-1.5 py-0.5 rounded bg-zinc-800/60 text-zinc-400"
-                  >
-                    {{ c.plan_type }}
-                  </span>
-                  <span
-                    v-if="!c.enabled"
-                    class="text-xs px-1.5 py-0.5 rounded bg-yellow-900/60 text-yellow-400"
-                    >disabled</span
-                  >
-                  <span
-                    v-if="isDupFingerprint(c, credsByProvider[p.id])"
-                    class="text-xs px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-400"
-                    title="Same auth_fingerprint as another credential on this provider"
-                  >
-                    Duplicate fingerprint
-                  </span>
-                  <span
-                    v-if="c.consecutive_failures > 0"
-                    class="text-xs px-1.5 py-0.5 rounded bg-red-900/60 text-red-400"
-                  >
-                    {{ c.consecutive_failures }} fail{{ c.consecutive_failures > 1 ? "s" : "" }}
-                  </span>
-                </div>
-
-                <div class="text-xs text-zinc-500 mt-0.5">
-                  <!-- OAuth credential: show expiry status -->
-                  <template v-if="c.oauth_access_token || c.oauth_has_refresh">
-                    <span class="text-purple-400 font-medium">OAuth</span>
-                    <span v-if="c.oauth_has_refresh" class="text-green-500"> · auto-refresh ✓</span>
-                    <span v-if="c.oauth_expires_at">
-                      ·
-                      <span
-                        :class="
-                          c.oauth_expires_at * 1000 < Date.now()
-                            ? 'text-red-400'
-                            : c.oauth_expires_at * 1000 < Date.now() + 300_000
-                              ? 'text-yellow-400'
-                              : 'text-zinc-400'
-                        "
-                      >
-                        {{
-                          c.oauth_expires_at * 1000 < Date.now()
-                            ? "Expired"
-                            : "Expires " + new Date(c.oauth_expires_at * 1000).toLocaleString()
-                        }}
-                      </span>
-                    </span>
-                  </template>
-                  <!-- API Key credential: show auth_ref -->
-                  <template v-else>
-                    <span class="font-mono">{{ c.auth_ref ?? "(no auth_ref)" }}</span>
-                  </template>
-                  <span v-if="c.last_used_at"> · last used {{ fmtTs(c.last_used_at) }}</span>
-                </div>
-
-                <!-- Rate-limit bars -->
-                <div
-                  v-if="c.rl_requests_limit != null || c.rl_tokens_limit != null"
-                  class="mt-2 space-y-1"
-                >
-                  <div v-if="c.rl_requests_limit != null" class="flex items-center gap-2">
-                    <span class="text-xs text-zinc-600 w-16 shrink-0">Requests</span>
-                    <div class="flex-1 h-1.5 rounded-full bg-zinc-800/60 overflow-hidden">
-                      <div
-                        :class="rlClass(rlPercent(c.rl_requests_remaining, c.rl_requests_limit))"
-                        class="h-full rounded-full transition-all"
-                        :style="`width: ${rlPercent(c.rl_requests_remaining, c.rl_requests_limit)}%`"
-                      />
-                    </div>
-                    <span class="text-xs text-zinc-500 w-20 text-right shrink-0">
-                      {{ c.rl_requests_remaining?.toLocaleString() }} /
-                      {{ c.rl_requests_limit?.toLocaleString() }}
-                    </span>
-                  </div>
-                  <div v-if="c.rl_tokens_limit != null" class="flex items-center gap-2">
-                    <span class="text-xs text-zinc-600 w-16 shrink-0">Tokens</span>
-                    <div class="flex-1 h-1.5 rounded-full bg-zinc-800/60 overflow-hidden">
-                      <div
-                        :class="rlClass(rlPercent(c.rl_tokens_remaining, c.rl_tokens_limit))"
-                        class="h-full rounded-full transition-all"
-                        :style="`width: ${rlPercent(c.rl_tokens_remaining, c.rl_tokens_limit)}%`"
-                      />
-                    </div>
-                    <span class="text-xs text-zinc-500 w-20 text-right shrink-0">
-                      {{ c.rl_tokens_remaining?.toLocaleString() }} /
-                      {{ c.rl_tokens_limit?.toLocaleString() }}
-                    </span>
-                  </div>
-                </div>
-
-                <!-- Codex Plan usage from upstream x-codex-* headers (OAuth Codex only, best-effort) -->
-                <div
-                  v-if="
-                    planSnapByCred[c.id] &&
-                    (planSnapByCred[c.id]!.summary ||
-                      planSnapByCred[c.id]!.codex_5h_used_percent != null ||
-                      planSnapByCred[c.id]!.codex_7d_used_percent != null)
-                  "
-                  class="mt-3 rounded-lg border border-white/[0.06] bg-zinc-950/80 px-2.5 py-2"
-                >
-                  <div class="text-[10px] uppercase tracking-wide text-zinc-600 mb-1">
-                    ChatGPT Codex Plan (upstream headers)
-                  </div>
-                  <div
-                    v-if="planSnapByCred[c.id]!.summary"
-                    class="text-xs text-zinc-400 mb-2 font-mono"
-                  >
-                    {{ planSnapByCred[c.id]!.summary }}
-                  </div>
-                  <div
-                    v-if="planSnapByCred[c.id]!.codex_5h_used_percent != null"
-                    class="flex items-center gap-2 mb-1"
-                  >
-                    <span class="text-[10px] text-zinc-600 w-8 shrink-0">5h</span>
-                    <div class="flex-1 h-1.5 rounded-full bg-zinc-800/60 overflow-hidden">
-                      <div
-                        :class="planPctClass(planSnapByCred[c.id]!.codex_5h_used_percent)"
-                        class="h-full rounded-full transition-all"
-                        :style="`width: ${Math.min(100, planSnapByCred[c.id]!.codex_5h_used_percent ?? 0)}%`"
-                      />
-                    </div>
-                    <span class="text-[10px] text-zinc-500 w-12 text-right shrink-0">
-                      {{ planSnapByCred[c.id]!.codex_5h_used_percent?.toFixed(1) }}%
-                    </span>
-                  </div>
-                  <div
-                    v-if="planSnapByCred[c.id]!.codex_7d_used_percent != null"
-                    class="flex items-center gap-2"
-                  >
-                    <span class="text-[10px] text-zinc-600 w-8 shrink-0">7d</span>
-                    <div class="flex-1 h-1.5 rounded-full bg-zinc-800/60 overflow-hidden">
-                      <div
-                        :class="planPctClass(planSnapByCred[c.id]!.codex_7d_used_percent)"
-                        class="h-full rounded-full transition-all"
-                        :style="`width: ${Math.min(100, planSnapByCred[c.id]!.codex_7d_used_percent ?? 0)}%`"
-                      />
-                    </div>
-                    <span class="text-[10px] text-zinc-500 w-12 text-right shrink-0">
-                      {{ planSnapByCred[c.id]!.codex_7d_used_percent?.toFixed(1) }}%
-                    </span>
-                  </div>
-                  <div class="text-[10px] text-zinc-600 mt-1.5">
-                    Captured {{ fmtTs(planSnapByCred[c.id]!.captured_at) }} ·
-                    {{ planSnapByCred[c.id]!.source }}
-                  </div>
-                </div>
-
-                <div v-if="c.last_error" class="text-xs text-red-400 mt-1 truncate">
-                  {{ c.last_error }}
-                </div>
-                <div v-if="c.notes" class="text-xs text-zinc-600 mt-0.5 italic">{{ c.notes }}</div>
-              </div>
-
-              <div class="flex gap-1.5 shrink-0">
-                <button
-                  @click="startEditCred(c)"
-                  class="text-xs px-2 py-1 rounded bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300 transition-colors"
-                >
-                  Edit
-                </button>
-                <button
-                  @click="removeCred(c)"
-                  class="text-xs px-2 py-1 rounded bg-red-900/40 hover:bg-red-900 text-red-400 transition-colors"
-                >
-                  ×
-                </button>
-              </div>
-            </div>
+              :credential="c"
+              :pool-row="poolCred(p.id, c.id)"
+              :plan-snap="planSnapByCred[c.id] ?? null"
+              :peer-creds="credsByProvider[p.id] ?? []"
+              @edit="startEditCred($event)"
+              @delete="removeCred($event)"
+            />
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Provider add/edit modal -->
-    <div
-      v-if="showForm"
-      class="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-    >
-      <div class="bg-[#1a1a1f] border border-white/[0.08] rounded-2xl w-full max-w-lg p-6">
-        <h2 class="font-semibold text-lg mb-5">{{ editTarget ? "Edit" : "Add" }} provider</h2>
-        <div class="space-y-3">
-          <label class="block">
-            <span class="text-xs text-zinc-400">Name</span>
-            <input
-              v-model="form.name"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-            />
-          </label>
-          <label class="block">
-            <span class="text-xs text-zinc-400">Kind</span>
-            <select
-              v-model="form.kind"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm"
+    <Teleport to="body">
+      <div
+        v-if="showPresets"
+        ref="presetPanelRef"
+        class="fixed z-[105] bg-white border border-slate-200 rounded-xl shadow-lg p-3 w-72 max-h-[min(70vh,calc(100dvh-1rem))] overflow-y-auto"
+        :style="{ top: `${presetMenuPos.top}px`, left: `${presetMenuPos.left}px` }"
+        role="menu"
+        aria-label="上游预设"
+      >
+        <p class="text-xs text-slate-500 mb-2 px-1">快速填充常见上游</p>
+        <button
+          v-for="preset in PRESETS"
+          :key="preset.label"
+          type="button"
+          class="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-50 text-sm flex items-center gap-2 transition-colors"
+          @click="applyPreset(preset)"
+        >
+          <span>{{ preset.icon }}</span>
+          <div>
+            <div class="font-medium text-slate-900">{{ preset.label }}</div>
+            <div class="text-xs text-slate-500">
+              优先级 {{ preset.priority }} · {{ preset.kind }}
+            </div>
+          </div>
+        </button>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="showForm"
+        class="vp-modal-backdrop z-[110]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="provider-form-title"
+        @click.self="showForm = false"
+      >
+        <div class="vp-modal-panel max-w-lg flex flex-col" @click.stop>
+          <div class="vp-modal-header">
+            <span
+              class="grid size-10 shrink-0 place-items-center rounded-xl bg-violet-100 text-violet-700 ring-1 ring-violet-200"
+              aria-hidden="true"
             >
-              <option value="anthropic">Anthropic</option>
-              <option value="openai-chat">OpenAI Chat (/v1/chat/completions)</option>
-              <option value="openai-responses">OpenAI Responses</option>
-              <option value="gemini-native">Gemini Native</option>
-            </select>
-          </label>
-          <label class="block">
-            <span class="text-xs text-zinc-400">Base URL</span>
-            <input
-              v-model="form.base_url"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm font-mono"
-            />
-          </label>
-          <label class="block">
-            <span class="text-xs text-zinc-400">
-              Default auth ref (used when no credentials are set)
+              <VpIcon name="server" size-class="size-5" />
             </span>
-            <input
-              v-model="form.auth_ref"
-              placeholder="keyring:my-key  or  env:MY_API_KEY"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm font-mono"
-            />
-          </label>
-          <label class="block">
-            <span class="text-xs text-zinc-400">Priority (lower = higher priority)</span>
-            <input
-              v-model.number="form.priority"
-              type="number"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm"
-            />
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="form.enabled" type="checkbox" class="rounded" />
-            Enabled
-          </label>
-        </div>
-        <div class="flex gap-3 mt-6 justify-end">
-          <button
-            @click="showForm = false"
-            class="px-4 py-2 text-sm rounded-md bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            @click="save"
-            class="px-4 py-2 text-sm rounded-md bg-violet-600 hover:bg-violet-500 font-medium transition-colors"
-          >
-            Save
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Credential add/edit modal -->
-    <div
-      v-if="showCredForm"
-      class="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto"
-    >
-      <div class="bg-[#1a1a1f] border border-white/[0.08] rounded-2xl w-full max-w-lg p-6 my-auto">
-        <h2 class="font-semibold text-lg mb-5">{{ editCred ? "Edit" : "Add" }} credential</h2>
-        <div class="space-y-3">
-          <label class="block">
-            <span class="text-xs text-zinc-400">Label</span>
-            <input
-              v-model="credForm.label"
-              placeholder="e.g. Codex Pro (account 2)"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-            />
-          </label>
-
-          <!-- Auth mode selector -->
-          <div class="flex gap-2">
+            <div class="min-w-0 flex-1">
+              <h2 id="provider-form-title" class="font-semibold text-lg text-vp-text">
+                {{ editTarget ? "编辑" : "添加" }} 上游
+              </h2>
+            </div>
             <button
-              @click="credAuthMode = 'apikey'"
-              :class="
-                credAuthMode === 'apikey'
-                  ? 'bg-violet-600 text-white'
-                  : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-700/60'
-              "
-              class="flex-1 py-1.5 text-xs rounded-md transition-colors"
+              type="button"
+              class="vp-icon-btn shrink-0"
+              aria-label="关闭"
+              title="关闭"
+              @click="showForm = false"
             >
-              API Key / auth_ref
-            </button>
-            <button
-              @click="credAuthMode = 'oauth'"
-              :class="
-                credAuthMode === 'oauth'
-                  ? 'bg-violet-600 text-white'
-                  : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-700/60'
-              "
-              class="flex-1 py-1.5 text-xs rounded-md transition-colors"
-            >
-              OAuth (ChatGPT Pro)
+              <VpIcon name="x" size-class="size-5" />
             </button>
           </div>
-
-          <!-- API Key mode -->
-          <template v-if="credAuthMode === 'apikey'">
+          <div class="px-6 py-4 overflow-y-auto max-h-[min(32rem,70vh)] space-y-3">
             <label class="block">
-              <span class="text-xs text-zinc-400">Auth ref</span>
+              <span class="text-xs text-slate-500">名称</span>
               <input
-                v-model="credForm.auth_ref"
-                placeholder="keyring:my-key  or  env:MY_API_KEY  or  literal:sk-…"
-                class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm font-mono"
-              />
-            </label>
-          </template>
-
-          <!-- OAuth mode -->
-          <template v-else>
-            <input
-              ref="authJsonFileInputRef"
-              type="file"
-              accept=".json,application/json"
-              class="sr-only"
-              @change="onAuthJsonFileChange"
-            />
-            <!-- Paste or drop Codex auth*.json (same shape as local import) -->
-            <div
-              class="rounded-lg border border-dashed p-3 space-y-2 bg-indigo-950/30 transition-colors"
-              :class="
-                authJsonDragActive
-                  ? 'border-violet-400 ring-2 ring-violet-500/40 bg-violet-950/40'
-                  : 'border-indigo-600/50'
-              "
-              @dragover="onAuthJsonDragOver"
-              @dragleave="onAuthJsonDragLeave"
-              @drop="onAuthJsonDrop"
-            >
-              <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-                <p class="text-xs text-zinc-300 font-medium">
-                  Import Codex <code class="font-mono text-zinc-400">auth*.json</code>
-                </p>
-                <button
-                  type="button"
-                  @click="triggerAuthJsonFilePick"
-                  class="shrink-0 px-3 py-1 text-xs rounded-md bg-zinc-700/80 hover:bg-zinc-600 text-zinc-200 transition-colors w-full sm:w-auto"
-                >
-                  Choose file…
-                </button>
-              </div>
-              <p class="text-[11px] text-zinc-500 leading-snug">
-                Paste JSON below or drag-and-drop a file. Parsed only in your browser; nothing is
-                uploaded until you save.
-              </p>
-              <textarea
-                v-model="authJsonPaste"
-                rows="5"
-                placeholder='{"auth_mode":"chatgpt","tokens":{"access_token":"eyJ…","refresh_token":"…"}}'
-                class="w-full min-h-[7rem] bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono resize-y"
-              />
-              <p v-if="authJsonPasteErr" class="text-xs text-red-400">{{ authJsonPasteErr }}</p>
-              <div class="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  :disabled="!authJsonPaste.trim()"
-                  @click="parseAuthJsonPaste"
-                  class="px-3 py-1.5 text-xs rounded-md bg-violet-600 hover:bg-violet-500 disabled:opacity-40 transition-colors"
-                >
-                  Parse and fill fields
-                </button>
-              </div>
-            </div>
-            <label class="block">
-              <span class="text-xs text-zinc-400">Access Token</span>
-              <input
-                v-model="credForm.oauth_access_token"
-                placeholder="eyJhbGciOiJSUzI1NiJ9…"
-                class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono"
+                v-model="form.name"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-violet-500"
               />
             </label>
             <label class="block">
-              <span class="text-xs text-zinc-400"
-                >Refresh token (write-only; never shown after save)</span
+              <span class="text-xs text-slate-500">类型 Kind</span>
+              <select
+                v-model="form.kind"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
               >
+                <option value="anthropic">Anthropic</option>
+                <option value="openai-chat">OpenAI Chat (/v1/chat/completions)</option>
+                <option value="openai-responses">OpenAI Responses</option>
+                <option value="gemini-native">Gemini Native</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="text-xs text-slate-500">Base URL</span>
               <input
-                v-model="credForm.oauth_refresh_token"
-                placeholder="Leave empty to keep stored refresh token"
-                type="password"
-                class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono"
+                v-model="form.base_url"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono text-slate-900"
               />
             </label>
-            <p class="text-xs text-zinc-500">
-              Expires:
-              {{
-                credForm.oauth_expires_at
-                  ? new Date(credForm.oauth_expires_at * 1000).toLocaleString()
-                  : "Unknown (paste auth.json to detect)"
-              }}
-            </p>
-          </template>
-
-          <label class="block">
-            <span class="text-xs text-zinc-400">Plan type (optional)</span>
-            <input
-              v-model="credForm.plan_type"
-              placeholder="claude-pro · codex-plus · codex-pro · payg · …"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm"
-            />
-          </label>
-          <label class="block">
-            <span class="text-xs text-zinc-400">Priority</span>
-            <input
-              v-model.number="credForm.priority"
-              type="number"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm"
-            />
-          </label>
-          <label class="block">
-            <span class="text-xs text-zinc-400">Notes</span>
-            <input
-              v-model="credForm.notes"
-              placeholder="optional notes"
-              class="mt-1 w-full bg-zinc-800/50 border border-white/[0.08] rounded-lg px-3 py-2 text-sm"
-            />
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="credForm.enabled" type="checkbox" class="rounded" />
-            Enabled
-          </label>
-        </div>
-        <div class="flex gap-3 mt-6 justify-end">
-          <button
-            @click="showCredForm = false"
-            class="px-4 py-2 text-sm rounded-md bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300 transition-colors"
+            <label class="block">
+              <span class="text-xs text-slate-500"> 默认 auth_ref（无凭证条目时使用） </span>
+              <input
+                v-model="form.auth_ref"
+                placeholder="keyring:my-key  or  env:MY_API_KEY"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono text-slate-900"
+              />
+            </label>
+            <label class="block">
+              <span class="text-xs text-slate-500">优先级（数值越小越优先）</span>
+              <input
+                v-model.number="form.priority"
+                type="number"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+              />
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="form.enabled" type="checkbox" class="rounded" />
+              Enabled
+            </label>
+          </div>
+          <div
+            class="flex gap-3 px-6 py-4 border-t border-vp-border justify-end bg-[color-mix(in_srgb,var(--vp-text)_2%,var(--vp-surface))]"
           >
-            Cancel
-          </button>
-          <button
-            @click="saveCred"
-            class="px-4 py-2 text-sm rounded-md bg-violet-600 hover:bg-violet-500 font-medium transition-colors"
-          >
-            Save
-          </button>
+            <button
+              type="button"
+              class="btn-ghost flex items-center gap-2 !px-3"
+              aria-label="取消"
+              @click="showForm = false"
+            >
+              <VpIcon name="x" size-class="size-4" />
+              <span>取消</span>
+            </button>
+            <button
+              type="button"
+              class="inline-flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors"
+              aria-label="保存上游"
+              @click="save"
+            >
+              <VpIcon name="check" size-class="size-4 text-white" />
+              <span>保存</span>
+            </button>
+          </div>
         </div>
       </div>
-    </div>
-    <!-- Import local modal -->
-    <div
-      v-if="showImport"
-      class="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-      @click.self="showImport = false"
-    >
-      <div class="bg-[#1a1a1f] border border-white/[0.08] rounded-2xl w-full max-w-lg p-6">
-        <h2 class="font-semibold text-lg mb-1">Import from local tools</h2>
-        <p class="text-sm text-zinc-500 mb-5">
-          Detected on your machine. Codex
-          <code class="font-mono text-zinc-400">auth*.json</code> files are read once and OAuth
-          tokens are stored in the gateway database — not referenced at runtime.
-        </p>
+    </Teleport>
 
-        <div v-if="importLoading" class="text-sm text-zinc-500 py-4 text-center">Scanning…</div>
-        <div
-          v-else-if="importError"
-          class="text-sm text-red-400 bg-red-950/50 border border-red-500/20/50 border border-red-500/20 rounded-lg px-4 py-2 mb-4"
-        >
-          {{ importError }}
-        </div>
-        <div
-          v-else-if="localCandidates.length === 0"
-          class="text-sm text-zinc-500 py-4 text-center"
-        >
-          No local tools found. Install Claude Code or Codex CLI first.
-        </div>
-        <div v-else class="space-y-3">
-          <div
-            v-for="c in localCandidates"
-            :key="c.client"
-            class="bg-zinc-800/30 rounded-xl border border-white/[0.06] p-4"
-          >
-            <div class="flex items-start justify-between gap-3 card-lift">
-              <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2">
-                  <span class="font-medium text-white">{{ c.name }}</span>
-                  <span
-                    :class="
-                      c.token_ok
-                        ? 'bg-emerald-900 text-emerald-400'
-                        : 'bg-yellow-900 text-yellow-400'
-                    "
-                    class="text-xs px-1.5 py-0.5 rounded"
-                  >
-                    {{ c.token_ok ? "token ok" : "no token" }}
-                  </span>
-                  <span class="text-xs px-1.5 py-0.5 rounded bg-zinc-700/60 text-zinc-400">{{
-                    c.kind
-                  }}</span>
-                </div>
-                <div class="text-xs text-zinc-500 mt-1 font-mono truncate">{{ c.source_path }}</div>
+    <Teleport to="body">
+      <div
+        v-if="showCredForm"
+        class="vp-modal-backdrop z-[110] overflow-y-auto py-6"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cred-form-title"
+        @click.self="showCredForm = false"
+      >
+        <div class="vp-modal-panel max-w-lg flex flex-col my-auto" @click.stop>
+          <div class="vp-modal-header">
+            <span
+              class="grid size-10 shrink-0 place-items-center rounded-xl bg-violet-100 text-violet-700 ring-1 ring-violet-200"
+              aria-hidden="true"
+            >
+              <VpIcon name="key" size-class="size-5" />
+            </span>
+            <div class="min-w-0 flex-1">
+              <h2 id="cred-form-title" class="font-semibold text-lg text-vp-text">
+                {{ editCred ? "编辑" : "添加" }} 凭证
+              </h2>
+            </div>
+            <button
+              type="button"
+              class="vp-icon-btn shrink-0"
+              aria-label="关闭"
+              title="关闭"
+              @click="showCredForm = false"
+            >
+              <VpIcon name="x" size-class="size-5" />
+            </button>
+          </div>
+          <div class="px-6 py-4 space-y-3 overflow-y-auto max-h-[min(36rem,72vh)]">
+            <label class="block">
+              <span class="text-xs text-slate-500">Label</span>
+              <input
+                v-model="credForm.label"
+                placeholder="e.g. Codex Pro (account 2)"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-violet-500"
+              />
+            </label>
 
-                <!-- Extra credentials (additional accounts) -->
-                <div v-if="(c.extra_credentials?.length ?? 0) > 0" class="mt-2 space-y-1">
-                  <div class="text-xs text-zinc-400 font-medium">
-                    + {{ c.extra_credentials?.length ?? 0 }} extra account{{
-                      (c.extra_credentials?.length ?? 0) > 1 ? "s" : ""
-                    }}
-                    (will be added as credentials):
-                  </div>
-                  <div
-                    v-for="ec in c.extra_credentials ?? []"
-                    :key="ec.source_path"
-                    class="flex items-center gap-2 text-xs text-zinc-500"
-                  >
-                    <span :class="ec.token_ok ? 'text-emerald-400' : 'text-yellow-400'">●</span>
-                    <span class="font-mono truncate">{{ ec.label }}</span>
-                  </div>
-                </div>
-              </div>
-
+            <!-- Auth mode selector -->
+            <div class="flex gap-2">
               <button
-                @click="doImport(c.client)"
-                :disabled="importingClients.has(c.client)"
-                class="shrink-0 px-3 py-1.5 text-sm rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+                @click="credAuthMode = 'apikey'"
+                :class="
+                  credAuthMode === 'apikey'
+                    ? 'bg-violet-600 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                "
+                class="flex-1 py-1.5 text-xs rounded-md transition-colors"
               >
-                {{ importingClients.has(c.client) ? "…" : "Import" }}
+                API Key / auth_ref
+              </button>
+              <button
+                @click="credAuthMode = 'oauth'"
+                :class="
+                  credAuthMode === 'oauth'
+                    ? 'bg-violet-600 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                "
+                class="flex-1 py-1.5 text-xs rounded-md transition-colors"
+              >
+                OAuth（Codex）
               </button>
             </div>
+
+            <!-- API Key mode -->
+            <template v-if="credAuthMode === 'apikey'">
+              <label class="block">
+                <span class="text-xs text-slate-500">Auth ref</span>
+                <input
+                  v-model="credForm.auth_ref"
+                  placeholder="keyring:my-key  or  env:MY_API_KEY  or  literal:sk-…"
+                  class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono text-slate-900"
+                />
+              </label>
+            </template>
+
+            <!-- OAuth mode -->
+            <template v-else>
+              <input
+                ref="authJsonFileInputRef"
+                type="file"
+                accept=".json,application/json"
+                class="sr-only"
+                @change="onAuthJsonFileChange"
+              />
+              <!-- Paste or drop Codex auth*.json (same shape as local import) -->
+              <div
+                class="rounded-lg border border-dashed border-violet-200 p-3 space-y-2 bg-violet-50/80 transition-colors"
+                :class="
+                  authJsonDragActive
+                    ? 'border-violet-500 ring-2 ring-violet-400/50 bg-violet-100'
+                    : 'border-violet-200'
+                "
+                @dragover="onAuthJsonDragOver"
+                @dragleave="onAuthJsonDragLeave"
+                @drop="onAuthJsonDrop"
+              >
+                <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                  <p class="text-xs text-slate-800 font-medium">
+                    导入 Codex <code class="font-mono text-slate-600">auth*.json</code>
+                  </p>
+                  <button
+                    type="button"
+                    class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-white border border-slate-200 hover:bg-slate-50 text-slate-800 transition-colors w-full sm:w-auto"
+                    aria-label="选择 JSON 文件"
+                    title="选择文件"
+                    @click="triggerAuthJsonFilePick"
+                  >
+                    <VpIcon name="folder-input" size-class="size-4" />
+                    <span class="hidden sm:inline">选择文件</span>
+                  </button>
+                </div>
+                <p class="text-[11px] text-slate-600 leading-snug">
+                  Paste JSON below or drag-and-drop a file. Parsed only in your browser; nothing is
+                  uploaded until you save.
+                </p>
+                <textarea
+                  v-model="authJsonPaste"
+                  rows="5"
+                  placeholder='{"auth_mode":"chatgpt","tokens":{"access_token":"eyJ…","refresh_token":"…"}}'
+                  class="w-full min-h-[7rem] bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono text-slate-900 resize-y"
+                />
+                <p v-if="authJsonPasteErr" class="text-xs text-red-600">{{ authJsonPasteErr }}</p>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    :disabled="!authJsonPaste.trim()"
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-40 transition-colors"
+                    aria-label="解析 JSON 并填入字段"
+                    @click="parseAuthJsonPaste"
+                  >
+                    <VpIcon name="zap" size-class="size-4 text-white" />
+                    <span>解析并填入</span>
+                  </button>
+                </div>
+              </div>
+              <label class="block">
+                <span class="text-xs text-slate-500">Access Token</span>
+                <input
+                  v-model="credForm.oauth_access_token"
+                  placeholder="eyJhbGciOiJSUzI1NiJ9…"
+                  class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono text-slate-900"
+                />
+              </label>
+              <label class="block">
+                <span class="text-xs text-slate-500"
+                  >Refresh token (write-only; never shown after save)</span
+                >
+                <input
+                  v-model="credForm.oauth_refresh_token"
+                  placeholder="Leave empty to keep stored refresh token"
+                  type="password"
+                  class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono text-slate-900"
+                />
+              </label>
+              <p class="text-xs text-slate-600">
+                Expires:
+                {{
+                  credForm.oauth_expires_at
+                    ? new Date(credForm.oauth_expires_at * 1000).toLocaleString()
+                    : "Unknown (paste auth.json to detect)"
+                }}
+              </p>
+            </template>
+
+            <label class="block">
+              <span class="text-xs text-slate-500">Plan type (optional)</span>
+              <input
+                v-model="credForm.plan_type"
+                placeholder="claude-pro · codex-plus · codex-pro · payg · …"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+              />
+            </label>
+            <label class="block">
+              <span class="text-xs text-slate-500">Priority</span>
+              <input
+                v-model.number="credForm.priority"
+                type="number"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+              />
+            </label>
+            <label class="block">
+              <span class="text-xs text-slate-500">Notes</span>
+              <input
+                v-model="credForm.notes"
+                placeholder="optional notes"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+              />
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="credForm.enabled" type="checkbox" class="rounded" />
+              Enabled
+            </label>
+          </div>
+          <div
+            class="flex gap-3 px-6 py-4 border-t border-vp-border justify-end bg-[color-mix(in_srgb,var(--vp-text)_2%,var(--vp-surface))]"
+          >
+            <button
+              type="button"
+              class="btn-ghost flex items-center gap-2 !px-3"
+              aria-label="取消"
+              @click="showCredForm = false"
+            >
+              <VpIcon name="x" size-class="size-4" />
+              <span>取消</span>
+            </button>
+            <button
+              type="button"
+              class="inline-flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors"
+              aria-label="保存凭证"
+              @click="saveCred"
+            >
+              <VpIcon name="check" size-class="size-4 text-white" />
+              <span>保存</span>
+            </button>
           </div>
         </div>
+      </div>
+    </Teleport>
+    <Teleport to="body">
+      <div
+        v-if="showImport"
+        class="vp-modal-backdrop z-[110]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="import-local-title"
+        @click.self="showImport = false"
+      >
+        <div class="vp-modal-panel max-w-lg flex flex-col max-h-[90vh]" @click.stop>
+          <div class="vp-modal-header">
+            <span
+              class="grid size-10 shrink-0 place-items-center rounded-xl bg-cyan-100 text-cyan-800 ring-1 ring-cyan-200"
+              aria-hidden="true"
+            >
+              <VpIcon name="download" size-class="size-5" />
+            </span>
+            <div class="min-w-0 flex-1">
+              <h2 id="import-local-title" class="font-semibold text-lg text-vp-text">
+                从本机工具导入
+              </h2>
+              <p class="text-sm text-vp-muted mt-1 leading-relaxed">
+                扫描本机已安装客户端。Codex 的
+                <code
+                  class="font-mono text-slate-700 bg-slate-100 px-1 rounded border border-slate-200 text-xs"
+                  >auth*.json</code
+                >
+                仅读取一次，OAuth 写入网关数据库。
+              </p>
+            </div>
+            <button
+              type="button"
+              class="vp-icon-btn shrink-0"
+              aria-label="关闭"
+              title="关闭"
+              @click="showImport = false"
+            >
+              <VpIcon name="x" size-class="size-5" />
+            </button>
+          </div>
+          <div class="px-6 py-4 overflow-y-auto flex-1 min-h-0">
+            <div
+              v-if="importLoading"
+              class="text-sm text-slate-600 py-4 text-center flex items-center justify-center gap-2"
+            >
+              <VpIcon name="loader-2" size-class="size-4 animate-spin" />
+              扫描中…
+            </div>
+            <div
+              v-else-if="importError"
+              class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-2 mb-4"
+            >
+              {{ importError }}
+            </div>
+            <div
+              v-else-if="localCandidates.length === 0"
+              class="text-sm text-slate-600 py-4 text-center"
+            >
+              未发现本地工具。请先安装 Claude Code 或 Codex CLI。
+            </div>
+            <div v-else class="space-y-3">
+              <div
+                v-for="c in localCandidates"
+                :key="c.client"
+                class="bg-slate-50 rounded-xl border border-slate-200 p-4"
+              >
+                <div class="flex items-start justify-between gap-3 card-lift">
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="font-medium text-slate-900">{{ c.name }}</span>
+                      <span
+                        :class="
+                          c.token_ok
+                            ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                            : 'bg-amber-50 text-amber-900 border border-amber-200'
+                        "
+                        class="text-xs px-1.5 py-0.5 rounded"
+                      >
+                        {{ c.token_ok ? "令牌可用" : "无令牌" }}
+                      </span>
+                      <span
+                        class="text-xs px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-600"
+                        >{{ c.kind }}</span
+                      >
+                    </div>
+                    <div class="text-xs text-slate-600 mt-1 font-mono truncate">
+                      {{ c.source_path }}
+                    </div>
 
-        <div class="flex justify-end mt-5">
-          <button
-            @click="showImport = false"
-            class="px-4 py-2 text-sm rounded-md bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300 transition-colors"
+                    <!-- Extra credentials (additional accounts) -->
+                    <div v-if="(c.extra_credentials?.length ?? 0) > 0" class="mt-2 space-y-1">
+                      <div class="text-xs text-slate-600 font-medium">
+                        另有 {{ c.extra_credentials?.length ?? 0 }} 个账号将添加为凭证：
+                      </div>
+                      <div
+                        v-for="ec in c.extra_credentials ?? []"
+                        :key="ec.source_path"
+                        class="flex items-center gap-2 text-xs text-slate-600"
+                      >
+                        <span :class="ec.token_ok ? 'text-emerald-600' : 'text-amber-600'">●</span>
+                        <span class="font-mono truncate">{{ ec.label }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    class="shrink-0 inline-flex items-center justify-center rounded-lg bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-50 disabled:cursor-not-allowed p-2.5 sm:px-3 sm:py-1.5 transition-colors"
+                    :disabled="importingClients.has(c.client)"
+                    :aria-label="`导入 ${c.name}`"
+                    :title="importingClients.has(c.client) ? '导入中' : '导入'"
+                    @click="doImport(c.client)"
+                  >
+                    <VpIcon
+                      v-if="importingClients.has(c.client)"
+                      name="loader-2"
+                      size-class="size-5 text-white animate-spin"
+                    />
+                    <VpIcon v-else name="folder-input" size-class="size-5 text-white" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div
+            class="flex justify-end gap-2 px-6 py-4 border-t border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2%,var(--vp-surface))]"
           >
-            Close
-          </button>
+            <button
+              type="button"
+              class="btn-ghost flex items-center gap-2 !px-3"
+              aria-label="关闭"
+              @click="showImport = false"
+            >
+              <VpIcon name="x" size-class="size-4" />
+              <span>关闭</span>
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>

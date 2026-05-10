@@ -25,7 +25,8 @@ export const CLIENT_TOOLS: readonly ClientToolInfo[] = [
     icon: "🤖",
     pathPrefix: "/codex/v1",
     consumesKinds: ["openai-responses"],
-    setupHint: "CLI 的 base URL 指向 …/codex/v1（WebSocket /responses 为主）。",
+    /** 优先路径：OAuth 走网关密钥池，CLI 只连本机 */
+    setupHint: "Codex：网关前缀 `/codex/v1`（OAuth/密钥池）；CLI 指向本机端口即可。",
   },
   {
     id: "claude-code",
@@ -35,7 +36,7 @@ export const CLIENT_TOOLS: readonly ClientToolInfo[] = [
     /** 与 `vibe takeover claude` 一致：BASE_URL 指向 /claude（SDK 再请求 /v1/messages） */
     pathPrefix: "/claude",
     consumesKinds: ["anthropic"],
-    setupHint: "ANTHROPIC_BASE_URL → …/claude（与 takeover 写入一致）。",
+    setupHint: "Claude：`ANTHROPIC_BASE_URL` → `…/claude`（与 takeover 一致）。",
   },
   {
     id: "opencode",
@@ -44,9 +45,21 @@ export const CLIENT_TOOLS: readonly ClientToolInfo[] = [
     icon: "📦",
     pathPrefix: "/opencode/v1",
     consumesKinds: ["openai-chat", "openai-responses"],
-    setupHint: "provider baseURL → …/opencode/v1；Chat 与 Responses 可能各走一类供应商。",
+    setupHint: "OpenCode：`baseURL` → `…/opencode/v1`。",
   },
 ];
+
+/** 供无障碍文案与路由说明使用（与 `CLIENT_TOOLS` 中 codex 项一致）。 */
+export function getCodexClientTool(): ClientToolInfo {
+  const tool = CLIENT_TOOLS.find((x) => x.id === "codex");
+  if (!tool) throw new Error("CLIENT_TOOLS 缺少 codex 项");
+  return tool;
+}
+
+/** 上游 kind 可被 Codex CLI 使用的网关路径前缀（如 `/codex/v1`）路由到。 */
+export function providerServesCodexCliRoute(p: Provider): boolean {
+  return getCodexClientTool().consumesKinds.includes(p.kind);
+}
 
 export function defaultProxyOrigin(port: number = PORT): string {
   return `http://127.0.0.1:${port}`;

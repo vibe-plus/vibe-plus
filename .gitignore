@@ -32,3 +32,6 @@ target/
 
 # Vibe runtime
 .vibe-local/
+
+# QA screenshots from local browser runs
+apps/website/qa-screenshots/

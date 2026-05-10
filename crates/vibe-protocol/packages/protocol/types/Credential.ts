@@ -57,4 +57,16 @@ export type Credential = {
    * Stable hash for duplicate-import detection (`fp:…`).
    */
   auth_fingerprint: string | null;
+  /**
+   * From OAuth access JWT when decodable (OpenAI ChatGPT shape, same claims as Codex `parse_chatgpt_jwt_claims`).
+   */
+  oauth_account_email: string | null;
+  /**
+   * JWT `sub` or ChatGPT user id when present.
+   */
+  oauth_account_subject: string | null;
+  /**
+   * Raw `chatgpt_plan_type` from `https://api.openai.com/auth` in the JWT (e.g. plus, pro); optional UI hint only.
+   */
+  oauth_chatgpt_plan_slug: string | null;
 };

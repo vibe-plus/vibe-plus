@@ -142,6 +142,44 @@ export interface ProviderHealthSummary {
   rolling: ProviderStat | null;
 }
 
+export interface CredentialPoolStatus {
+  credential_id: string;
+  label: string;
+  enabled: boolean;
+  auth_mode: string;
+  circuit_state: string;
+  circuit_open: boolean;
+  consecutive_failures: number;
+  is_rate_limited: boolean;
+  rl_requests_remaining: number | null;
+  rl_requests_reset_at: number | null;
+  rl_tokens_remaining: number | null;
+  rl_tokens_reset_at: number | null;
+  oauth_expires_at: number | null;
+  last_error: string | null;
+  last_used_at: number | null;
+  rolling_requests: number;
+  rolling_successes: number;
+  rolling_failures: number;
+  rolling_avg_latency_ms: number | null;
+}
+
+export interface ProviderAuthPoolSummary {
+  provider_id: string;
+  provider_name: string;
+  kind: ProviderKind;
+  rolling_hours: number;
+  total_credentials: number;
+  enabled_credentials: number;
+  available_credentials: number;
+  rate_limited_credentials: number;
+  open_circuit_credentials: number;
+  provider_circuit_state: string;
+  provider_circuit_open: boolean;
+  provider_last_error: string | null;
+  credentials: CredentialPoolStatus[];
+}
+
 /**
  * Shape returned by `GET /_vp/providers/:id/health` on current gateways.
  * Older binaries returned a flat ProviderHealth without `cumulative` — reject those responses.
@@ -260,6 +298,11 @@ export interface Credential {
   updated_at: number;
   /** Stable hash for duplicate-import detection (`fp:…`). */
   auth_fingerprint?: string | null;
+  /** 从 OAuth access JWT 解析（与 Codex `parse_chatgpt_jwt_claims` 同命名空间）；无令牌或不可解码时为 null。 */
+  oauth_account_email?: string | null;
+  oauth_account_subject?: string | null;
+  /** JWT `https://api.openai.com/auth.chatgpt_plan_type` 原文（如 plus、pro）；仅作次要展示。 */
+  oauth_chatgpt_plan_slug?: string | null;
 }
 
 export interface CredentialInput {
@@ -274,6 +317,10 @@ export interface CredentialInput {
   /** OAuth: refresh token (write-only; never returned by server). */
   oauth_refresh_token: string | null;
   oauth_expires_at: number | null;
+  /** Codex `id_token` 导入时解析并入库；服务端合并进 Credential 展示字段。 */
+  oauth_cached_email?: string | null;
+  oauth_cached_subject?: string | null;
+  oauth_cached_plan_slug?: string | null;
 }
 
 export interface ExtraCredential {
@@ -315,6 +362,9 @@ export const api = {
     delete: (id: string) => req<void>(`/_vp/providers/${id}`, { method: "DELETE" }),
     health: (id: string, hours = 24) =>
       req<ProviderHealthSummary>(`/_vp/providers/${id}/health?hours=${hours}`),
+    pool: (id: string, hours = 24) =>
+      req<ProviderAuthPoolSummary>(`/_vp/providers/${id}/pool?hours=${hours}`),
+    pools: (hours = 24) => req<ProviderAuthPoolSummary[]>(`/_vp/pools?hours=${hours}`),
     resetCircuit: (id: string) =>
       req<ProviderHealth>(`/_vp/providers/${id}/circuit/reset`, { method: "POST" }),
     scanLocal: () => req<LocalCandidate[]>("/_vp/providers/import-local"),

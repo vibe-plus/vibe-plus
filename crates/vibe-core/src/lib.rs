@@ -20,6 +20,7 @@ pub mod providers;
 pub mod router;
 pub mod local_import;
 pub mod model_defaults;
+pub mod oauth_identity;
 pub mod secrets;
 pub mod server;
 pub mod state;

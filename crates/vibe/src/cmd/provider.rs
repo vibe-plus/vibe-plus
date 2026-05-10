@@ -33,16 +33,40 @@ fn list(db: &Db) -> Result<()> {
         println!("No providers configured. Run `vibe provider add` to add one.");
         return Ok(());
     }
-    println!("{:<36}  {:<20}  {:<14}  {:>5}  {}", "ID", "Name", "Kind", "Prio", "Enabled");
-    println!("{}", "-".repeat(90));
+    println!(
+        "{:<36}  {:<20}  {:<14}  {:>5}  {:<7}  {:>5}  {:>5}  {:>5}",
+        "ID", "Name", "Kind", "Prio", "Enabled", "Creds", "Avail", "RL"
+    );
+    println!("{}", "-".repeat(118));
     for p in &providers {
+        let creds = db.credential_list_for_provider(&p.id).unwrap_or_default();
+        let total_creds = creds.len() as i64;
+        let enabled_creds = creds.iter().filter(|c| c.enabled).count() as i64;
+        let now = chrono::Utc::now().timestamp();
+        let rate_limited = creds
+            .iter()
+            .filter(|c| {
+                let req_exhausted = c.rl_requests_remaining == Some(0)
+                    && c.rl_requests_reset_at.map(|t| t > now).unwrap_or(false);
+                let tok_exhausted = c.rl_tokens_remaining == Some(0)
+                    && c.rl_tokens_reset_at.map(|t| t > now).unwrap_or(false);
+                req_exhausted || tok_exhausted
+            })
+            .count() as i64;
+        let available = (enabled_creds - rate_limited).max(0);
         println!(
-            "{:<36}  {:<20}  {:<14}  {:>5}  {}",
+            "{:<36}  {:<20}  {:<14}  {:>5}  {:<7}  {:>5}  {:>5}  {:>5}",
             p.id, p.name,
             format!("{:?}", p.kind),
             p.priority,
-            if p.enabled { "yes" } else { "no" }
+            if p.enabled { "yes" } else { "no" },
+            total_creds,
+            available,
+            rate_limited,
         );
+        if let Some(err) = creds.iter().find_map(|c| c.last_error.as_deref()) {
+            println!("  ↳ last credential error: {err}");
+        }
     }
     Ok(())
 }

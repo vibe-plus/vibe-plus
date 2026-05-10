@@ -1,7 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, onBeforeUnmount } from "vue";
+import { ref, computed, onMounted, watch, onBeforeUnmount } from "vue";
+import { useRoute } from "vue-router";
 import { api, type RequestLog, type LogPage, type Provider } from "../api/client.ts";
 import { useWs } from "../composables/useProxy.ts";
+import VpIcon from "../components/vp-icon.vue";
+import { resolvePageAccent } from "../utils/page-accent.ts";
+
+const route = useRoute();
+const pa = computed(() => resolvePageAccent(route.name));
 
 const page = ref<LogPage | null>(null);
 const loading = ref(true);
@@ -52,10 +58,10 @@ useWs((ev: unknown) => {
 });
 
 function statusColor(code: number | null) {
-  if (!code) return "text-zinc-500";
-  if (code < 300) return "text-emerald-400";
-  if (code < 500) return "text-amber-400";
-  return "text-red-400";
+  if (!code) return "text-slate-500";
+  if (code < 300) return "text-emerald-600";
+  if (code < 500) return "text-amber-600";
+  return "text-red-600";
 }
 
 function credShort(id: string | null | undefined) {
@@ -161,16 +167,17 @@ onBeforeUnmount(() => {
   <div>
     <div class="flex flex-wrap items-start sm:items-center justify-between gap-4 mb-6">
       <div>
-        <h1 class="text-3xl font-bold text-white tracking-tight">Request logs</h1>
-        <p class="text-sm text-zinc-500 mt-1.5 max-w-2xl leading-relaxed">
-          Gateway request history. Select a row to inspect request/response bodies.
+        <span :class="['text-xs uppercase', pa.kicker]">审计</span>
+        <h1 :class="['text-3xl font-bold tracking-tight', pa.heading]">请求日志</h1>
+        <p class="text-sm text-vp-muted mt-1.5 max-w-2xl leading-relaxed">
+          网关请求历史。点击行可查看请求体 / 上游响应 / 发往客户端的 Codex 帧。
         </p>
       </div>
-      <label class="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer select-none">
+      <label class="flex items-center gap-2 text-sm text-vp-muted cursor-pointer select-none">
         <input
           v-model="live"
           type="checkbox"
-          class="rounded border-zinc-600 bg-zinc-800 text-violet-600 focus:ring-violet-500/30"
+          class="rounded border-slate-300 bg-white text-violet-600 focus:ring-violet-500/30"
         />
         <span>Live</span>
         <span
@@ -182,27 +189,18 @@ onBeforeUnmount(() => {
 
     <!-- Filters -->
     <div class="flex flex-wrap items-center gap-3 mb-5">
-      <select
-        v-model="filterStatus"
-        class="bg-zinc-800/80 border border-white/[0.08] rounded-xl px-3.5 py-2 text-sm text-zinc-200 focus:outline-none focus:border-violet-500/40 focus:ring-1 focus:ring-violet-500/20 transition-all"
-      >
+      <select v-model="filterStatus" class="input-base rounded-xl min-w-0">
         <option value="all">All status</option>
         <option value="ok">OK only</option>
         <option value="error">Errors only</option>
       </select>
 
-      <select
-        v-model="filterProvider"
-        class="bg-zinc-800/80 border border-white/[0.08] rounded-xl px-3.5 py-2 text-sm text-zinc-200 focus:outline-none focus:border-violet-500/40 focus:ring-1 focus:ring-violet-500/20 transition-all min-w-[160px]"
-      >
+      <select v-model="filterProvider" class="input-base rounded-xl min-w-[160px]">
         <option value="">All providers</option>
         <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
       </select>
 
-      <select
-        v-model="filterHours"
-        class="bg-zinc-800/80 border border-white/[0.08] rounded-xl px-3.5 py-2 text-sm text-zinc-200 focus:outline-none focus:border-violet-500/40 focus:ring-1 focus:ring-violet-500/20 transition-all"
-      >
+      <select v-model="filterHours" class="input-base rounded-xl min-w-0">
         <option value="">All time</option>
         <option :value="1">Last 1 hour</option>
         <option :value="5">Last 5 hours</option>
@@ -210,13 +208,22 @@ onBeforeUnmount(() => {
         <option :value="168">Last 7 days</option>
       </select>
 
-      <span
-        v-if="loading"
-        class="text-xs text-zinc-600 font-mono flex items-center gap-1.5 ml-auto"
-      >
-        <span class="size-1.5 rounded-full bg-zinc-600 live-dot" />
-        Loading…
-      </span>
+      <div class="flex items-center gap-2 ml-auto shrink-0">
+        <span v-if="loading" class="text-xs text-vp-muted font-mono flex items-center gap-1.5">
+          <span class="size-1.5 rounded-full bg-slate-400 live-dot" />
+          加载中…
+        </span>
+        <button
+          type="button"
+          class="vp-icon-btn"
+          :disabled="loading"
+          aria-label="刷新日志列表"
+          title="刷新"
+          @click="load()"
+        >
+          <VpIcon name="refresh-cw" size-class="size-5" :spin="loading" />
+        </button>
+      </div>
     </div>
 
     <!-- Logs table -->
@@ -224,7 +231,9 @@ onBeforeUnmount(() => {
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
-            <tr class="text-left text-xs text-zinc-500 border-b border-white/[0.04]">
+            <tr
+              class="text-left text-xs text-vp-muted border-b border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2.5%,var(--vp-surface))]"
+            >
               <th class="px-4 py-3 font-medium w-12">Status</th>
               <th class="px-3 py-3 text-right font-medium w-20">Latency</th>
               <th class="px-3 py-3 text-right font-medium w-20">TTFB</th>
@@ -237,20 +246,20 @@ onBeforeUnmount(() => {
           </thead>
           <tbody v-if="!page?.items.length" class="text-center">
             <tr>
-              <td colspan="8" class="px-4 py-16 text-sm text-zinc-600">
+              <td colspan="8" class="px-4 py-16 text-sm text-vp-muted">
                 <div v-if="loading" class="flex items-center justify-center gap-2">
-                  <span class="size-1.5 rounded-full bg-zinc-600 live-dot" />
-                  Loading…
+                  <span class="size-1.5 rounded-full bg-slate-400 live-dot" />
+                  加载中…
                 </div>
-                <div v-else>No logs match these filters</div>
+                <div v-else>没有符合筛选条件的日志</div>
               </td>
             </tr>
           </tbody>
-          <tbody v-else class="divide-y divide-white/[0.04]">
+          <tbody v-else class="divide-y divide-vp-border">
             <tr
               v-for="log in page.items"
               :key="log.id"
-              class="hover:bg-white/[0.02] transition-colors cursor-pointer"
+              class="hover:bg-[color-mix(in_srgb,var(--vp-text)_4%,var(--vp-surface))] transition-colors cursor-pointer"
               @click="openDetail(log)"
             >
               <td class="px-4 py-2.5 whitespace-nowrap">
@@ -258,31 +267,31 @@ onBeforeUnmount(() => {
                   <span :class="statusColor(log.status_code)" class="font-semibold tabular-nums">{{
                     log.status_code ?? "?"
                   }}</span>
-                  <span v-if="log.error" class="text-red-400" :title="log.error">⚠</span>
+                  <span v-if="log.error" class="text-red-600" :title="log.error">⚠</span>
                 </div>
               </td>
-              <td class="px-3 py-2.5 text-zinc-400 whitespace-nowrap text-right tabular-nums">
+              <td class="px-3 py-2.5 text-vp-muted whitespace-nowrap text-right tabular-nums">
                 {{ log.latency_ms != null ? `${log.latency_ms}ms` : "—" }}
               </td>
-              <td class="px-3 py-2.5 text-zinc-500 whitespace-nowrap text-right tabular-nums">
+              <td class="px-3 py-2.5 text-vp-muted whitespace-nowrap text-right tabular-nums">
                 {{ log.first_token_ms != null ? `${log.first_token_ms}ms` : "—" }}
               </td>
-              <td class="px-3 py-2.5 text-zinc-200 max-w-xs truncate font-mono">
+              <td class="px-3 py-2.5 text-vp-text max-w-xs truncate font-mono">
                 {{ log.requested_model ?? "—" }}
               </td>
               <td
-                class="px-3 py-2.5 text-zinc-400 max-w-[14rem] truncate"
+                class="px-3 py-2.5 text-vp-muted max-w-[14rem] truncate"
                 :title="log.provider_id ?? ''"
               >
                 {{ providerLabel(log.provider_id) }}
               </td>
-              <td class="px-3 py-2.5 text-right text-zinc-500 tabular-nums">
+              <td class="px-3 py-2.5 text-right text-vp-muted tabular-nums">
                 {{ log.input_tokens.toLocaleString() }}
               </td>
-              <td class="px-3 py-2.5 text-right text-zinc-500 tabular-nums">
+              <td class="px-3 py-2.5 text-right text-vp-muted tabular-nums">
                 {{ log.output_tokens.toLocaleString() }}
               </td>
-              <td class="px-3 py-2.5 text-right text-zinc-600 tabular-nums">
+              <td class="px-3 py-2.5 text-right text-vp-muted tabular-nums">
                 {{ log.cache_read_tokens > 0 ? log.cache_read_tokens.toLocaleString() : "—" }}
               </td>
             </tr>
@@ -291,9 +300,9 @@ onBeforeUnmount(() => {
       </div>
       <div
         v-if="page"
-        class="px-5 py-3 text-xs text-zinc-600 border-t border-white/[0.04] bg-white/[0.01]"
+        class="px-5 py-3 text-xs text-vp-muted border-t border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2.5%,var(--vp-surface))]"
       >
-        Showing {{ page.items.length }} of {{ page.total }} requests
+        显示 {{ page.items.length }} / 共 {{ page.total }} 条
       </div>
     </div>
 
@@ -301,39 +310,55 @@ onBeforeUnmount(() => {
     <Teleport to="body">
       <div
         v-if="detailOpen"
-        class="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-sm"
+        class="vp-modal-backdrop"
         role="dialog"
         aria-modal="true"
+        aria-labelledby="logs-detail-title"
         @click.self="closeDetail"
       >
-        <div
-          class="bg-[#1a1a1f] border border-white/[0.1] rounded-2xl w-full max-w-4xl max-h-[88vh] flex flex-col shadow-2xl shadow-black/50 overflow-hidden"
-          @click.stop
-        >
-          <div
-            class="flex flex-wrap items-start gap-3 px-5 py-4 border-b border-white/[0.06] shrink-0 bg-white/[0.02]"
-          >
+        <div class="vp-modal-panel max-w-4xl max-h-[88vh]" @click.stop>
+          <div class="vp-modal-header">
+            <span
+              class="grid size-10 shrink-0 place-items-center rounded-xl bg-violet-100 text-violet-800 ring-1 ring-violet-200"
+              aria-hidden="true"
+            >
+              <VpIcon name="file-text" size-class="size-5" />
+            </span>
             <div class="min-w-0 flex-1">
-              <h2 class="text-lg font-medium text-white">Request / Response / Client</h2>
-              <p v-if="detailLog" class="text-xs text-zinc-500 truncate font-mono mt-0.5">
+              <h2 id="logs-detail-title" class="text-lg font-medium text-vp-text">
+                请求 / 响应 / 客户端
+              </h2>
+              <p v-if="detailLog" class="text-xs text-vp-muted truncate font-mono mt-0.5">
                 {{ detailLog.id }}
               </p>
             </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <button type="button" class="btn-ghost text-xs" @click="copyCurrentBody">
-                Copy tab
+            <div class="flex items-center gap-1">
+              <button
+                type="button"
+                class="vp-icon-btn border border-vp-border/70"
+                aria-label="复制当前标签页正文"
+                title="复制当前标签页"
+                @click="copyCurrentBody"
+              >
+                <VpIcon name="copy" size-class="size-5" />
               </button>
-              <button type="button" class="btn-ghost text-xs text-zinc-400" @click="closeDetail">
-                <span class="text-lg leading-none">✕</span>
+              <button
+                type="button"
+                class="vp-icon-btn border border-vp-border/70"
+                aria-label="关闭详情"
+                title="关闭"
+                @click="closeDetail"
+              >
+                <VpIcon name="x" size-class="size-5" />
               </button>
             </div>
           </div>
 
-          <div class="flex border-b border-white/[0.06] shrink-0 text-sm">
+          <div class="flex border-b border-vp-border shrink-0 text-sm">
             <button
               type="button"
               class="px-5 py-2.5 font-medium transition-colors relative"
-              :class="detailTab === 'request' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'"
+              :class="detailTab === 'request' ? 'text-vp-text' : 'text-vp-muted hover:text-vp-text'"
               @click="detailTab = 'request'"
             >
               发往网关的请求
@@ -345,7 +370,9 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="px-5 py-2.5 font-medium transition-colors relative"
-              :class="detailTab === 'response' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'"
+              :class="
+                detailTab === 'response' ? 'text-vp-text' : 'text-vp-muted hover:text-vp-text'
+              "
               @click="detailTab = 'response'"
             >
               上游原始响应
@@ -357,10 +384,10 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="px-5 py-2.5 font-medium transition-colors relative"
-              :class="detailTab === 'client' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'"
+              :class="detailTab === 'client' ? 'text-vp-text' : 'text-vp-muted hover:text-vp-text'"
               @click="detailTab = 'client'"
             >
-              发往客户端（R）
+              发往客户端（Codex WS）
               <span
                 v-if="detailTab === 'client'"
                 class="absolute bottom-0 left-4 right-4 h-0.5 bg-gradient-to-r from-violet-500 to-cyan-400 rounded-full"
@@ -368,15 +395,17 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div class="flex-1 min-h-0 overflow-auto p-5 bg-[#09090b]">
-            <div v-if="detailLoading" class="text-zinc-500 text-sm flex items-center gap-2">
-              <span class="size-1.5 rounded-full bg-zinc-600 live-dot" />
-              Loading…
+          <div
+            class="flex-1 min-h-0 overflow-auto p-4 sm:p-5 border-t border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_5%,var(--vp-surface))]"
+          >
+            <div v-if="detailLoading" class="text-vp-muted text-sm flex items-center gap-2">
+              <span class="size-1.5 rounded-full bg-vp-muted/80 live-dot" />
+              加载中…
             </div>
-            <div v-else-if="detailError" class="text-red-400 text-sm">{{ detailError }}</div>
+            <div v-else-if="detailError" class="text-red-600 text-sm">{{ detailError }}</div>
             <pre
               v-else-if="detailLog"
-              class="text-[11px] sm:text-xs leading-relaxed text-zinc-300 whitespace-pre-wrap break-words font-mono"
+              class="rounded-xl border border-vp-border bg-vp-surface px-3 py-3 sm:px-4 sm:py-3.5 text-[11px] sm:text-xs leading-relaxed text-vp-text whitespace-pre-wrap break-words font-mono shadow-inner"
               >{{ prettyRaw(detailTab, detailLog) }}</pre
             >
           </div>

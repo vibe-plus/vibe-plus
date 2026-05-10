@@ -37,7 +37,7 @@ export type RequestLog = {
    */
   upstream_http_status: number | null;
   /**
-   * First ~512 chars of upstream JSON/text error body (when available).
+   * Upstream JSON/text error body（4xx 等场景尽量全量 UTF-8 有损存储）。
    */
   upstream_error_preview: string | null;
   /**
@@ -45,11 +45,11 @@ export type RequestLog = {
    */
   dedupe_key: string | null;
   /**
-   * Truncated inbound HTTP body (gateway view), for log detail UI.
+   * Inbound HTTP body（网关视角，UTF-8 有损全量）。
    */
   request_body: string | null;
   /**
-   * Truncated upstream response body (non-streaming or buffered stream), for log detail UI.
+   * Upstream response body（非流式或本地缓冲的流式原始字节转为字符串，不全量截断）。
    */
   response_body: string | null;
   /**

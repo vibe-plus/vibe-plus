@@ -5,6 +5,8 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use vibe_protocol::CredentialInput;
 
+use crate::auth_fingerprint::chatgpt_oauth_hints_from_access_token;
+
 /// Tokens extracted from a single `auth.json` body (file read happens only in import code).
 #[derive(Debug, Clone)]
 pub struct CodexAuthImportTokens {
@@ -13,6 +15,24 @@ pub struct CodexAuthImportTokens {
     pub oauth_expires_at: Option<i64>,
     /// OpenAI API key style (`auth_mode` apikey / legacy); no OAuth refresh.
     pub is_api_key_mode: bool,
+    /// From `tokens.id_token` JWT (Codex puts email/plan here; access_token may omit them).
+    pub oauth_cached_email: Option<String>,
+    pub oauth_cached_subject: Option<String>,
+    pub oauth_cached_plan_slug: Option<String>,
+}
+
+fn merge_hints_from_id_token_json(v: &Value, out: &mut CodexAuthImportTokens) {
+    let Some(id) = v
+        .pointer("/tokens/id_token")
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let h = chatgpt_oauth_hints_from_access_token(id);
+    out.oauth_cached_email = h.email;
+    out.oauth_cached_subject = h.subject.or(h.chatgpt_user_id);
+    out.oauth_cached_plan_slug = h.chatgpt_plan_slug;
 }
 
 fn oauth_triple_from_json(v: &Value) -> Option<(String, Option<String>, Option<i64>)> {
@@ -43,12 +63,17 @@ pub fn parse_codex_auth_json(content: &str) -> Result<CodexAuthImportTokens> {
             let (access, refresh, exp) = oauth_triple_from_json(&v).with_context(|| {
                 "chatgpt mode requires non-empty tokens.access_token"
             })?;
-            Ok(CodexAuthImportTokens {
+            let mut t = CodexAuthImportTokens {
                 oauth_access_token: access,
                 oauth_refresh_token: refresh,
                 oauth_expires_at: exp,
                 is_api_key_mode: false,
-            })
+                oauth_cached_email: None,
+                oauth_cached_subject: None,
+                oauth_cached_plan_slug: None,
+            };
+            merge_hints_from_id_token_json(&v, &mut t);
+            Ok(t)
         }
         "apikey" | "" => {
             if let Some(key) = v.get("OPENAI_API_KEY").and_then(|k| k.as_str()) {
@@ -58,16 +83,24 @@ pub fn parse_codex_auth_json(content: &str) -> Result<CodexAuthImportTokens> {
                         oauth_refresh_token: None,
                         oauth_expires_at: None,
                         is_api_key_mode: true,
+                        oauth_cached_email: None,
+                        oauth_cached_subject: None,
+                        oauth_cached_plan_slug: None,
                     });
                 }
             }
             if let Some((access, refresh, exp)) = oauth_triple_from_json(&v) {
-                return Ok(CodexAuthImportTokens {
+                let mut t = CodexAuthImportTokens {
                     oauth_access_token: access,
                     oauth_refresh_token: refresh,
                     oauth_expires_at: exp,
                     is_api_key_mode: false,
-                });
+                    oauth_cached_email: None,
+                    oauth_cached_subject: None,
+                    oauth_cached_plan_slug: None,
+                };
+                merge_hints_from_id_token_json(&v, &mut t);
+                return Ok(t);
             }
             bail!(
                 "no usable token: need OPENAI_API_KEY or tokens.access_token (path imported once into DB)"
@@ -86,19 +119,25 @@ pub fn credential_input_from_codex_tokens(
     CredentialInput {
         label,
         auth_ref: None,
-        plan_type: Some("codex-pro".into()),
+        // Plan / 档位由上游 JWT 与 wham/usage 快照体现；不在导入时写死 codex-pro，避免 UI 误显为「套餐名」。
+        plan_type: None,
         notes: Some(notes),
         enabled: true,
         priority,
         oauth_access_token: Some(tokens.oauth_access_token),
         oauth_refresh_token: tokens.oauth_refresh_token,
         oauth_expires_at: tokens.oauth_expires_at,
+        oauth_cached_email: tokens.oauth_cached_email,
+        oauth_cached_subject: tokens.oauth_cached_subject,
+        oauth_cached_plan_slug: tokens.oauth_cached_plan_slug,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
 
     #[test]
     fn apikey_mode() {
@@ -123,6 +162,22 @@ mod tests {
         let t = parse_codex_auth_json(r#"{"OPENAI_API_KEY":"sk-legacy"}"#).unwrap();
         assert!(t.is_api_key_mode);
         assert_eq!(t.oauth_access_token, "sk-legacy");
+    }
+
+    #[test]
+    fn chatgpt_id_token_fills_cached_identity_when_access_is_opaque() {
+        let header = r#"{"alg":"none","typ":"JWT"}"#;
+        let payload = r#"{"sub":"sid-99","email":"me@test.dev","https://api.openai.com/auth":{"chatgpt_plan_type":"business","chatgpt_user_id":"cu1"}}"#;
+        let h = URL_SAFE_NO_PAD.encode(header.as_bytes());
+        let p = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        let id_jwt = format!("{h}.{p}.sig");
+        let body = format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"opaque-no-jwt-claims","refresh_token":"rt","id_token":"{id_jwt}"}}}}"#
+        );
+        let t = parse_codex_auth_json(&body).unwrap();
+        assert_eq!(t.oauth_cached_email.as_deref(), Some("me@test.dev"));
+        assert_eq!(t.oauth_cached_subject.as_deref(), Some("sid-99"));
+        assert_eq!(t.oauth_cached_plan_slug.as_deref(), Some("business"));
     }
 
     #[test]

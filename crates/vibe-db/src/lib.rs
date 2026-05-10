@@ -52,6 +52,7 @@ impl Db {
             M::up(include_str!("../migrations/006_plan_fingerprint.sql")),
             M::up(include_str!("../migrations/007_request_log_bodies.sql")),
             M::up(include_str!("../migrations/008_client_response_body.sql")),
+            M::up(include_str!("../migrations/009_oauth_identity_cache.sql")),
         ])
     }
 

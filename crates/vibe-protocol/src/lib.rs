@@ -227,6 +227,52 @@ pub struct ProviderHealthSummary {
     pub rolling: Option<ProviderStat>,
 }
 
+/// Runtime auth/key-pool status for one credential in a provider pool.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/CredentialPoolStatus.ts")]
+pub struct CredentialPoolStatus {
+    pub credential_id: String,
+    pub label: String,
+    pub enabled: bool,
+    /// "oauth" or "auth_ref"
+    pub auth_mode: String,
+    pub circuit_state: String,
+    pub circuit_open: bool,
+    pub consecutive_failures: i32,
+    pub is_rate_limited: bool,
+    pub rl_requests_remaining: Option<i64>,
+    pub rl_requests_reset_at: Option<i64>,
+    pub rl_tokens_remaining: Option<i64>,
+    pub rl_tokens_reset_at: Option<i64>,
+    pub oauth_expires_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub last_used_at: Option<i64>,
+    /// Rolling-window usage on this credential (hours from ProviderAuthPoolSummary.rolling_hours).
+    pub rolling_requests: i64,
+    pub rolling_successes: i64,
+    pub rolling_failures: i64,
+    pub rolling_avg_latency_ms: Option<i64>,
+}
+
+/// Unified auth/key-pool observability view for one provider.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/ProviderAuthPoolSummary.ts")]
+pub struct ProviderAuthPoolSummary {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub kind: ProviderKind,
+    pub rolling_hours: i64,
+    pub total_credentials: i64,
+    pub enabled_credentials: i64,
+    pub available_credentials: i64,
+    pub rate_limited_credentials: i64,
+    pub open_circuit_credentials: i64,
+    pub provider_circuit_state: String,
+    pub provider_circuit_open: bool,
+    pub provider_last_error: Option<String>,
+    pub credentials: Vec<CredentialPoolStatus>,
+}
+
 /// Latest Codex ChatGPT Plan snapshot parsed from `x-codex-*` response headers.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/CredentialPlanSnapshot.ts")]
@@ -362,6 +408,15 @@ pub struct Credential {
     /// Stable hash for duplicate-import detection (`fp:…`).
     #[serde(default)]
     pub auth_fingerprint: Option<String>,
+    /// From OAuth access JWT when decodable (OpenAI ChatGPT shape, same claims as Codex `parse_chatgpt_jwt_claims`).
+    #[serde(default)]
+    pub oauth_account_email: Option<String>,
+    /// JWT `sub` or ChatGPT user id when present.
+    #[serde(default)]
+    pub oauth_account_subject: Option<String>,
+    /// Raw `chatgpt_plan_type` from `https://api.openai.com/auth` in the JWT (e.g. plus, pro); optional UI hint only.
+    #[serde(default)]
+    pub oauth_chatgpt_plan_slug: Option<String>,
 }
 
 /// Body for `POST /_vp/providers/:id/credentials` and `PUT /_vp/credentials/:id`.
@@ -382,6 +437,13 @@ pub struct CredentialInput {
     /// Write-only: stored in DB but never returned in Credential responses.
     pub oauth_refresh_token: Option<String>,
     pub oauth_expires_at: Option<i64>,
+    /// From Codex `id_token` at import; persisted and merged into Credential `oauth_account_*` for UI.
+    #[serde(default)]
+    pub oauth_cached_email: Option<String>,
+    #[serde(default)]
+    pub oauth_cached_subject: Option<String>,
+    #[serde(default)]
+    pub oauth_cached_plan_slug: Option<String>,
 }
 
 pub fn ts_out_dir() -> &'static str {

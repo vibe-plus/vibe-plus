@@ -488,6 +488,17 @@ pub async fn forward(
             match resolve_oauth_token(&state, epick.credential_id.as_deref(), oauth).await {
                 Ok(t) => Some(t),
                 Err(e) => {
+                    state.cb.record_failure(&cb_key);
+                    if let Some(cid) = &epick.credential_id {
+                        fire_credential_failure(&state, cid.clone(), Some(format!("oauth refresh failed: {e}")));
+                    }
+                    fire_health(
+                        &state,
+                        &provider.id,
+                        false,
+                        started_instant.elapsed().as_millis() as i64,
+                        Some("oauth refresh failed".into()),
+                    );
                     last_error = format!("oauth error for {}: {e}", provider.id);
                     continue;
                 }
@@ -507,6 +518,17 @@ pub async fn forward(
                 Some(r) => match secrets::resolve(r) {
                     Ok(s) => Some(s),
                     Err(e) => {
+                        state.cb.record_failure(&cb_key);
+                        if let Some(cid) = &epick.credential_id {
+                            fire_credential_failure(&state, cid.clone(), Some(format!("auth resolve failed: {e}")));
+                        }
+                        fire_health(
+                            &state,
+                            &provider.id,
+                            false,
+                            started_instant.elapsed().as_millis() as i64,
+                            Some("auth resolve failed".into()),
+                        );
                         last_error = format!("auth error for {}: {e}", provider.id);
                         continue;
                     }

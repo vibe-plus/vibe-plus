@@ -68,7 +68,7 @@ fn scan_claude() -> Option<LocalCandidate> {
 
     Some(LocalCandidate {
         client: "claude".into(),
-        name: "Claude (Local)".into(),
+        name: "Claude".into(),
         kind: ProviderKind::Anthropic,
         base_url: "https://api.anthropic.com".into(),
         auth_ref,
@@ -83,11 +83,17 @@ fn scan_claude() -> Option<LocalCandidate> {
 fn claude_auth_ref_from_settings(settings_path: &PathBuf) -> Option<String> {
     let s = std::fs::read_to_string(settings_path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&s).ok()?;
-    let tok = v.pointer("/env/ANTHROPIC_AUTH_TOKEN")?.as_str()?;
-    if tok.is_empty() || tok == "PROXY_MANAGED" {
-        return None;
+    if let Some(tok) = v.pointer("/env/ANTHROPIC_AUTH_TOKEN").and_then(|t| t.as_str()) {
+        if !tok.is_empty() && tok != "PROXY_MANAGED" {
+            return Some(format!("literal:{tok}"));
+        }
     }
-    Some(format!("literal:{tok}"))
+    if let Some(tok) = v.pointer("/env/ANTHROPIC_API_KEY").and_then(|t| t.as_str()) {
+        if !tok.is_empty() && tok != "PROXY_MANAGED" {
+            return Some(format!("literal:{tok}"));
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -171,11 +177,11 @@ fn codex_base_url_from_auth(path: &PathBuf) -> (String, String) {
     match try_read().as_deref() {
         Some("chatgpt") => (
             "https://chatgpt.com/backend-api/codex".into(),
-            "Codex (ChatGPT Pro)".into(),
+            "Codex".into(),
         ),
         _ => (
             "https://api.openai.com".into(),
-            "Codex / OpenAI".into(),
+            "Codex".into(),
         ),
     }
 }
@@ -199,7 +205,7 @@ fn codex_candidate_to_plan(c: &LocalCandidate) -> anyhow::Result<ImportPlan> {
     let primary_tok = parse_codex_auth_json(&primary_content)?;
     credentials.push(credential_input_from_codex_tokens(
         primary_tok,
-        "Codex (imported)".into(),
+        "Codex".into(),
         format!("imported from {}", c.source_path),
         10,
     ));

@@ -23,9 +23,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use vibe_protocol::{
-    CodexPlanRefreshResult, Credential, CredentialInput, CredentialPlanSnapshot, DashboardStats,
-    Health, HealthSummary, LogPage, Provider, ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary,
-    ProviderInput, Status, UsageSummary, WsEvent,
+    CodexPlanRefreshResult, Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus,
+    DashboardStats, Health, HealthSummary, LogPage, Provider, ProviderAuthPoolSummary,
+    ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary, ProviderInput, Status, UsageSummary,
+    WsEvent,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -77,6 +78,8 @@ pub fn router(state: AppState) -> Router {
             put(update_provider).delete(delete_provider),
         )
         .route("/_vp/providers/:id/health", get(provider_health))
+        .route("/_vp/providers/:id/pool", get(provider_pool_summary))
+        .route("/_vp/pools", get(provider_pool_list))
         .route("/_vp/providers/:id/circuit/reset", post(provider_circuit_reset))
         // credentials
         .route(
@@ -931,13 +934,27 @@ async fn scan_local_providers() -> Json<Vec<local_import::LocalCandidate>> {
     Json(local_import::scan())
 }
 
+fn provider_to_input(p: &Provider) -> ProviderInput {
+    ProviderInput {
+        name: p.name.clone(),
+        kind: p.kind,
+        base_url: p.base_url.clone(),
+        auth_ref: p.auth_ref.clone(),
+        enabled: p.enabled,
+        priority: p.priority,
+        model_aliases: p.model_aliases.clone(),
+    }
+}
+
 /// `POST /_vp/providers/import-local`
 /// body: `["claude", "codex"]`  — 指定要导入的 client 名称列表
 ///
 /// 对每个候选：
-///   1. 若已有相同 kind + base_url 的 provider → 跳过（幂等）
-///   2. 插入 provider（Codex 不再写入 `codex-auth` auth_ref）
-///   3. 插入 credentials（Codex：每个 auth*.json → 一行 oauth_* 入库）
+///   1. 若已有相同 kind + base_url 的 provider：
+///      - Codex：合并本机 `auth*.json` 为凭证行（按指纹去重）
+///      - Claude：用本机 `~/.claude/settings.json` 中的密钥刷新该上游的 `auth_ref`
+///      - 其它：跳过
+///   2. 否则插入 provider，再插入凭证（Codex：每个 auth*.json → 一行 oauth_*）
 async fn import_local_providers(
     State(state): State<AppState>,
     Json(clients): Json<Vec<String>>,
@@ -953,8 +970,71 @@ async fn import_local_providers(
             move |s| s.db.provider_find_by_kind_and_base_url(kind, &base)
         })
         .await?;
-        if dup.is_some() {
-            tracing::info!(%base, ?kind, "import-local: skipped duplicate provider");
+        if let Some(existing) = dup {
+            // 已有同 kind + base_url：Codex 合并凭证；Claude 刷新 provider 级 auth_ref。
+            if c.client.as_str() == "codex" {
+                let pid = existing.id.clone();
+                for cred in plan.credentials {
+                    let fp = crate::auth_fingerprint::credential_fingerprint(
+                        cred.auth_ref.as_deref(),
+                        cred.oauth_access_token.as_deref(),
+                    );
+                    let has = run_blocking(state.clone(), {
+                        let pid = pid.clone();
+                        let fp = fp.clone();
+                        move |s| s.db.credential_has_fingerprint_for_provider(&pid, &fp)
+                    })
+                    .await?;
+                    if has {
+                        tracing::info!(
+                            provider_id = %pid,
+                            fingerprint = %fp,
+                            "import-local: skip credential (fingerprint already on provider)"
+                        );
+                        continue;
+                    }
+                    let pid2 = pid.clone();
+                    run_blocking(state.clone(), move |s| {
+                        s.db.credential_insert(&pid2, cred, Some(fp))
+                    })
+                    .await?;
+                }
+                if let Some(p) = run_blocking(state.clone(), move |s| s.db.provider_get(&pid)).await? {
+                    created.push(p);
+                }
+            } else if c.client.as_str() == "claude" {
+                let pid = existing.id.clone();
+                let scan_auth = plan.provider.auth_ref.clone();
+                let existing_provider = run_blocking(state.clone(), {
+                    let pid = pid.clone();
+                    move |s| s.db.provider_get(&pid)
+                })
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("import-local: duplicate provider row missing"))?;
+                let mut input = provider_to_input(&existing_provider);
+                let mut changed = false;
+                if let Some(ref ar) = scan_auth {
+                    if input.auth_ref.as_ref() != Some(ar) {
+                        input.auth_ref = Some(ar.clone());
+                        changed = true;
+                    }
+                } else if input.auth_ref.is_none()
+                    && std::env::var("ANTHROPIC_API_KEY")
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false)
+                {
+                    input.auth_ref = Some("env:ANTHROPIC_API_KEY".into());
+                    changed = true;
+                }
+                let p = if changed {
+                    run_blocking(state.clone(), move |s| s.db.provider_update(&pid, input)).await?
+                } else {
+                    existing_provider
+                };
+                created.push(p);
+            } else {
+                tracing::info!(%base, ?kind, "import-local: skipped duplicate provider");
+            }
             continue;
         }
         let credentials = plan.credentials;
@@ -1067,6 +1147,155 @@ fn effective_circuit_for_provider(
 
     let is_healthy = worst != CbState::Open;
     (worst.as_str().to_string(), max_failures, is_healthy)
+}
+
+fn credential_is_rate_limited(c: &Credential, now_secs: i64) -> bool {
+    let req_exhausted =
+        c.rl_requests_remaining == Some(0) && c.rl_requests_reset_at.map(|t| t > now_secs).unwrap_or(false);
+    let tok_exhausted =
+        c.rl_tokens_remaining == Some(0) && c.rl_tokens_reset_at.map(|t| t > now_secs).unwrap_or(false);
+    req_exhausted || tok_exhausted
+}
+
+fn build_provider_pool_summary(
+    state: &AppState,
+    provider: &Provider,
+    credentials: Vec<Credential>,
+    rolling_stats: &[vibe_db::CredentialRollingStat],
+    rolling_hours: i64,
+) -> ProviderAuthPoolSummary {
+    let now = chrono::Utc::now().timestamp();
+    let mut total_credentials: i64 = 0;
+    let mut enabled_credentials: i64 = 0;
+    let mut available_credentials: i64 = 0;
+    let mut rate_limited_credentials: i64 = 0;
+    let mut open_circuit_credentials: i64 = 0;
+    let mut statuses: Vec<CredentialPoolStatus> = Vec::new();
+
+    let stat_map: std::collections::HashMap<&str, &vibe_db::CredentialRollingStat> = rolling_stats
+        .iter()
+        .map(|s| (s.credential_id.as_str(), s))
+        .collect();
+
+    let mut cred_ids: Vec<String> = Vec::new();
+    let mut provider_last_error: Option<String> = None;
+    for c in credentials {
+        total_credentials += 1;
+        if c.enabled {
+            enabled_credentials += 1;
+        }
+        if provider_last_error.is_none() {
+            provider_last_error = c.last_error.clone();
+        }
+        cred_ids.push(c.id.clone());
+        let circuit_state = state.cb.state_of(&c.id).as_str().to_string();
+        let circuit_open = circuit_state == CbState::Open.as_str();
+        if circuit_open {
+            open_circuit_credentials += 1;
+        }
+        let is_rate_limited = credential_is_rate_limited(&c, now);
+        if is_rate_limited {
+            rate_limited_credentials += 1;
+        }
+        if c.enabled && !circuit_open && !is_rate_limited {
+            available_credentials += 1;
+        }
+        let stat = stat_map.get(c.id.as_str());
+        statuses.push(CredentialPoolStatus {
+            credential_id: c.id.clone(),
+            label: c.label,
+            enabled: c.enabled,
+            auth_mode: if c.oauth_access_token.as_ref().is_some_and(|v| !v.is_empty()) {
+                "oauth".into()
+            } else {
+                "auth_ref".into()
+            },
+            circuit_state,
+            circuit_open,
+            consecutive_failures: state.cb.consecutive_failures(&c.id) as i32,
+            is_rate_limited,
+            rl_requests_remaining: c.rl_requests_remaining,
+            rl_requests_reset_at: c.rl_requests_reset_at,
+            rl_tokens_remaining: c.rl_tokens_remaining,
+            rl_tokens_reset_at: c.rl_tokens_reset_at,
+            oauth_expires_at: c.oauth_expires_at,
+            last_error: c.last_error,
+            last_used_at: c.last_used_at,
+            rolling_requests: stat.map(|x| x.requests).unwrap_or(0),
+            rolling_successes: stat.map(|x| x.successes).unwrap_or(0),
+            rolling_failures: stat.map(|x| x.failures).unwrap_or(0),
+            rolling_avg_latency_ms: stat.and_then(|x| x.avg_latency_ms),
+        });
+    }
+    statuses.sort_by(|a, b| a.credential_id.cmp(&b.credential_id));
+    let (provider_circuit_state, _, _) =
+        effective_circuit_for_provider(state, &provider.id, &cred_ids);
+    let provider_circuit_open = provider_circuit_state == CbState::Open.as_str();
+
+    ProviderAuthPoolSummary {
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        kind: provider.kind,
+        rolling_hours,
+        total_credentials,
+        enabled_credentials,
+        available_credentials,
+        rate_limited_credentials,
+        open_circuit_credentials,
+        provider_circuit_state,
+        provider_circuit_open,
+        provider_last_error,
+        credentials: statuses,
+    }
+}
+
+async fn provider_pool_summary(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<RollingHoursQuery>,
+) -> Result<Json<ProviderAuthPoolSummary>, AppError> {
+    let hours = q.hours.clamp(1, 24 * 30);
+    let (provider, creds, rolling_stats) = run_blocking(state.clone(), {
+        let provider_id = id.clone();
+        move |s| {
+            let p = s
+                .db
+                .provider_get(&provider_id)?
+                .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+            let creds = s.db.credential_list_for_provider(&provider_id)?;
+            let stat = s.db.credential_stats_for_provider(&provider_id, hours)?;
+            Ok::<(Provider, Vec<Credential>, Vec<vibe_db::CredentialRollingStat>), anyhow::Error>((p, creds, stat))
+        }
+    })
+    .await?;
+    Ok(Json(build_provider_pool_summary(
+        &state,
+        &provider,
+        creds,
+        &rolling_stats,
+        hours,
+    )))
+}
+
+async fn provider_pool_list(
+    State(state): State<AppState>,
+    Query(q): Query<RollingHoursQuery>,
+) -> Result<Json<Vec<ProviderAuthPoolSummary>>, AppError> {
+    let hours = q.hours.clamp(1, 24 * 30);
+    let providers = run_blocking(state.clone(), |s| s.db.provider_list()).await?;
+    let mut out = Vec::new();
+    for p in providers {
+        let provider_id = p.id.clone();
+        let (creds, rolling_stats) = run_blocking(state.clone(), move |s| {
+            let creds = s.db.credential_list_for_provider(&provider_id)?;
+            let stat = s.db.credential_stats_for_provider(&provider_id, hours)?;
+            Ok::<(Vec<Credential>, Vec<vibe_db::CredentialRollingStat>), anyhow::Error>((creds, stat))
+        })
+        .await?;
+        out.push(build_provider_pool_summary(&state, &p, creds, &rolling_stats, hours));
+    }
+    out.sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
+    Ok(Json(out))
 }
 
 async fn provider_health(
@@ -1286,7 +1515,8 @@ async fn list_credentials(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
 ) -> Result<Json<Vec<Credential>>, AppError> {
-    let v = run_blocking(state, move |s| s.db.credential_list_for_provider(&provider_id)).await?;
+    let mut v = run_blocking(state, move |s| s.db.credential_list_for_provider(&provider_id)).await?;
+    crate::oauth_identity::credentials_attach_oauth_identities(&mut v);
     Ok(Json(v))
 }
 
@@ -1299,8 +1529,9 @@ async fn create_credential(
         input.auth_ref.as_deref(),
         input.oauth_access_token.as_deref(),
     );
-    let c =
+    let mut c =
         run_blocking(state, move |s| s.db.credential_insert(&provider_id, input, Some(fp))).await?;
+    crate::oauth_identity::credential_attach_oauth_identity(&mut c);
     Ok(Json(c))
 }
 
@@ -1308,8 +1539,9 @@ async fn get_credential(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Credential>, AppError> {
-    let c = run_blocking(state, move |s| s.db.credential_get(&id)).await?
+    let mut c = run_blocking(state, move |s| s.db.credential_get(&id)).await?
         .ok_or_else(|| anyhow::anyhow!("credential not found"))?;
+    crate::oauth_identity::credential_attach_oauth_identity(&mut c);
     Ok(Json(c))
 }
 
@@ -1322,7 +1554,8 @@ async fn update_credential(
         input.auth_ref.as_deref(),
         input.oauth_access_token.as_deref(),
     );
-    let c = run_blocking(state, move |s| s.db.credential_update(&id, input, Some(fp))).await?;
+    let mut c = run_blocking(state, move |s| s.db.credential_update(&id, input, Some(fp))).await?;
+    crate::oauth_identity::credential_attach_oauth_identity(&mut c);
     Ok(Json(c))
 }
 

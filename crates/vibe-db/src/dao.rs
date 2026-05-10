@@ -46,6 +46,15 @@ fn _route_tier_from_str(s: &str) -> Result<RouteTier> {
     })
 }
 
+#[derive(Debug, Clone)]
+pub struct CredentialRollingStat {
+    pub credential_id: String,
+    pub requests: i64,
+    pub successes: i64,
+    pub failures: i64,
+    pub avg_latency_ms: Option<i64>,
+}
+
 impl Db {
     // --- providers ----------------------------------------------------------
 
@@ -518,6 +527,44 @@ impl Db {
         })
     }
 
+    /// Rolling-window stats grouped by credential for one provider.
+    pub fn credential_stats_for_provider(
+        &self,
+        provider_id: &str,
+        hours: i64,
+    ) -> Result<Vec<CredentialRollingStat>> {
+        let since = now_secs() - hours * 3600;
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT l.credential_id,
+                        count(*) as total,
+                        sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as ok,
+                        sum(CASE WHEN l.status_code IS NULL OR l.status_code >= 400 THEN 1 ELSE 0 END) as err,
+                        COALESCE(avg(l.latency_ms), 0) as avg_lat
+                 FROM request_logs l
+                 WHERE l.started_at >= ?1
+                   AND l.provider_id = ?2
+                   AND l.credential_id IS NOT NULL
+                 GROUP BY l.credential_id",
+            )?;
+            let rows = stmt.query_map(params![since, provider_id], |r| {
+                let avg_lat: f64 = r.get(4)?;
+                Ok(CredentialRollingStat {
+                    credential_id: r.get(0)?,
+                    requests: r.get(1)?,
+                    successes: r.get(2)?,
+                    failures: r.get(3)?,
+                    avg_latency_ms: Some(avg_lat as i64),
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
     pub fn plan_snapshot_insert(&self, snap: &vibe_protocol::CredentialPlanSnapshot) -> Result<()> {
         self.with(|c| {
             c.execute(
@@ -586,6 +633,22 @@ impl Db {
                 )?
             };
             Ok(n)
+        })
+    }
+
+    /// Whether this provider already has a credential with the same import fingerprint.
+    pub fn credential_has_fingerprint_for_provider(
+        &self,
+        provider_id: &str,
+        fingerprint: &str,
+    ) -> Result<bool> {
+        self.with(|c| {
+            let n: i64 = c.query_row(
+                "SELECT count(*) FROM credentials WHERE provider_id = ?1 AND auth_fingerprint = ?2",
+                params![provider_id, fingerprint],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
         })
     }
 
@@ -699,7 +762,8 @@ impl Db {
          rl_requests_limit, rl_requests_remaining, rl_requests_reset_at,
          rl_tokens_limit, rl_tokens_remaining, rl_tokens_reset_at,
          last_used_at, last_error, consecutive_failures, created_at, updated_at,
-         oauth_access_token, oauth_refresh_token, oauth_expires_at, auth_fingerprint";
+         oauth_access_token, oauth_refresh_token, oauth_expires_at, auth_fingerprint,
+         oauth_cached_email, oauth_cached_subject, oauth_cached_plan_slug";
 
     const LOG_COLS_LIST: &'static str =
         "id, started_at, app, provider_id, requested_model, upstream_model,
@@ -769,8 +833,9 @@ impl Db {
                     (id, provider_id, label, auth_ref, plan_type, notes, enabled, priority,
                      oauth_access_token, oauth_refresh_token, oauth_expires_at,
                      auth_fingerprint,
+                     oauth_cached_email, oauth_cached_subject, oauth_cached_plan_slug,
                      created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     id,
                     provider_id,
@@ -784,6 +849,9 @@ impl Db {
                     input.oauth_refresh_token,
                     input.oauth_expires_at,
                     auth_fingerprint,
+                    input.oauth_cached_email,
+                    input.oauth_cached_subject,
+                    input.oauth_cached_plan_slug,
                     now,
                     now,
                 ],
@@ -810,7 +878,10 @@ impl Db {
                      oauth_refresh_token=COALESCE(?9, oauth_refresh_token),
                      oauth_expires_at=?10,
                      auth_fingerprint=?11,
-                     updated_at=?12
+                     oauth_cached_email=COALESCE(?12, oauth_cached_email),
+                     oauth_cached_subject=COALESCE(?13, oauth_cached_subject),
+                     oauth_cached_plan_slug=COALESCE(?14, oauth_cached_plan_slug),
+                     updated_at=?15
                  WHERE id=?1",
                 params![
                     id,
@@ -824,6 +895,9 @@ impl Db {
                     input.oauth_refresh_token,
                     input.oauth_expires_at,
                     auth_fingerprint,
+                    input.oauth_cached_email,
+                    input.oauth_cached_subject,
+                    input.oauth_cached_plan_slug,
                     now,
                 ],
             )?)
@@ -1008,6 +1082,7 @@ fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Crede
     // 17 created_at, 18 updated_at,
     // 19 oauth_access_token, 20 oauth_refresh_token, 21 oauth_expires_at,
     // 22 auth_fingerprint
+    // 23 oauth_cached_email, 24 oauth_cached_subject, 25 oauth_cached_plan_slug
     let oauth_has_refresh: bool = r.get::<_, Option<String>>(20)?.is_some();
     Ok(vibe_protocol::Credential {
         id: r.get(0)?,
@@ -1033,6 +1108,9 @@ fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Crede
         oauth_has_refresh,
         oauth_expires_at: r.get(21)?,
         auth_fingerprint: r.get(22)?,
+        oauth_account_email: r.get(23)?,
+        oauth_account_subject: r.get(24)?,
+        oauth_chatgpt_plan_slug: r.get(25)?,
     })
 }
 
