@@ -23,10 +23,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use vibe_protocol::{
-    CodexPlanRefreshResult, Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus,
-    DashboardStats, Health, HealthSummary, LogPage, Provider, ProviderAuthPoolSummary,
-    ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary, ProviderInput, Status, UsageSummary,
-    WsEvent,
+    CodexPlanRefreshResult, Credential, CredentialInput, CredentialPlanSnapshot,
+    CredentialPoolStatus, DashboardStats, Health, HealthSummary, LogPage, Provider,
+    ProviderAuthPoolSummary, ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary,
+    ProviderInput, Status, UsageSummary, WsEvent,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -57,22 +57,28 @@ pub fn router(state: AppState) -> Router {
         // request body, forward via HTTP to upstream, stream SSE events back as
         // WS text messages.  Chat Completions falls back to plain POST.
         .route("/codex/v1/chat/completions", any(post_or_reject))
-        .route("/codex/v1/responses",         any(codex_responses_handler))
-        .route("/codex/v1/responses/compact",  any(codex_responses_handler))
+        .route("/codex/v1/responses", any(codex_responses_handler))
+        .route("/codex/v1/responses/compact", any(codex_responses_handler))
         // Codex sometimes sends double-prefix paths (openai_base_url already has /v1)
-        .route("/codex/v1/v1/responses",       any(codex_responses_handler))
-        .route("/codex/v1/v1/chat/completions",any(post_or_reject))
+        .route("/codex/v1/v1/responses", any(codex_responses_handler))
+        .route("/codex/v1/v1/chat/completions", any(post_or_reject))
         .route("/codex/v1/models", get(list_models_openai))
         // ── OpenCode tool prefix (/opencode/*) ──────────────────────────────
         // baseURL = http://127.0.0.1:PORT/opencode/v1
-        .route("/opencode/v1/chat/completions", post(post_chat_completions_opencode))
+        .route(
+            "/opencode/v1/chat/completions",
+            post(post_chat_completions_opencode),
+        )
         .route("/opencode/v1/responses", post(post_responses_opencode))
         .route("/opencode/v1/models", get(list_models_openai))
         // Gemini Native passthrough — wildcard captures the full model/action path
         .route("/v1beta/models/*path", post(post_gemini))
         // providers CRUD + local import
         .route("/_vp/providers", get(list_providers).post(create_provider))
-        .route("/_vp/providers/import-local", get(scan_local_providers).post(import_local_providers))
+        .route(
+            "/_vp/providers/import-local",
+            get(scan_local_providers).post(import_local_providers),
+        )
         .route(
             "/_vp/providers/:id",
             put(update_provider).delete(delete_provider),
@@ -80,16 +86,16 @@ pub fn router(state: AppState) -> Router {
         .route("/_vp/providers/:id/health", get(provider_health))
         .route("/_vp/providers/:id/pool", get(provider_pool_summary))
         .route("/_vp/pools", get(provider_pool_list))
-        .route("/_vp/providers/:id/circuit/reset", post(provider_circuit_reset))
+        .route(
+            "/_vp/providers/:id/circuit/reset",
+            post(provider_circuit_reset),
+        )
         // credentials
         .route(
             "/_vp/providers/:id/credentials",
             get(list_credentials).post(create_credential),
         )
-        .route(
-            "/_vp/credentials/:id/plan",
-            get(credential_plan_latest),
-        )
+        .route("/_vp/credentials/:id/plan", get(credential_plan_latest))
         .route(
             "/_vp/credentials/:id/plan/refresh",
             post(credential_plan_refresh),
@@ -186,17 +192,26 @@ async fn list_models_claude(State(state): State<AppState>) -> Response {
             }
         }
     }
-    data.sort_by(|a, b| a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or("")));
+    data.sort_by(|a, b| {
+        a["id"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["id"].as_str().unwrap_or(""))
+    });
 
-    let first = data.first().and_then(|m| m["id"].as_str()).map(String::from);
-    let last  = data.last().and_then(|m| m["id"].as_str()).map(String::from);
+    let first = data
+        .first()
+        .and_then(|m| m["id"].as_str())
+        .map(String::from);
+    let last = data.last().and_then(|m| m["id"].as_str()).map(String::from);
 
     Json(serde_json::json!({
         "data": data,
         "has_more": false,
         "first_id": first,
         "last_id": last
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// `/codex/v1/models` 和 `/opencode/v1/models`
@@ -206,7 +221,8 @@ async fn list_models_openai(State(state): State<AppState>) -> Response {
     model_list_openai(
         &state,
         Some(&[ProviderKind::OpenaiChat, ProviderKind::OpenaiResponses]),
-    ).await
+    )
+    .await
 }
 
 async fn model_list_openai(
@@ -221,9 +237,10 @@ async fn model_list_openai(
     let mut seen = std::collections::HashSet::new();
     let mut data: Vec<serde_json::Value> = Vec::new();
 
-    for p in providers.iter().filter(|p| {
-        p.enabled && kinds.map_or(true, |ks| ks.contains(&p.kind))
-    }) {
+    for p in providers
+        .iter()
+        .filter(|p| p.enabled && kinds.map_or(true, |ks| ks.contains(&p.kind)))
+    {
         for alias in &p.model_aliases {
             if seen.insert(alias.alias.clone()) {
                 data.push(serde_json::json!({
@@ -249,7 +266,12 @@ async fn model_list_openai(
             }
         }
     }
-    data.sort_by(|a, b| a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or("")));
+    data.sort_by(|a, b| {
+        a["id"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["id"].as_str().unwrap_or(""))
+    });
 
     // Codex v0.129+ expects a top-level "models" field that is an array of ModelInfo
     // objects (same structure as "data"), not a plain string array.
@@ -257,7 +279,8 @@ async fn model_list_openai(
         "object": "list",
         "data": data,
         "models": data           // Codex v0.129+ compatibility: same objects as data
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +292,15 @@ async fn post_messages_plain(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward::forward(state, Wire::Anthropic, None, headers, body, Some("plain-v1".into())).await
+    forward::forward(
+        state,
+        Wire::Anthropic,
+        None,
+        headers,
+        body,
+        Some("plain-v1".into()),
+    )
+    .await
 }
 
 async fn post_messages_claude(
@@ -277,7 +308,15 @@ async fn post_messages_claude(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward::forward(state, Wire::Anthropic, None, headers, body, Some("claude-v1".into())).await
+    forward::forward(
+        state,
+        Wire::Anthropic,
+        None,
+        headers,
+        body,
+        Some("claude-v1".into()),
+    )
+    .await
 }
 
 async fn post_chat_completions_plain(
@@ -285,7 +324,15 @@ async fn post_chat_completions_plain(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward::forward(state, Wire::OpenaiChat, None, headers, body, Some("plain-v1".into())).await
+    forward::forward(
+        state,
+        Wire::OpenaiChat,
+        None,
+        headers,
+        body,
+        Some("plain-v1".into()),
+    )
+    .await
 }
 
 async fn post_chat_completions_opencode(
@@ -293,7 +340,15 @@ async fn post_chat_completions_opencode(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward::forward(state, Wire::OpenaiChat, None, headers, body, Some("opencode-v1".into())).await
+    forward::forward(
+        state,
+        Wire::OpenaiChat,
+        None,
+        headers,
+        body,
+        Some("opencode-v1".into()),
+    )
+    .await
 }
 
 async fn post_responses_plain(
@@ -301,7 +356,15 @@ async fn post_responses_plain(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward::forward(state, Wire::OpenaiResponses, None, headers, body, Some("plain-v1".into())).await
+    forward::forward(
+        state,
+        Wire::OpenaiResponses,
+        None,
+        headers,
+        body,
+        Some("plain-v1".into()),
+    )
+    .await
 }
 
 async fn post_responses_opencode(
@@ -309,7 +372,15 @@ async fn post_responses_opencode(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward::forward(state, Wire::OpenaiResponses, None, headers, body, Some("opencode-v1".into())).await
+    forward::forward(
+        state,
+        Wire::OpenaiResponses,
+        None,
+        headers,
+        body,
+        Some("opencode-v1".into()),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +472,10 @@ fn classify_codex_upstream_sse_frame(block: &str) -> Option<bool> {
 }
 
 /// Codex **`/codex/v1/responses` HTTP**：上游若是 Chat SSE，则在此处做 **SSE → Responses SSE**，并写入 `request_logs.client_response_body`。
-async fn codex_plain_http_maybe_chat_to_responses_sse(state: AppState, upstream: Response) -> Response {
+async fn codex_plain_http_maybe_chat_to_responses_sse(
+    state: AppState,
+    upstream: Response,
+) -> Response {
     let (parts, body) = upstream.into_parts();
     let log_row_id = parts
         .extensions
@@ -436,7 +510,10 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(state: AppState, upstream:
         }
         out_headers.insert(name.clone(), value.clone());
     }
-    out_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    out_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
 
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(96);
     tokio::spawn(async move {
@@ -477,19 +554,21 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(state: AppState, upstream:
         ) -> bool {
             loop {
                 match *mode {
-                    CodexHttpSseMode::Undecided => match classify_codex_upstream_sse_frame(event_block) {
-                        Some(true) => {
-                            *mode = CodexHttpSseMode::C2r;
-                            continue;
+                    CodexHttpSseMode::Undecided => {
+                        match classify_codex_upstream_sse_frame(event_block) {
+                            Some(true) => {
+                                *mode = CodexHttpSseMode::C2r;
+                                continue;
+                            }
+                            Some(false) => {
+                                *mode = CodexHttpSseMode::Passthrough;
+                                continue;
+                            }
+                            None => {
+                                return emit_raw_frame(tx, event_block).await;
+                            }
                         }
-                        Some(false) => {
-                            *mode = CodexHttpSseMode::Passthrough;
-                            continue;
-                        }
-                        None => {
-                            return emit_raw_frame(tx, event_block).await;
-                        }
-                    },
+                    }
                     CodexHttpSseMode::Passthrough => {
                         return emit_raw_frame(tx, event_block).await;
                     }
@@ -605,7 +684,11 @@ fn append_codex_ws_client_trace(acc: &mut String, json_line: &str) {
     acc.push_str(json_line);
 }
 
-async fn persist_codex_client_response_body(state: &AppState, row_id: Option<String>, trace: String) {
+async fn persist_codex_client_response_body(
+    state: &AppState,
+    row_id: Option<String>,
+    trace: String,
+) {
     let Some(id) = row_id else {
         return;
     };
@@ -614,7 +697,9 @@ async fn persist_codex_client_response_body(state: &AppState, row_id: Option<Str
     }
     let db = state.db.clone();
     let id_for_warn = id.clone();
-    let res = tokio::task::spawn_blocking(move || db.log_set_client_response_body(&id, Some(&trace))).await;
+    let res =
+        tokio::task::spawn_blocking(move || db.log_set_client_response_body(&id, Some(&trace)))
+            .await;
     match res {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!(
@@ -622,7 +707,9 @@ async fn persist_codex_client_response_body(state: &AppState, row_id: Option<Str
             ?e,
             "failed to PATCH client_response_body"
         ),
-        Err(j) => tracing::warn!(log_id = %id_for_warn, %j, "join error patching client_response_body"),
+        Err(j) => {
+            tracing::warn!(log_id = %id_for_warn, %j, "join error patching client_response_body")
+        }
     }
 }
 
@@ -644,12 +731,7 @@ fn codex_sse_block_to_ws_frames(
                 *terminal_done = true;
             }
             let events = if data.contains("\"choices\"") {
-                transforms::chat_event_to_responses_events(
-                    data,
-                    session_id,
-                    item_id,
-                    accumulator,
-                )
+                transforms::chat_event_to_responses_events(data, session_id, item_id, accumulator)
             } else {
                 let skip_usage_tail = serde_json::from_str::<serde_json::Value>(data)
                     .map(|v| v.get("choices").is_none() && v.get("usage").is_some())
@@ -675,10 +757,10 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState) {
         // 1. Wait for the next request message from Codex.
         let body_bytes: Bytes = loop {
             match socket.recv().await {
-                Some(Ok(Message::Text(t)))   => break Bytes::from(t.into_bytes()),
+                Some(Ok(Message::Text(t))) => break Bytes::from(t.into_bytes()),
                 Some(Ok(Message::Binary(b))) => break Bytes::from(b),
                 Some(Ok(Message::Close(_))) | None => return,
-                Some(Ok(_)) => continue,   // ping/pong — ignore
+                Some(Ok(_)) => continue, // ping/pong — ignore
                 Some(Err(_)) => return,
             }
         };
@@ -692,12 +774,14 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState) {
 
         // For WS mode, always request streaming from the upstream.
         let http_body: Bytes = {
-            let mut val: serde_json::Value =
-                serde_json::from_slice(&stripped).unwrap_or(serde_json::Value::Object(Default::default()));
+            let mut val: serde_json::Value = serde_json::from_slice(&stripped)
+                .unwrap_or(serde_json::Value::Object(Default::default()));
             if let Some(obj) = val.as_object_mut() {
                 obj.insert("stream".into(), serde_json::Value::Bool(true));
             }
-            serde_json::to_vec(&val).map(Bytes::from).unwrap_or(stripped.clone())
+            serde_json::to_vec(&val)
+                .map(Bytes::from)
+                .unwrap_or(stripped.clone())
         };
         {
             let model = serde_json::from_slice::<serde_json::Value>(&http_body)
@@ -709,7 +793,7 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState) {
 
         // Per-response IDs.
         let session_id = format!("resp-{}", uuid::Uuid::new_v4().simple());
-        let item_id    = format!("msg-{}", uuid::Uuid::new_v4().simple());
+        let item_id = format!("msg-{}", uuid::Uuid::new_v4().simple());
 
         // 3. Build minimal headers for the forward call.
         let mut req_headers = HeaderMap::new();
@@ -759,7 +843,7 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState) {
             .unwrap_or("")
             .to_string();
 
-        let is_sse  = content_type.contains("event-stream");
+        let is_sse = content_type.contains("event-stream");
 
         if is_sse {
             // 6a. Streaming SSE: parse each event and emit as Responses API WS messages.
@@ -900,9 +984,21 @@ async fn post_or_reject(
     body: Bytes,
 ) -> Response {
     if is_websocket_upgrade(&headers) {
-        return (StatusCode::NOT_IMPLEMENTED, "WebSocket not supported on chat/completions").into_response();
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "WebSocket not supported on chat/completions",
+        )
+            .into_response();
     }
-    forward::forward(state, Wire::OpenaiChat, None, headers, body, Some("codex-v1".into())).await
+    forward::forward(
+        state,
+        Wire::OpenaiChat,
+        None,
+        headers,
+        body,
+        Some("codex-v1".into()),
+    )
+    .await
 }
 
 async fn post_gemini(
@@ -952,7 +1048,7 @@ fn provider_to_input(p: &Provider) -> ProviderInput {
 /// 对每个候选：
 ///   1. 若已有相同 kind + base_url 的 provider：
 ///      - Codex：合并本机 `auth*.json` 为凭证行（按指纹去重）
-///      - Claude：用本机 `~/.claude/settings.json` 中的密钥刷新该上游的 `auth_ref`
+///      - Claude：用本机 Claude Code 配置（settings / credentials / .env / 进程环境）刷新该上游的 `auth_ref`
 ///      - 其它：跳过
 ///   2. 否则插入 provider，再插入凭证（Codex：每个 auth*.json → 一行 oauth_*）
 async fn import_local_providers(
@@ -999,7 +1095,9 @@ async fn import_local_providers(
                     })
                     .await?;
                 }
-                if let Some(p) = run_blocking(state.clone(), move |s| s.db.provider_get(&pid)).await? {
+                if let Some(p) =
+                    run_blocking(state.clone(), move |s| s.db.provider_get(&pid)).await?
+                {
                     created.push(p);
                 }
             } else if c.client.as_str() == "claude" {
@@ -1018,12 +1116,8 @@ async fn import_local_providers(
                         input.auth_ref = Some(ar.clone());
                         changed = true;
                     }
-                } else if input.auth_ref.is_none()
-                    && std::env::var("ANTHROPIC_API_KEY")
-                        .map(|v| !v.trim().is_empty())
-                        .unwrap_or(false)
-                {
-                    input.auth_ref = Some("env:ANTHROPIC_API_KEY".into());
+                } else if let Some(ar) = local_import::anthropic_env_auth_ref() {
+                    input.auth_ref = Some(ar);
                     changed = true;
                 }
                 let p = if changed {
@@ -1047,7 +1141,10 @@ async fn import_local_providers(
                 cred.auth_ref.as_deref(),
                 cred.oauth_access_token.as_deref(),
             );
-            run_blocking(state.clone(), move |s| s.db.credential_insert(&pid2, cred, Some(fp))).await?;
+            run_blocking(state.clone(), move |s| {
+                s.db.credential_insert(&pid2, cred, Some(fp))
+            })
+            .await?;
         }
         created.push(p);
     }
@@ -1068,7 +1165,9 @@ async fn create_provider(
     Json(input): Json<ProviderInput>,
 ) -> Result<Json<Provider>, AppError> {
     let p = run_blocking(state.clone(), move |s| s.db.provider_insert(input)).await?;
-    state.ws.publish(WsEvent::Hello { version: VERSION.into() });
+    state.ws.publish(WsEvent::Hello {
+        version: VERSION.into(),
+    });
     Ok(Json(p))
 }
 
@@ -1078,7 +1177,10 @@ async fn update_provider(
     Json(input): Json<ProviderInput>,
 ) -> Result<Json<Provider>, AppError> {
     let id_for_update = id.clone();
-    let p = run_blocking(state.clone(), move |s| s.db.provider_update(&id_for_update, input)).await?;
+    let p = run_blocking(state.clone(), move |s| {
+        s.db.provider_update(&id_for_update, input)
+    })
+    .await?;
     // 绑定“开关”与熔断：切换后清空该 provider 及其 credential 的熔断状态，
     // 避免 UI 显示 enabled 但请求仍被历史熔断阻断。
     let cred_ids = run_blocking(state.clone(), {
@@ -1150,10 +1252,12 @@ fn effective_circuit_for_provider(
 }
 
 fn credential_is_rate_limited(c: &Credential, now_secs: i64) -> bool {
-    let req_exhausted =
-        c.rl_requests_remaining == Some(0) && c.rl_requests_reset_at.map(|t| t > now_secs).unwrap_or(false);
-    let tok_exhausted =
-        c.rl_tokens_remaining == Some(0) && c.rl_tokens_reset_at.map(|t| t > now_secs).unwrap_or(false);
+    let req_exhausted = c.rl_requests_remaining == Some(0)
+        && c.rl_requests_reset_at
+            .map(|t| t > now_secs)
+            .unwrap_or(false);
+    let tok_exhausted = c.rl_tokens_remaining == Some(0)
+        && c.rl_tokens_reset_at.map(|t| t > now_secs).unwrap_or(false);
     req_exhausted || tok_exhausted
 }
 
@@ -1258,13 +1362,19 @@ async fn provider_pool_summary(
     let (provider, creds, rolling_stats) = run_blocking(state.clone(), {
         let provider_id = id.clone();
         move |s| {
-            let p = s
-                .db
-                .provider_get(&provider_id)?
-                .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+            let p =
+                s.db.provider_get(&provider_id)?
+                    .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
             let creds = s.db.credential_list_for_provider(&provider_id)?;
             let stat = s.db.credential_stats_for_provider(&provider_id, hours)?;
-            Ok::<(Provider, Vec<Credential>, Vec<vibe_db::CredentialRollingStat>), anyhow::Error>((p, creds, stat))
+            Ok::<
+                (
+                    Provider,
+                    Vec<Credential>,
+                    Vec<vibe_db::CredentialRollingStat>,
+                ),
+                anyhow::Error,
+            >((p, creds, stat))
         }
     })
     .await?;
@@ -1289,10 +1399,18 @@ async fn provider_pool_list(
         let (creds, rolling_stats) = run_blocking(state.clone(), move |s| {
             let creds = s.db.credential_list_for_provider(&provider_id)?;
             let stat = s.db.credential_stats_for_provider(&provider_id, hours)?;
-            Ok::<(Vec<Credential>, Vec<vibe_db::CredentialRollingStat>), anyhow::Error>((creds, stat))
+            Ok::<(Vec<Credential>, Vec<vibe_db::CredentialRollingStat>), anyhow::Error>((
+                creds, stat,
+            ))
         })
         .await?;
-        out.push(build_provider_pool_summary(&state, &p, creds, &rolling_stats, hours));
+        out.push(build_provider_pool_summary(
+            &state,
+            &p,
+            creds,
+            &rolling_stats,
+            hours,
+        ));
     }
     out.sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
     Ok(Json(out))
@@ -1321,20 +1439,18 @@ async fn provider_health(
         }
     })
     .await?
-    .unwrap_or_else(|| {
-        vibe_db::DbHealth {
-            provider_id: id.clone(),
-            is_healthy: true,
-            consecutive_failures: 0,
-            total_requests: 0,
-            total_successes: 0,
-            total_failures: 0,
-            last_success_at: None,
-            last_failure_at: None,
-            last_error: None,
-            avg_latency_ms: None,
-            updated_at: 0,
-        }
+    .unwrap_or_else(|| vibe_db::DbHealth {
+        provider_id: id.clone(),
+        is_healthy: true,
+        consecutive_failures: 0,
+        total_requests: 0,
+        total_successes: 0,
+        total_failures: 0,
+        last_success_at: None,
+        last_failure_at: None,
+        last_error: None,
+        avg_latency_ms: None,
+        updated_at: 0,
     });
     let (circuit_state, consecutive_failures, is_healthy) =
         effective_circuit_for_provider(&state, &id, &cred_ids);
@@ -1361,7 +1477,10 @@ async fn provider_health(
         updated_at: db_row.updated_at,
     };
 
-    let rolling = run_blocking(state.clone(), move |s| s.db.provider_stat_single(&id, hours)).await?;
+    let rolling = run_blocking(state.clone(), move |s| {
+        s.db.provider_stat_single(&id, hours)
+    })
+    .await?;
 
     Ok(Json(ProviderHealthSummary {
         cumulative,
@@ -1446,23 +1565,27 @@ async fn health_all_providers(
     }
 
     // Build health entries for every known provider (even those never hit)
-    let mut health_map: std::collections::HashMap<String, vibe_db::DbHealth> =
-        rows.into_iter().map(|r| (r.provider_id.clone(), r)).collect();
+    let mut health_map: std::collections::HashMap<String, vibe_db::DbHealth> = rows
+        .into_iter()
+        .map(|r| (r.provider_id.clone(), r))
+        .collect();
 
     for p in &providers {
-        health_map.entry(p.id.clone()).or_insert_with(|| vibe_db::DbHealth {
-            provider_id: p.id.clone(),
-            is_healthy: true,
-            consecutive_failures: 0,
-            total_requests: 0,
-            total_successes: 0,
-            total_failures: 0,
-            last_success_at: None,
-            last_failure_at: None,
-            last_error: None,
-            avg_latency_ms: None,
-            updated_at: 0,
-        });
+        health_map
+            .entry(p.id.clone())
+            .or_insert_with(|| vibe_db::DbHealth {
+                provider_id: p.id.clone(),
+                is_healthy: true,
+                consecutive_failures: 0,
+                total_requests: 0,
+                total_successes: 0,
+                total_failures: 0,
+                last_success_at: None,
+                last_failure_at: None,
+                last_error: None,
+                avg_latency_ms: None,
+                updated_at: 0,
+            });
     }
 
     let all: Vec<ProviderHealth> = health_map
@@ -1515,7 +1638,10 @@ async fn list_credentials(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
 ) -> Result<Json<Vec<Credential>>, AppError> {
-    let mut v = run_blocking(state, move |s| s.db.credential_list_for_provider(&provider_id)).await?;
+    let mut v = run_blocking(state, move |s| {
+        s.db.credential_list_for_provider(&provider_id)
+    })
+    .await?;
     crate::oauth_identity::credentials_attach_oauth_identities(&mut v);
     Ok(Json(v))
 }
@@ -1529,8 +1655,10 @@ async fn create_credential(
         input.auth_ref.as_deref(),
         input.oauth_access_token.as_deref(),
     );
-    let mut c =
-        run_blocking(state, move |s| s.db.credential_insert(&provider_id, input, Some(fp))).await?;
+    let mut c = run_blocking(state, move |s| {
+        s.db.credential_insert(&provider_id, input, Some(fp))
+    })
+    .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
     Ok(Json(c))
 }
@@ -1539,7 +1667,8 @@ async fn get_credential(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Credential>, AppError> {
-    let mut c = run_blocking(state, move |s| s.db.credential_get(&id)).await?
+    let mut c = run_blocking(state, move |s| s.db.credential_get(&id))
+        .await?
         .ok_or_else(|| anyhow::anyhow!("credential not found"))?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
     Ok(Json(c))
@@ -1567,7 +1696,10 @@ async fn credential_plan_latest(
     Ok(Json(snap))
 }
 
-async fn refresh_codex_plan_for_credential(state: &AppState, cred: &Credential) -> anyhow::Result<()> {
+async fn refresh_codex_plan_for_credential(
+    state: &AppState,
+    cred: &Credential,
+) -> anyhow::Result<()> {
     let Some(access) = cred.oauth_access_token.as_ref().filter(|t| !t.is_empty()) else {
         anyhow::bail!("credential has no OAuth access token");
     };
@@ -1586,8 +1718,7 @@ async fn refresh_codex_plan_for_credential(state: &AppState, cred: &Credential) 
     .await?;
     let db = state.db.clone();
     let snap_ins = snap.clone();
-    tokio::task::spawn_blocking(move || db.plan_snapshot_insert(&snap_ins))
-        .await??;
+    tokio::task::spawn_blocking(move || db.plan_snapshot_insert(&snap_ins)).await??;
     Ok(())
 }
 
@@ -1626,10 +1757,9 @@ async fn provider_codex_plan_list(
 ) -> Result<Json<Vec<ProviderCodexPlanItem>>, AppError> {
     let pid = provider_id.clone();
     let items = run_blocking(state.clone(), move |s| {
-        let p = s
-            .db
-            .provider_get(&pid)?
-            .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+        let p =
+            s.db.provider_get(&pid)?
+                .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
         if !crate::router::provider_is_chatgpt_codex_official(&p) {
             return Ok(Vec::new());
         }
@@ -1654,10 +1784,9 @@ async fn provider_codex_plan_refresh_all(
     Path(provider_id): Path<String>,
 ) -> Result<Json<CodexPlanRefreshResult>, AppError> {
     let creds = run_blocking(state.clone(), move |s| {
-        let p = s
-            .db
-            .provider_get(&provider_id)?
-            .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+        let p =
+            s.db.provider_get(&provider_id)?
+                .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
         if !crate::router::provider_is_chatgpt_codex_official(&p) {
             anyhow::bail!("not a ChatGPT Codex official provider");
         }
@@ -1670,7 +1799,10 @@ async fn provider_codex_plan_refresh_all(
     let mut errors: Vec<String> = Vec::new();
 
     for c in creds {
-        if c.oauth_access_token.as_ref().map_or(true, |t: &String| t.is_empty()) {
+        if c.oauth_access_token
+            .as_ref()
+            .map_or(true, |t: &String| t.is_empty())
+        {
             continue;
         }
         attempted += 1;
@@ -1831,7 +1963,9 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Resp
 async fn ws_session(socket: WebSocket, state: AppState) {
     let (mut tx, mut rx) = socket.split();
     let mut sub = state.ws.subscribe();
-    let hello = WsEvent::Hello { version: VERSION.into() };
+    let hello = WsEvent::Hello {
+        version: VERSION.into(),
+    };
     if let Ok(j) = serde_json::to_string(&hello) {
         let _ = tx.send(Message::Text(j)).await;
     }
