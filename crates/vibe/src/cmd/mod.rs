@@ -8,7 +8,6 @@ pub mod start;
 pub mod status;
 pub mod stop;
 pub mod takeover;
-pub mod ui;
 pub mod update;
 
 #[allow(dead_code)]

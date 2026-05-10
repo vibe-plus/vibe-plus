@@ -29,8 +29,6 @@ enum Command {
     Provider(cmd::provider::ProviderCmd),
     /// Guide Claude Code / OpenCode / Codex to use the local proxy.
     Takeover(cmd::takeover::TakeoverArgs),
-    /// Open the local dashboard in the browser.
-    Ui,
     /// Tail the request log.
     Logs(cmd::logs::LogsArgs),
     /// Run a subprocess with local proxy env vars injected.
@@ -54,7 +52,6 @@ async fn main() -> Result<()> {
         Command::Doctor => cmd::doctor::run().await,
         Command::Provider(c) => cmd::provider::run(c).await,
         Command::Takeover(a) => cmd::takeover::run(a).await,
-        Command::Ui => cmd::ui::run(),
         Command::Logs(a) => cmd::logs::run(a).await,
         Command::Run(a) => cmd::run::run(a),
         Command::Config(a) => cmd::config::run(a),

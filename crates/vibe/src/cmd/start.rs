@@ -81,7 +81,6 @@ fn daemonise(port: u16) -> Result<()> {
         .spawn()?;
     println!("vibe started in background.");
     println!("  endpoint: http://127.0.0.1:{port}");
-    println!("  dashboard: http://127.0.0.1:{port}/_vp/ui/");
     Ok(())
 }
 
