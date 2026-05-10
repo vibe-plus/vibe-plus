@@ -35,3 +35,11 @@ pub fn backups_dir() -> Result<PathBuf> {
     std::fs::create_dir_all(&p).ok();
     Ok(p)
 }
+
+/// Stores auth.json files pasted by the user via the web UI.
+/// Each file gets a UUID filename so multiple accounts can coexist.
+pub fn codex_accounts_dir() -> Result<PathBuf> {
+    let p = vibe_dir()?.join("codex-accounts");
+    std::fs::create_dir_all(&p).ok();
+    Ok(p)
+}

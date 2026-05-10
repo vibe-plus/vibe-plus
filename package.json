@@ -11,10 +11,15 @@
   "scripts": {
     "ready": "vp check && vp run -r test && vp run -r build",
     "dev": "vp run website#dev",
-    "prepare": "vp config"
+    "prepare": "vp config",
+    "gateway:restart": "bash scripts/rebuild-and-run-gateway.sh"
   },
   "devDependencies": {
-    "vite-plus": "catalog:"
+    "lander": "workspace:*",
+    "unplugin-caddy-localhost": "latest",
+    "unplugin-singleton": "latest",
+    "vite-plus": "catalog:",
+    "website": "workspace:*"
   },
   "overrides": {
     "vite": "catalog:",

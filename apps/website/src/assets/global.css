@@ -1,0 +1,183 @@
+/* Global design tokens & utilities for vibe-plus dashboard */
+:root {
+  /* Brand colors - purple/violet gradient */
+  --vp-brand: #8b5cf6;
+  --vp-brand-light: #a78bfa;
+  --vp-brand-dark: #7c3aed;
+  --vp-brand-glow: rgba(139, 92, 246, 0.3);
+  --vp-accent: #22d3ee;
+  --vp-accent-glow: rgba(34, 211, 238, 0.25);
+
+  /* Surface system */
+  --vp-bg-deep: #09090b;
+  --vp-bg-base: #111113;
+  --vp-bg-elevated: #1a1a1f;
+  --vp-bg-card: #1e1e24;
+  --vp-bg-hover: #25252c;
+  --vp-border: rgba(255, 255, 255, 0.06);
+  --vp-border-soft: rgba(255, 255, 255, 0.1);
+  --vp-border-mid: rgba(255, 255, 255, 0.15);
+
+  /* Text */
+  --vp-text-primary: #f1f1f3;
+  --vp-text-secondary: #a1a1aa;
+  --vp-text-tertiary: #71717a;
+  --vp-text-muted: #52525b;
+
+  /* Status */
+  --vp-success: #34d399;
+  --vp-success-glow: rgba(52, 211, 153, 0.25);
+  --vp-warning: #fbbf24;
+  --vp-error: #f87171;
+  --vp-error-glow: rgba(248, 113, 113, 0.25);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Smooth transitions */
+* {
+  transition-property: background-color, border-color, color, opacity, box-shadow, transform;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Glass morphism utilities */
+.glass {
+  background: rgba(17, 17, 19, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+.glass-card {
+  background: rgba(30, 30, 36, 0.5);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.glass-card:hover {
+  background: rgba(30, 30, 36, 0.7);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, #c4b5fd 0%, #818cf8 50%, #22d3ee 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-brand {
+  background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glow effects */
+.glow-ring {
+  box-shadow:
+    0 0 0 1px rgba(139, 92, 246, 0.2),
+    0 0 20px rgba(139, 92, 246, 0.1);
+}
+.glow-ring:hover {
+  box-shadow:
+    0 0 0 1px rgba(139, 92, 246, 0.35),
+    0 0 30px rgba(139, 92, 246, 0.15);
+}
+
+/* Animated pulse for live indicator */
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.8);
+  }
+}
+.live-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* Card hover lift */
+.card-lift {
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.card-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+}
+
+/* Noise texture overlay */
+.noise-overlay::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.015;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Gradient orbs for backgrounds */
+.gradient-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Skeleton loading shimmer */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.03) 0%,
+    rgba(255, 255, 255, 0.06) 50%,
+    rgba(255, 255, 255, 0.03) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+/* Tab styles */
+.tab-underline {
+  position: relative;
+}
+.tab-underline::after {
+  content: "";
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #8b5cf6, #22d3ee);
+  border-radius: 1px;
+}

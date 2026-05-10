@@ -49,11 +49,14 @@ fn list(db: &Db) -> Result<()> {
 
 fn add(db: &Db) -> Result<()> {
     let name = Text::new("Provider name:").prompt()?;
-    let kind_str = Select::new("Kind:", vec!["anthropic", "openai-compat", "openai-responses"]).prompt()?;
+    let kind_str =
+        Select::new("Kind:", vec!["anthropic", "openai-chat", "openai-responses", "gemini-native"])
+            .prompt()?;
     let kind = match kind_str {
         "anthropic" => ProviderKind::Anthropic,
         "openai-responses" => ProviderKind::OpenaiResponses,
-        _ => ProviderKind::OpenaiCompat,
+        "gemini-native" => ProviderKind::GeminiNative,
+        _ => ProviderKind::OpenaiChat,
     };
     let default_url = match kind {
         ProviderKind::Anthropic => "https://api.anthropic.com",
@@ -123,13 +126,14 @@ fn edit(db: &Db, id: &str) -> Result<()> {
 fn default_high_model(kind: ProviderKind) -> String {
     match kind {
         ProviderKind::Anthropic => "claude-opus-4-7".into(),
-        _ => "gpt-4o".into(),
+        // Codex / OpenAI Chat：与 codex-rs 当前默认家族对齐（非固定枚举，可在 DB 里改别名）
+        _ => "gpt-5.3-codex".into(),
     }
 }
 
 fn default_low_model(kind: ProviderKind) -> String {
     match kind {
         ProviderKind::Anthropic => "claude-haiku-4-5-20251001".into(),
-        _ => "gpt-4o-mini".into(),
+        _ => "gpt-5.1-codex-mini".into(),
     }
 }

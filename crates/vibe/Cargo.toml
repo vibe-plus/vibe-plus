@@ -30,6 +30,7 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = { workspace = true }
+toml_edit = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

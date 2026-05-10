@@ -28,7 +28,7 @@ pub enum Wire {
 pub fn select(provider: &Provider) -> Box<dyn Adapter + Send + Sync> {
     match provider.kind {
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicAdapter),
-        ProviderKind::OpenaiCompat | ProviderKind::OpenaiResponses => {
+        ProviderKind::OpenaiChat | ProviderKind::OpenaiResponses => {
             Box::new(openai::OpenaiAdapter)
         }
         ProviderKind::GeminiNative => Box::new(gemini::GeminiAdapter),

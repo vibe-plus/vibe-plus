@@ -46,6 +46,12 @@ impl Db {
         Migrations::new(vec![
             M::up(include_str!("../migrations/001_init.sql")),
             M::up(include_str!("../migrations/002_health.sql")),
+            M::up(include_str!("../migrations/003_credentials.sql")),
+            M::up(include_str!("../migrations/004_oauth_credentials.sql")),
+            M::up(include_str!("../migrations/005_request_logs_extended.sql")),
+            M::up(include_str!("../migrations/006_plan_fingerprint.sql")),
+            M::up(include_str!("../migrations/007_request_log_bodies.sql")),
+            M::up(include_str!("../migrations/008_client_response_body.sql")),
         ])
     }
 

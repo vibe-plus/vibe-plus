@@ -19,4 +19,38 @@ export type RequestLog = {
    * Stored as a decimal string because we don't want float drift in money.
    */
   estimated_cost_usd: string;
+  /**
+   * Wire protocol: `anthropic` | `openai-chat` | `openai-responses` | `gemini-native`.
+   */
+  wire: string | null;
+  /**
+   * Entry route hint: `codex-v1`, `plain-v1`, `opencode-v1`, …
+   */
+  route_prefix: string | null;
+  credential_id: string | null;
+  /**
+   * Circuit-breaker key tried for this attempt (`provider_id` or credential uuid).
+   */
+  cb_key: string | null;
+  /**
+   * HTTP status from upstream (when distinct from what the client ultimately saw).
+   */
+  upstream_http_status: number | null;
+  /**
+   * First ~512 chars of upstream JSON/text error body (when available).
+   */
+  upstream_error_preview: string | null;
+  /**
+   * Optional dedupe key (`x-request-id` + route).
+   */
+  dedupe_key: string | null;
+  /**
+   * Truncated inbound HTTP body (gateway view), for log detail UI.
+   */
+  request_body: string | null;
+  /**
+   * Truncated upstream response body (non-streaming or buffered stream), for log detail UI.
+   */
+  response_body: string | null;
+  client_response_body?: string;
 };

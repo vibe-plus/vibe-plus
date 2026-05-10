@@ -18,6 +18,7 @@ import concurrent.futures
 import json
 import random
 import string
+import tempfile
 import threading
 import time
 import urllib.error
@@ -146,7 +147,7 @@ class GatewayClient:
             f"{self.base}/_vp/providers",
             {
                 "name": name,
-                "kind": "openai-compat",
+                "kind": "openai-chat",
                 "base_url": base_url,
                 "auth_ref": None,
                 "enabled": True,
@@ -592,7 +593,7 @@ def test_protocol_routes_and_forwarding(client: GatewayClient) -> Tuple[bool, st
 
     p_anth = p_chat = p_resp = None
     try:
-        # create_provider helper uses openai-compat; use raw API for kind-specific creation.
+        # create_provider helper uses openai-chat; use raw API for kind-specific creation.
         p_anth_status, p_anth_obj, p_anth_raw = _request(
             "POST",
             f"{client.base}/_vp/providers",
@@ -615,7 +616,7 @@ def test_protocol_routes_and_forwarding(client: GatewayClient) -> Tuple[bool, st
             f"{client.base}/_vp/providers",
             {
                 "name": _rid("e2e-chat"),
-                "kind": "openai-compat",
+                "kind": "openai-chat",
                 "base_url": "http://127.0.0.1:19802",
                 "auth_ref": None,
                 "enabled": True,
@@ -624,7 +625,7 @@ def test_protocol_routes_and_forwarding(client: GatewayClient) -> Tuple[bool, st
             },
         )
         if p_chat_status != 200 or "id" not in p_chat_obj:
-            raise RuntimeError(f"create openai-compat failed: {p_chat_status} {p_chat_raw}")
+            raise RuntimeError(f"create openai-chat failed: {p_chat_status} {p_chat_raw}")
         p_chat = p_chat_obj["id"]
 
         p_resp_status, p_resp_obj, p_resp_raw = _request(
@@ -685,6 +686,353 @@ def test_protocol_routes_and_forwarding(client: GatewayClient) -> Tuple[bool, st
         s_openai.stop()
 
 
+def test_multi_auth_switching_provider_scoped(client: GatewayClient) -> Tuple[bool, str]:
+    """
+    Validate provider-scoped auth isolation:
+    - Claude route must use Anthropic-style `x-api-key`.
+    - Codex/OpenAI Responses route must use OpenAI-style `Authorization: Bearer`.
+    - Two providers with different auth refs can coexist and be switched by model/route.
+    """
+    claude_alias = _rid("qa-claude-auth")
+    codex_alias = _rid("qa-codex-auth")
+    expected_claude_key = "claude-secret-key"
+    expected_codex_key = "codex-secret-key"
+    received: Dict[str, List[str]] = {
+        "claude_x_api_key": [],
+        "claude_auth": [],
+        "codex_x_api_key": [],
+        "codex_auth": [],
+    }
+
+    class ClaudeAuthHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length)
+            received["claude_x_api_key"].append(self.headers.get("x-api-key", ""))
+            received["claude_auth"].append(self.headers.get("Authorization", ""))
+            if self.path == "/v1/messages" and self.headers.get("x-api-key") == expected_claude_key:
+                out = {
+                    "id": "msg_auth_ok",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "claude-auth-ok"}],
+                }
+                raw_out = json.dumps(out).encode("utf-8")
+                self.send_response(200)
+            else:
+                raw_out = b'{"error":"bad anthropic auth"}'
+                self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw_out)))
+            self.end_headers()
+            self.wfile.write(raw_out)
+
+        def log_message(self, fmt, *args):  # noqa: A003
+            return
+
+    class CodexAuthHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length)
+            received["codex_x_api_key"].append(self.headers.get("x-api-key", ""))
+            received["codex_auth"].append(self.headers.get("Authorization", ""))
+            if self.path == "/v1/responses" and self.headers.get("Authorization") == f"Bearer {expected_codex_key}":
+                out = {
+                    "id": "resp_auth_ok",
+                    "object": "response",
+                    "model": "gpt-auth-ok",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "codex-auth-ok"}],
+                        }
+                    ],
+                }
+                raw_out = json.dumps(out).encode("utf-8")
+                self.send_response(200)
+            else:
+                raw_out = b'{"error":"bad openai auth"}'
+                self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw_out)))
+            self.end_headers()
+            self.wfile.write(raw_out)
+
+        def log_message(self, fmt, *args):  # noqa: A003
+            return
+
+    class ReuseTCPServer(ThreadingHTTPServer):
+        allow_reuse_address = True
+
+    claude_server = ReuseTCPServer(("127.0.0.1", 19841), ClaudeAuthHandler)
+    codex_server = ReuseTCPServer(("127.0.0.1", 19842), CodexAuthHandler)
+    claude_thread = threading.Thread(target=claude_server.serve_forever, daemon=True)
+    codex_thread = threading.Thread(target=codex_server.serve_forever, daemon=True)
+    claude_thread.start()
+    codex_thread.start()
+
+    p_claude = p_codex = None
+    try:
+        s1, o1, r1 = _request(
+            "POST",
+            f"{client.base}/_vp/providers",
+            {
+                "name": _rid("e2e-claude-auth"),
+                "kind": "anthropic",
+                "base_url": "http://127.0.0.1:19841",
+                "auth_ref": f"literal:{expected_claude_key}",
+                "enabled": True,
+                "priority": -1000,
+                "model_aliases": [{"alias": claude_alias, "upstream_model": "claude-mock"}],
+            },
+        )
+        if s1 != 200 or "id" not in o1:
+            raise RuntimeError(f"create claude auth provider failed: {s1} {r1}")
+        p_claude = o1["id"]
+
+        s2, o2, r2 = _request(
+            "POST",
+            f"{client.base}/_vp/providers",
+            {
+                "name": _rid("e2e-codex-auth"),
+                "kind": "openai-responses",
+                "base_url": "http://127.0.0.1:19842",
+                "auth_ref": f"literal:{expected_codex_key}",
+                "enabled": True,
+                "priority": -1000,
+                "model_aliases": [{"alias": codex_alias, "upstream_model": "gpt-mock"}],
+            },
+        )
+        if s2 != 200 or "id" not in o2:
+            raise RuntimeError(f"create codex auth provider failed: {s2} {r2}")
+        p_codex = o2["id"]
+
+        c_status, c_obj, _ = client.post_json(
+            "/v1/messages",
+            {
+                "model": claude_alias,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+        )
+        x_status, x_obj, _ = client.post_json(
+            "/v1/responses",
+            {"model": codex_alias, "input": "ping"},
+        )
+
+        claude_ok = c_status == 200 and c_obj.get("id") == "msg_auth_ok"
+        codex_ok = x_status == 200 and x_obj.get("id") == "resp_auth_ok"
+        no_cross = (
+            all(v == expected_claude_key for v in received["claude_x_api_key"] if v)
+            and all(v == "" for v in received["claude_auth"])
+            and all(v == "" for v in received["codex_x_api_key"])
+            and all(v == f"Bearer {expected_codex_key}" for v in received["codex_auth"] if v)
+        )
+        ok = claude_ok and codex_ok and no_cross
+        msg = (
+            f"claude_http={c_status}, codex_http={x_status}, "
+            f"claude_x_api_key={received['claude_x_api_key']}, claude_auth={received['claude_auth']}, "
+            f"codex_x_api_key={received['codex_x_api_key']}, codex_auth={received['codex_auth']}"
+        )
+        return ok, msg
+    finally:
+        if p_claude:
+            client.delete_provider(p_claude)
+        if p_codex:
+            client.delete_provider(p_codex)
+        claude_server.shutdown()
+        codex_server.shutdown()
+        claude_server.server_close()
+        codex_server.server_close()
+        claude_thread.join(timeout=2)
+        codex_thread.join(timeout=2)
+
+
+def test_auth_json_ref_not_supported_yet(client: GatewayClient) -> Tuple[bool, str]:
+    """
+    Current behavior check:
+    vibe only resolves auth_ref via keyring/env/literal schemes.
+    `file:/.../auth.json` (Codex-style local auth file) is currently unsupported.
+    """
+    alias = _rid("qa-auth-json")
+    mock = MockBehavior(status=200, content="should-not-hit", model="m-auth-json")
+    server = MockServer(19852, mock)
+    server.start()
+    pid = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="vibe-auth-json-") as td:
+            auth_path = f"{td}/auth.json"
+            with open(auth_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "tokens": {"id_token": "dummy.jwt.token"},
+                        "provider": "codex",
+                    },
+                    f,
+                )
+
+            status, obj, raw = _request(
+                "POST",
+                f"{client.base}/_vp/providers",
+                {
+                    "name": _rid("e2e-auth-json"),
+                    "kind": "openai-responses",
+                    "base_url": "http://127.0.0.1:19852",
+                    "auth_ref": f"file:{auth_path}",
+                    "enabled": True,
+                    "priority": -1000,
+                    "model_aliases": [{"alias": alias, "upstream_model": "gpt-mock"}],
+                },
+            )
+            if status != 200 or "id" not in obj:
+                raise RuntimeError(f"create provider failed: {status} {raw}")
+            pid = obj["id"]
+
+            req_status, _req_obj, req_raw = client.post_json(
+                "/v1/responses",
+                {"model": alias, "input": "ping"},
+            )
+            unsupported = req_status == 503 and "unknown auth_ref scheme" in req_raw
+            ok = unsupported and mock.hits == 0
+            msg = f"http={req_status}, body={req_raw[:120]}, upstream_hits={mock.hits}"
+            return ok, msg
+    finally:
+        if pid:
+            client.delete_provider(pid)
+        server.stop()
+
+
+def test_auth_header_mode_by_provider_kind_not_secret_pattern(client: GatewayClient) -> Tuple[bool, str]:
+    """
+    Behavior check:
+    auth header mode is selected by provider kind/route, not by secret string pattern.
+    """
+    claude_alias = _rid("qa-kind-claude")
+    codex_alias = _rid("qa-kind-codex")
+    anthropic_like_openai = "Bearer sk-openai-style-token"
+    openai_like_anthropic = "sk-ant-style-token"
+    received: Dict[str, List[str]] = {
+        "claude_x_api_key": [],
+        "claude_auth": [],
+        "codex_x_api_key": [],
+        "codex_auth": [],
+    }
+
+    class ClaudeKindHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length)
+            received["claude_x_api_key"].append(self.headers.get("x-api-key", ""))
+            received["claude_auth"].append(self.headers.get("Authorization", ""))
+            raw_out = b'{"id":"msg_kind_ok","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw_out)))
+            self.end_headers()
+            self.wfile.write(raw_out)
+
+        def log_message(self, fmt, *args):  # noqa: A003
+            return
+
+    class CodexKindHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length)
+            received["codex_x_api_key"].append(self.headers.get("x-api-key", ""))
+            received["codex_auth"].append(self.headers.get("Authorization", ""))
+            raw_out = b'{"id":"resp_kind_ok","object":"response","model":"gpt-kind-ok","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw_out)))
+            self.end_headers()
+            self.wfile.write(raw_out)
+
+        def log_message(self, fmt, *args):  # noqa: A003
+            return
+
+    class ReuseTCPServer(ThreadingHTTPServer):
+        allow_reuse_address = True
+
+    claude_server = ReuseTCPServer(("127.0.0.1", 19853), ClaudeKindHandler)
+    codex_server = ReuseTCPServer(("127.0.0.1", 19854), CodexKindHandler)
+    claude_thread = threading.Thread(target=claude_server.serve_forever, daemon=True)
+    codex_thread = threading.Thread(target=codex_server.serve_forever, daemon=True)
+    claude_thread.start()
+    codex_thread.start()
+
+    p_claude = p_codex = None
+    try:
+        s1, o1, r1 = _request(
+            "POST",
+            f"{client.base}/_vp/providers",
+            {
+                "name": _rid("e2e-kind-claude"),
+                "kind": "anthropic",
+                "base_url": "http://127.0.0.1:19853",
+                "auth_ref": f"literal:{anthropic_like_openai}",
+                "enabled": True,
+                "priority": -1000,
+                "model_aliases": [{"alias": claude_alias, "upstream_model": "claude-mock"}],
+            },
+        )
+        if s1 != 200 or "id" not in o1:
+            raise RuntimeError(f"create claude provider failed: {s1} {r1}")
+        p_claude = o1["id"]
+
+        s2, o2, r2 = _request(
+            "POST",
+            f"{client.base}/_vp/providers",
+            {
+                "name": _rid("e2e-kind-codex"),
+                "kind": "openai-responses",
+                "base_url": "http://127.0.0.1:19854",
+                "auth_ref": f"literal:{openai_like_anthropic}",
+                "enabled": True,
+                "priority": -1000,
+                "model_aliases": [{"alias": codex_alias, "upstream_model": "gpt-mock"}],
+            },
+        )
+        if s2 != 200 or "id" not in o2:
+            raise RuntimeError(f"create codex provider failed: {s2} {r2}")
+        p_codex = o2["id"]
+
+        c_status, _c_obj, _ = client.post_json(
+            "/v1/messages",
+            {"model": claude_alias, "max_tokens": 16, "messages": [{"role": "user", "content": "ping"}]},
+        )
+        x_status, _x_obj, _ = client.post_json(
+            "/v1/responses",
+            {"model": codex_alias, "input": "ping"},
+        )
+
+        header_mode_ok = (
+            c_status == 200
+            and x_status == 200
+            and all(v == anthropic_like_openai for v in received["claude_x_api_key"] if v)
+            and all(v == "" for v in received["claude_auth"])
+            and all(v == "" for v in received["codex_x_api_key"])
+            and all(v == f"Bearer {openai_like_anthropic}" for v in received["codex_auth"] if v)
+        )
+        msg = (
+            f"claude_http={c_status}, codex_http={x_status}, "
+            f"claude_x_api_key={received['claude_x_api_key']}, claude_auth={received['claude_auth']}, "
+            f"codex_x_api_key={received['codex_x_api_key']}, codex_auth={received['codex_auth']}"
+        )
+        return header_mode_ok, msg
+    finally:
+        if p_claude:
+            client.delete_provider(p_claude)
+        if p_codex:
+            client.delete_provider(p_codex)
+        claude_server.shutdown()
+        codex_server.shutdown()
+        claude_server.server_close()
+        codex_server.server_close()
+        claude_thread.join(timeout=2)
+        codex_thread.join(timeout=2)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gateway", default="http://127.0.0.1:15917")
@@ -701,6 +1049,9 @@ def main() -> int:
         ("tool_path_routing_expectation", test_tool_path_routing_expectation),
         ("gemini_native_route_expectation", test_gemini_native_route_expectation),
         ("responses_protocol_semantics_expectation", test_responses_protocol_semantics_expectation),
+        ("multi_auth_switching_provider_scoped", test_multi_auth_switching_provider_scoped),
+        ("auth_json_ref_not_supported_yet", test_auth_json_ref_not_supported_yet),
+        ("auth_header_mode_by_provider_kind_not_secret_pattern", test_auth_header_mode_by_provider_kind_not_secret_pattern),
     ]
 
     failed = 0

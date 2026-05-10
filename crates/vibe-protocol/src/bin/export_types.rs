@@ -19,6 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     LogPage::export_all()?;
     Health::export_all()?;
     ProviderInput::export_all()?;
+    ProviderHealthSummary::export_all()?;
+    CredentialPlanSnapshot::export_all()?;
+    ProviderCodexPlanItem::export_all()?;
+    CodexPlanRefreshResult::export_all()?;
     println!("exported types to {}", vibe_protocol::ts_out_dir());
     Ok(())
 }

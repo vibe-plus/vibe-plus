@@ -6,6 +6,12 @@ import type { ProviderStat } from "./ProviderStat.js";
  * Enhanced stats for the dashboard.
  */
 export type DashboardStats = {
+  window_hours: bigint;
+  window_label: string;
+  requests_in_window: bigint;
+  success_rate_in_window: number;
+  input_tokens_in_window: bigint;
+  output_tokens_in_window: bigint;
   requests_last_hour: bigint;
   requests_last_24h: bigint;
   success_rate_last_hour: number;
