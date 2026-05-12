@@ -35,3 +35,4 @@ target/
 
 # QA screenshots from local browser runs
 apps/website/qa-screenshots/
+.playwright-cli/

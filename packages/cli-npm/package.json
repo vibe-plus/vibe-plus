@@ -1,7 +1,20 @@
 {
-  "name": "vibe-cli",
+  "name": "@vibe-plus/cli",
   "version": "0.0.1",
   "description": "The Unified Toolchain for the Vibe — local AI API gateway CLI",
+  "keywords": [
+    "ai",
+    "anthropic",
+    "cli",
+    "codex",
+    "gateway",
+    "openai",
+    "vibe"
+  ],
+  "homepage": "https://github.com/vibe-plus/vibe-plus#readme",
+  "bugs": {
+    "url": "https://github.com/vibe-plus/vibe-plus/issues"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -10,15 +23,24 @@
   "bin": {
     "vibe": "./bin/vibe.js"
   },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "postinstall": "node ./bin/vibe.js --version || true"
+    "verify": "node ./scripts/verify-package.mjs"
   },
   "optionalDependencies": {
-    "@vibe-cli/darwin-arm64": "0.0.1",
-    "@vibe-cli/darwin-x64": "0.0.1",
-    "@vibe-cli/linux-arm64": "0.0.1",
-    "@vibe-cli/linux-x64": "0.0.1",
-    "@vibe-cli/win32-x64": "0.0.1"
+    "@vibe-plus/darwin-arm64": "0.0.1",
+    "@vibe-plus/darwin-x64": "0.0.1",
+    "@vibe-plus/linux-arm64": "0.0.1",
+    "@vibe-plus/linux-x64": "0.0.1",
+    "@vibe-plus/win32-arm64": "0.0.1",
+    "@vibe-plus/win32-x64": "0.0.1"
   },
   "engines": {
     "node": ">=18.0.0"

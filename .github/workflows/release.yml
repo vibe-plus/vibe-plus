@@ -8,8 +8,35 @@ permissions:
   contents: write
 
 jobs:
+  tag-check:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag and workspace version
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE}" == "tag" ]] || { echo "Not a tag push"; exit 1; }
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "Tag '${GITHUB_REF_NAME}' must look like v1.2.3 or v1.2.3-alpha.1"
+            exit 1
+          }
+          VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          NPM_VERSION="$(node -p "require('./packages/cli-npm/package.json').version")"
+          [[ "$VERSION" == "$CARGO_VERSION" ]] || {
+            echo "Tag $VERSION does not match Cargo workspace version $CARGO_VERSION"
+            exit 1
+          }
+          [[ "$VERSION" == "$NPM_VERSION" ]] || {
+            echo "Tag $VERSION does not match npm wrapper version $NPM_VERSION"
+            exit 1
+          }
+
   # ---------- build matrix ---------------------------------------------------
   build:
+    needs: tag-check
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -32,6 +59,9 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             npm_plat: win32-x64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            npm_plat: win32-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +128,7 @@ jobs:
 
       - name: Populate platform packages
         run: |
-          for PLAT in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+          for PLAT in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64; do
             DEST="packages/cli-npm/platform/$PLAT/bin"
             mkdir -p "$DEST"
             SRC="artifacts/vibe-$PLAT"
@@ -107,37 +137,76 @@ jobs:
               chmod +x "$DEST/vibe"
             elif [ -f "$SRC/bin/vibe.exe" ]; then
               cp "$SRC/bin/vibe.exe" "$DEST/vibe.exe"
+            else
+              echo "Missing binary artifact for $PLAT" >&2
+              exit 1
             fi
           done
 
       - name: Stamp versions
         run: |
-          # Set version in all packages
-          for PKG in \
-            packages/cli-npm/package.json \
-            packages/cli-npm/platform/darwin-arm64/package.json \
-            packages/cli-npm/platform/darwin-x64/package.json \
-            packages/cli-npm/platform/linux-x64/package.json \
-            packages/cli-npm/platform/linux-arm64/package.json \
-            packages/cli-npm/platform/win32-x64/package.json; do
-            sed -i "s/\"version\": \"0.0.1\"/\"version\": \"$VERSION\"/" "$PKG"
-            sed -i "s/\"0.0.1\"/\"$VERSION\"/g" "$PKG"
-          done
+          node <<'NODE'
+          const fs = require("node:fs");
+          const version = process.env.VERSION;
+          const platformPackages = [
+            "@vibe-plus/darwin-arm64",
+            "@vibe-plus/darwin-x64",
+            "@vibe-plus/linux-x64",
+            "@vibe-plus/linux-arm64",
+            "@vibe-plus/win32-x64",
+            "@vibe-plus/win32-arm64",
+          ];
+          const files = [
+            "packages/cli-npm/package.json",
+            "packages/cli-npm/platform/darwin-arm64/package.json",
+            "packages/cli-npm/platform/darwin-x64/package.json",
+            "packages/cli-npm/platform/linux-x64/package.json",
+            "packages/cli-npm/platform/linux-arm64/package.json",
+            "packages/cli-npm/platform/win32-x64/package.json",
+            "packages/cli-npm/platform/win32-arm64/package.json",
+          ];
+
+          for (const file of files) {
+            const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+            pkg.version = version;
+            if (pkg.name === "@vibe-plus/cli") {
+              pkg.optionalDependencies = Object.fromEntries(
+                platformPackages.map((name) => [name, version]),
+              );
+            }
+            fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
+          }
+          NODE
+
+      - name: Verify npm package contents
+        run: |
+          cd packages/cli-npm
+          npm run verify -- --require-binaries
 
       - name: Publish platform packages first
         run: |
-          for PLAT in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+          for PLAT in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64; do
             cd packages/cli-npm/platform/$PLAT
-            npm publish --access public || true
+            PKG=$(node -p "require('./package.json').name")
+            if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
+              echo "$PKG@$VERSION already exists, skipping"
+            else
+              npm publish --access public
+            fi
             cd ../../../../
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish vibe-cli wrapper
+      - name: Publish npm wrapper
         run: |
           cd packages/cli-npm
-          npm publish --access public
+          PKG=$(node -p "require('./package.json').name")
+          if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
+            echo "$PKG@$VERSION already exists, skipping"
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

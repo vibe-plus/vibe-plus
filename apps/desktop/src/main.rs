@@ -1,0 +1,532 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use tao::dpi::LogicalSize;
+use tao::event::{Event, StartCause, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
+use tao::window::{Window, WindowBuilder};
+use tray_icon::{
+    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    Icon, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+};
+use wry::{WebView, WebViewBuilder};
+
+const DEV_FRONTEND_URL: &str = "http://127.0.0.1:15876";
+const TRAY_ICON_SIZE: u32 = 32;
+const DEFAULT_MIN_WIDTH: u32 = 720;
+const DEFAULT_MIN_HEIGHT: u32 = 480;
+const DEFAULT_WIDTH: u32 = 1280;
+const DEFAULT_HEIGHT: u32 = 820;
+const FLOATING_WIDTH: u32 = 720;
+const FLOATING_HEIGHT: u32 = 520;
+const FLOATING_MIN_WIDTH: u32 = 360;
+const FLOATING_MIN_HEIGHT: u32 = 260;
+const DEFAULT_GATEWAY_PORT: u16 = 15917;
+const SHELL_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const UPDATE_READY_MARKER: &str = "update-downloaded-ready";
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "vibe-app",
+    version,
+    about = "Disposable Vibe Plus desktop shell."
+)]
+struct Args {
+    /// Frontend URL to load in the window.
+    #[arg(long, default_value = DEV_FRONTEND_URL)]
+    url: String,
+
+    /// Window width in logical pixels.
+    #[arg(long)]
+    width: Option<u32>,
+
+    /// Window height in logical pixels.
+    #[arg(long)]
+    height: Option<u32>,
+
+    /// Minimum window width in logical pixels.
+    #[arg(long)]
+    min_width: Option<u32>,
+
+    /// Minimum window height in logical pixels.
+    #[arg(long)]
+    min_height: Option<u32>,
+
+    /// Start as a compact floating utility window.
+    #[arg(long)]
+    floating: bool,
+
+    /// Keep the window above other windows.
+    #[arg(long)]
+    always_on_top: bool,
+
+    /// Hide native window decorations.
+    #[arg(long)]
+    frameless: bool,
+
+    /// Request a transparent window/webview background.
+    #[arg(long)]
+    transparent: bool,
+
+    /// Hide the floating window when it loses focus.
+    #[arg(long)]
+    hide_on_blur: bool,
+
+    /// Keep the floating window visible when it loses focus.
+    #[arg(long)]
+    no_hide_on_blur: bool,
+
+    /// Disable the system tray icon.
+    #[arg(long)]
+    no_tray: bool,
+
+    /// Gateway port used for shell status checks.
+    #[arg(long, default_value_t = DEFAULT_GATEWAY_PORT)]
+    gateway_port: u16,
+}
+
+#[derive(Debug, Clone)]
+enum UserEvent {
+    Menu(MenuEvent),
+    Tray(TrayIconEvent),
+}
+
+#[derive(Debug, Clone)]
+struct TrayMenuIds {
+    show: MenuId,
+    hide: MenuId,
+    gateway_status: MenuId,
+    takeover: MenuId,
+    restart_update: MenuId,
+    quit: MenuId,
+}
+
+struct TrayParts {
+    _icon: TrayIcon,
+    menu: Menu,
+    gateway_separator: PredefinedMenuItem,
+    gateway_status: MenuItem,
+    takeover: MenuItem,
+    gateway_visible: bool,
+    restart_update: MenuItem,
+    restart_update_visible: bool,
+    menu_ids: TrayMenuIds,
+}
+
+#[derive(Debug, Clone)]
+struct ShellStatus {
+    gateway_online: bool,
+    gateway_label: String,
+    update_ready: bool,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    run(args)
+}
+
+fn run(args: Args) -> Result<()> {
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+    TrayIconEvent::set_event_handler(Some(move |event| {
+        let _ = proxy.send_event(UserEvent::Tray(event));
+    }));
+    let proxy = event_loop.create_proxy();
+    MenuEvent::set_event_handler(Some(move |event| {
+        let _ = proxy.send_event(UserEvent::Menu(event));
+    }));
+
+    let floating = args.floating;
+    let always_on_top = args.always_on_top;
+    let frameless = args.frameless;
+    let transparent = args.transparent;
+    let hide_on_blur = args.hide_on_blur || (floating && !args.no_hide_on_blur && !args.no_tray);
+    let default_width = if floating {
+        FLOATING_WIDTH
+    } else {
+        DEFAULT_WIDTH
+    };
+    let default_height = if floating {
+        FLOATING_HEIGHT
+    } else {
+        DEFAULT_HEIGHT
+    };
+    let default_min_width = if floating {
+        FLOATING_MIN_WIDTH
+    } else {
+        DEFAULT_MIN_WIDTH
+    };
+    let default_min_height = if floating {
+        FLOATING_MIN_HEIGHT
+    } else {
+        DEFAULT_MIN_HEIGHT
+    };
+    let width = args.width.unwrap_or(default_width);
+    let height = args.height.unwrap_or(default_height);
+    let min_width = args.min_width.unwrap_or(default_min_width);
+    let min_height = args.min_height.unwrap_or(default_min_height);
+    let close_hides = !args.no_tray;
+    let gateway_port = args.gateway_port;
+
+    let window = WindowBuilder::new()
+        .with_title("Vibe Plus")
+        .with_inner_size(LogicalSize::new(width, height))
+        .with_min_inner_size(LogicalSize::new(min_width, min_height))
+        .with_always_on_top(always_on_top)
+        .with_decorations(!frameless)
+        .with_transparent(transparent)
+        .build(&event_loop)
+        .context("failed to create Vibe Plus window")?;
+
+    let mut tray = if args.no_tray {
+        None
+    } else {
+        Some(build_tray().context("failed to create tray icon")?)
+    };
+
+    let builder = WebViewBuilder::new()
+        .with_initialization_script(
+            "window.__vibeOpenUrls=[];window.__vibeReceiveOpenUrl=(url)=>{window.__vibeOpenUrls.push(url);window.dispatchEvent(new CustomEvent('vibe:native-open-url',{detail:url}));};",
+        )
+        .with_url(&args.url)
+        .with_transparent(transparent);
+
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "android"
+    ))]
+    let webview = builder
+        .build(&window)
+        .context("failed to create Vibe Plus webview")?;
+
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "android"
+    )))]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+
+        let vbox = window
+            .default_vbox()
+            .context("failed to get GTK container")?;
+        builder
+            .build_gtk(vbox)
+            .context("failed to create Vibe Plus webview")?
+    };
+
+    let mut ignore_next_blur = false;
+    let mut last_shell_poll = Instant::now() - SHELL_POLL_INTERVAL;
+
+    event_loop.run(move |event, event_loop, control_flow| {
+        *control_flow = ControlFlow::Wait;
+
+        match event {
+            Event::NewEvents(StartCause::Init) => {
+                let _keep_tray_alive = &tray;
+                if let Some(tray) = tray.as_mut() {
+                    update_tray_status(tray, &check_shell_status(gateway_port));
+                }
+            }
+            Event::NewEvents(_) => {
+                if last_shell_poll.elapsed() >= SHELL_POLL_INTERVAL {
+                    last_shell_poll = Instant::now();
+                    if let Some(tray) = tray.as_mut() {
+                        update_tray_status(tray, &check_shell_status(gateway_port));
+                    }
+                }
+            }
+            Event::Opened { urls } => {
+                show_window(&window);
+                ignore_next_blur = true;
+                for url in urls {
+                    dispatch_open_url(&webview, url.as_str());
+                }
+            }
+            Event::Reopen { .. } => {
+                show_window(&window);
+                ignore_next_blur = true;
+            }
+            Event::UserEvent(UserEvent::Menu(event)) => {
+                if tray
+                    .as_ref()
+                    .is_some_and(|tray| event.id == tray.menu_ids.show)
+                {
+                    show_window(&window);
+                    ignore_next_blur = true;
+                } else if tray
+                    .as_ref()
+                    .is_some_and(|tray| event.id == tray.menu_ids.hide)
+                {
+                    hide_window(&window, event_loop);
+                } else if tray
+                    .as_ref()
+                    .is_some_and(|tray| event.id == tray.menu_ids.gateway_status)
+                {
+                    if let Some(tray) = tray.as_mut() {
+                        update_tray_status(tray, &check_shell_status(gateway_port));
+                    }
+                } else if tray
+                    .as_ref()
+                    .is_some_and(|tray| event.id == tray.menu_ids.takeover)
+                {
+                    show_window(&window);
+                    ignore_next_blur = true;
+                } else if tray
+                    .as_ref()
+                    .is_some_and(|tray| event.id == tray.menu_ids.restart_update)
+                {
+                    clear_update_ready_marker();
+                    restart_to_update(control_flow);
+                } else if tray
+                    .as_ref()
+                    .is_some_and(|tray| event.id == tray.menu_ids.quit)
+                {
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            Event::UserEvent(UserEvent::Tray(TrayIconEvent::Click {
+                button_state: MouseButtonState::Up,
+                ..
+            }))
+            | Event::UserEvent(UserEvent::Tray(TrayIconEvent::DoubleClick { .. })) => {
+                if toggle_window(&window, event_loop) {
+                    ignore_next_blur = true;
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } if close_hides => {
+                hide_window(&window, event_loop);
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit,
+            Event::WindowEvent {
+                event: WindowEvent::Focused(false),
+                ..
+            } if hide_on_blur && ignore_next_blur => {
+                ignore_next_blur = false;
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Focused(false),
+                ..
+            } if hide_on_blur => {
+                hide_window(&window, event_loop);
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Focused(true),
+                ..
+            } => {
+                ignore_next_blur = false;
+            }
+            _ => {}
+        }
+    });
+}
+
+fn show_window(window: &Window) {
+    window.set_visible(true);
+    window.set_minimized(false);
+    window.set_focus();
+}
+
+fn toggle_window<T>(window: &Window, event_loop: &EventLoopWindowTarget<T>) -> bool {
+    if window.is_visible() {
+        hide_window(window, event_loop);
+        false
+    } else {
+        show_window(window);
+        true
+    }
+}
+
+fn hide_window<T>(window: &Window, event_loop: &EventLoopWindowTarget<T>) {
+    window.set_visible(false);
+    hide_application(event_loop);
+}
+
+fn dispatch_open_url(webview: &WebView, url: &str) {
+    let Ok(encoded) = serde_json::to_string(url) else {
+        return;
+    };
+    let script = format!("window.__vibeReceiveOpenUrl?.({encoded});");
+    let _ = webview.evaluate_script(&script);
+}
+
+fn build_tray() -> Result<TrayParts> {
+    let show = MenuItem::new("Show Vibe Plus", true, None);
+    let hide = MenuItem::new("Hide", true, None);
+    let gateway_separator = PredefinedMenuItem::separator();
+    let gateway_status = MenuItem::new("Gateway ready", false, None);
+    let takeover = MenuItem::new("Open gateway controls", true, None);
+    let restart_update = MenuItem::new("Restart to update", false, None);
+    let quit = MenuItem::new("Quit Vibe Plus", true, "cmd+q".parse().ok());
+    let menu = Menu::with_items(&[&show, &hide, &PredefinedMenuItem::separator(), &quit])
+        .context("failed to build tray menu")?;
+    let menu_ids = TrayMenuIds {
+        show: show.id().clone(),
+        hide: hide.id().clone(),
+        gateway_status: gateway_status.id().clone(),
+        takeover: takeover.id().clone(),
+        restart_update: restart_update.id().clone(),
+        quit: quit.id().clone(),
+    };
+    let icon = build_tray_image()?;
+    let tray_icon = TrayIconBuilder::new()
+        .with_tooltip("Vibe Plus")
+        .with_title("Vibe+")
+        .with_menu(Box::new(menu.clone()))
+        .with_icon_as_template(true)
+        .with_icon(icon)
+        .with_menu_on_left_click(false)
+        .build()
+        .context("failed to build tray icon")?;
+
+    Ok(TrayParts {
+        _icon: tray_icon,
+        menu,
+        gateway_separator,
+        gateway_status,
+        takeover,
+        gateway_visible: false,
+        restart_update,
+        restart_update_visible: false,
+        menu_ids,
+    })
+}
+
+fn update_tray_status(tray: &mut TrayParts, status: &ShellStatus) {
+    tray.gateway_status.set_text(&status.gateway_label);
+    tray.gateway_status.set_enabled(false);
+    tray.takeover.set_enabled(status.gateway_online);
+    tray.takeover.set_text("Gateway and takeover");
+    if status.gateway_online && !tray.gateway_visible {
+        let insert_at = if tray.restart_update_visible {
+            tray.menu.items().len().saturating_sub(3)
+        } else {
+            tray.menu.items().len().saturating_sub(2)
+        };
+        let _ = tray.menu.insert(&tray.gateway_separator, insert_at);
+        let _ = tray.menu.insert(&tray.gateway_status, insert_at + 1);
+        let _ = tray.menu.insert(&tray.takeover, insert_at + 2);
+        tray.gateway_visible = true;
+    } else if !status.gateway_online && tray.gateway_visible {
+        let _ = tray.menu.remove(&tray.takeover);
+        let _ = tray.menu.remove(&tray.gateway_status);
+        let _ = tray.menu.remove(&tray.gateway_separator);
+        tray.gateway_visible = false;
+    }
+    if status.update_ready && !tray.restart_update_visible {
+        let insert_at = tray.menu.items().len().saturating_sub(2);
+        let _ = tray.menu.insert(&tray.restart_update, insert_at);
+        tray.restart_update_visible = true;
+    } else if !status.update_ready && tray.restart_update_visible {
+        let _ = tray.menu.remove(&tray.restart_update);
+        tray.restart_update_visible = false;
+    }
+}
+
+fn check_shell_status(port: u16) -> ShellStatus {
+    let gateway_online = gateway_responds(port);
+    ShellStatus {
+        gateway_online,
+        gateway_label: if gateway_online {
+            format!("Gateway on :{port}")
+        } else {
+            "Gateway unavailable".into()
+        },
+        update_ready: update_ready_marker_path().is_some_and(|p| p.exists()),
+    }
+}
+
+fn gateway_responds(port: u16) -> bool {
+    let addr: SocketAddr = match format!("127.0.0.1:{port}").parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(180)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(220)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(220)));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = [0_u8; 64];
+    stream
+        .read(&mut buf)
+        .is_ok_and(|n| std::str::from_utf8(&buf[..n]).is_ok_and(|s| s.contains(" 200 ")))
+}
+
+fn vibe_home() -> Option<PathBuf> {
+    let home = std::env::var_os("VIBE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| directories::UserDirs::new().map(|d| d.home_dir().join(".vibe")))?;
+    Some(home)
+}
+
+fn update_ready_marker_path() -> Option<PathBuf> {
+    vibe_home().map(|home| home.join(UPDATE_READY_MARKER))
+}
+
+fn clear_update_ready_marker() {
+    if let Some(path) = update_ready_marker_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn restart_to_update(control_flow: &mut ControlFlow) {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(std::env::args_os().skip(1));
+        let _ = cmd.spawn();
+    }
+    *control_flow = ControlFlow::Exit;
+}
+
+#[cfg(target_os = "macos")]
+fn hide_application<T>(event_loop: &EventLoopWindowTarget<T>) {
+    use tao::platform::macos::EventLoopWindowTargetExtMacOS;
+
+    event_loop.hide_application();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_application<T>(_event_loop: &EventLoopWindowTarget<T>) {}
+
+fn build_tray_image() -> Result<Icon> {
+    let mut rgba = Vec::with_capacity((TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize);
+    let center = (TRAY_ICON_SIZE as f32 - 1.0) / 2.0;
+    let radius = center - 2.0;
+
+    for y in 0..TRAY_ICON_SIZE {
+        for x in 0..TRAY_ICON_SIZE {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let alpha = if dist <= radius { 255 } else { 0 };
+            let core = dist <= radius * 0.52;
+            let (r, g, b) = if core {
+                (255, 255, 255)
+            } else {
+                (92, 111, 255)
+            };
+            rgba.extend_from_slice(&[r, g, b, alpha]);
+        }
+    }
+
+    Icon::from_rgba(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE).context("invalid tray icon")
+}

@@ -1,8 +1,12 @@
 {
-  "name": "@vibe-cli/darwin-x64",
+  "name": "@vibe-plus/darwin-x64",
   "version": "0.0.1",
-  "description": "vibe-cli binary for darwin-x64",
+  "description": "vibe binary for darwin-x64",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vibe-plus/vibe-plus"
+  },
   "files": [
     "bin/"
   ],
@@ -11,5 +15,8 @@
   ],
   "cpu": [
     "x64"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

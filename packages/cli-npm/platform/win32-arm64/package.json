@@ -1,7 +1,7 @@
 {
-  "name": "@vibe-plus/win32-x64",
+  "name": "@vibe-plus/win32-arm64",
   "version": "0.0.1",
-  "description": "vibe binary for win32-x64",
+  "description": "vibe binary for win32-arm64",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,7 +14,7 @@
     "win32"
   ],
   "cpu": [
-    "x64"
+    "arm64"
   ],
   "publishConfig": {
     "access": "public"
