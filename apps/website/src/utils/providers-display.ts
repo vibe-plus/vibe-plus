@@ -3,7 +3,7 @@ import type { Credential, CredentialPoolStatus, CredentialPlanSnapshot } from ".
 /** 统一供应商标题：历史「Codex (…）」「Claude (…）」等收敛短名。 */
 export function displayProviderName(raw: string | null | undefined): string {
   const t = raw?.trim() ?? "";
-  if (!t) return "上游";
+  if (!t) return "provider";
   const lower = t.toLowerCase();
   if (lower.startsWith("codex (")) return "Codex";
   if (lower.startsWith("claude (")) return "Claude";
@@ -35,7 +35,7 @@ export function credentialAuthShort(c: Credential, row: CredentialPoolStatus | u
   if (row?.auth_mode === "oauth" || row?.auth_mode === "chatgpt") return "OAuth";
   if (row?.auth_mode) return row.auth_mode === "apikey" ? "API Key" : row.auth_mode;
   if (c.auth_ref) return "API Key";
-  return "未配置";
+  return "unconfigured";
 }
 
 /** 主行身份：邮箱 → JWT 主体/用户 id → 凭证标签。 */
@@ -45,7 +45,7 @@ export function credentialPrimaryAccountLabel(c: Credential): string {
   const sub = c.oauth_account_subject?.trim();
   if (sub) return sub;
   const lab = c.label?.trim();
-  return lab || "凭证";
+  return lab || "credential";
 }
 
 /** JWT 内套餐档位（小写 slug），仅作次要信息；无则 null。 */
@@ -82,17 +82,18 @@ export function mergedPoolStatus(
   c: Credential,
   row: CredentialPoolStatus | undefined,
 ): { ok: boolean; text: string; tone: StatusTone } {
-  if (!c.enabled) return { ok: false, text: "已关闭", tone: "warn" };
-  if (!row) return { ok: true, text: "已启用", tone: "ok" };
-  if (row.circuit_open) return { ok: false, text: "熔断", tone: "bad" };
-  if (row.circuit_state === "half-open") return { ok: false, text: "探测中", tone: "warn" };
-  if (row.is_rate_limited) return { ok: false, text: "限流", tone: "bad" };
-  return { ok: true, text: "可用", tone: "ok" };
+  if (!c.enabled) return { ok: false, text: "disabled", tone: "warn" };
+  if (!row) return { ok: true, text: "enabled", tone: "ok" };
+  if (row.circuit_open) return { ok: false, text: "circuit:open", tone: "bad" };
+  if (row.circuit_state === "half-open")
+    return { ok: false, text: "circuit:half-open", tone: "warn" };
+  if (row.is_rate_limited) return { ok: false, text: "rate_limited", tone: "bad" };
+  return { ok: true, text: "ok", tone: "ok" };
 }
 
 /** 网关尚未返回该凭证在池中的行时，避免「池暂无此条」等晦涩文案。 */
 export function poolRowMissingLabel(): string {
-  return "无实时指标";
+  return "metrics:pending";
 }
 
 export function primaryPlanPercent(snap: CredentialPlanSnapshot | null | undefined): {
@@ -108,7 +109,7 @@ export function primaryPlanPercent(snap: CredentialPlanSnapshot | null | undefin
     return { pct: Math.min(100, Math.max(0, v)), windowLabel: label };
   };
   return (
-    pick(snap.codex_primary_used_percent, "主窗口") ??
+    pick(snap.codex_primary_used_percent, "W") ??
     pick(snap.codex_5h_used_percent, "5h") ??
     pick(snap.codex_7d_used_percent, "7d") ?? { pct: null, windowLabel: null }
   );
@@ -142,11 +143,11 @@ export function mapUpstreamUserMessage(msg: string | null | undefined): string |
   if (!msg?.trim()) return null;
   const t = msg.trim();
   const lower = t.toLowerCase();
-  if (lower.includes("not found") && lower.includes("credential")) return "凭证未找到或已删除";
-  if (/no such credential/i.test(t)) return "凭证不存在";
-  if (/pool.*empty|empty.*pool/i.test(t)) return "密钥池暂无可用条目";
+  if (lower.includes("not found") && lower.includes("credential")) return "credential:not_found";
+  if (/no such credential/i.test(t)) return "credential:not_found";
+  if (/pool.*empty|empty.*pool/i.test(t)) return "pool:empty";
   if (/fingerprint|duplicate/i.test(t) && /same|duplicate|conflict/i.test(lower))
-    return "与其它凭证冲突（可能重复导入）";
+    return "fingerprint:duplicate";
   return t;
 }
 

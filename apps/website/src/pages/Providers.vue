@@ -14,13 +14,22 @@ import {
   type LocalCandidate,
   isProviderHealthSummary,
 } from "../api/client.ts";
-import { getCodexClientTool, providerServesCodexCliRoute } from "../utils/client-tools.ts";
+import {
+  CLIENT_TOOLS,
+  getCodexClientTool,
+  getToolProtocolSupport,
+  providerServesCodexCliRoute,
+  type ClientToolId,
+  type ClientToolInfo,
+  type ProtocolSupportInfo,
+} from "../utils/client-tools.ts";
 import { useRoute } from "vue-router";
 import { resolvePageAccent } from "../utils/page-accent.ts";
 import { mapUpstreamUserMessage, displayProviderName } from "../utils/providers-display.ts";
 import { hintsFromAuthJsonTokens } from "../utils/codex-oauth-hints.ts";
 import VpIcon from "../components/vp-icon.vue";
-import ProviderCredentialRow from "../components/provider-credential-row.vue";
+import ProviderCard from "../components/provider-card.vue";
+import { workspaceViewFromQuery, type WorkspaceView } from "../utils/workspace-view.ts";
 
 // ---------------------------------------------------------------------------
 // Provider presets
@@ -39,7 +48,7 @@ interface Preset {
 const PRESETS: Preset[] = [
   {
     label: "OpenAI / Codex",
-    icon: "🤖",
+    icon: "i-lucide-bot",
     name: "OpenAI",
     kind: "openai-responses",
     base_url: "https://api.openai.com",
@@ -55,7 +64,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Anthropic",
-    icon: "🔮",
+    icon: "i-lucide-sparkles",
     name: "Anthropic",
     kind: "anthropic",
     base_url: "https://api.anthropic.com",
@@ -69,7 +78,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "DeepSeek",
-    icon: "🐳",
+    icon: "i-lucide-brain",
     name: "DeepSeek",
     kind: "openai-chat",
     base_url: "https://api.deepseek.com",
@@ -82,7 +91,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Qwen (Alibaba)",
-    icon: "☁️",
+    icon: "i-lucide-cloud",
     name: "Qwen",
     kind: "openai-chat",
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -96,7 +105,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Moonshot / Kimi",
-    icon: "🌙",
+    icon: "i-lucide-moon",
     name: "Moonshot",
     kind: "openai-chat",
     base_url: "https://api.moonshot.cn/v1",
@@ -109,7 +118,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Zhipu / GLM",
-    icon: "⚡",
+    icon: "i-lucide-zap",
     name: "Zhipu",
     kind: "openai-chat",
     base_url: "https://open.bigmodel.cn/api/paas/v4",
@@ -122,7 +131,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Gemini",
-    icon: "✨",
+    icon: "i-lucide-gem",
     name: "Google Gemini",
     kind: "gemini-native",
     base_url: "https://generativelanguage.googleapis.com/v1beta",
@@ -196,6 +205,7 @@ const healthMap = ref<Record<string, ProviderHealthSummary>>({});
 const poolByProviderId = ref<Record<string, ProviderAuthPoolSummary>>({});
 const route = useRoute();
 const pageAccent = computed(() => resolvePageAccent(route.name));
+const workspaceView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
 const codexRouteTool = computed(() => getCodexClientTool());
 /** Hours for `GET /_vp/providers/:id/health?hours=` — gateway `request_logs` rollup only (not Codex plan windows). */
 const GATEWAY_ROLLING_STAT_HOURS = 24;
@@ -211,6 +221,9 @@ const error = ref("");
 const toggleBusy = ref<Record<string, boolean>>({});
 /** Per-provider manual circuit reset busy state (POST /_vp/providers/:id/circuit/reset). */
 const circuitResetBusy = ref<Record<string, boolean>>({});
+/** Per-credential enable/disable busy state (PUT /_vp/credentials/:id). */
+const credToggleBusy = ref<Record<string, boolean>>({});
+const activeProviderTab = ref<"common" | ClientToolId>("common");
 
 // Provider form
 const showForm = ref(false);
@@ -497,20 +510,20 @@ async function refreshCodexPlanFromChatgpt(providerId: string, opts?: { silent?:
       if (r.attempted === 0) {
         codexRefreshNote.value = {
           ...codexRefreshNote.value,
-          [providerId]: "本供应商尚无 OAuth 凭证，请用「本机导入」或下方「添加密钥」。",
+          [providerId]: "oauth.credentials:empty",
         };
       } else {
         codexRefreshNote.value = {
           ...codexRefreshNote.value,
           [providerId]: errPart
-            ? `已更新 ${r.ok}/${r.attempted} · ${errPart}`
-            : `已更新 ${r.ok}/${r.attempted} 条凭证。`,
+            ? `updated ${r.ok}/${r.attempted} · ${errPart}`
+            : `updated ${r.ok}/${r.attempted}`,
         };
       }
     } else if (errPart || (r.attempted > 0 && r.ok === 0)) {
       codexRefreshNote.value = {
         ...codexRefreshNote.value,
-        [providerId]: errPart || `套餐同步失败（${r.ok}/${r.attempted}）。`,
+        [providerId]: errPart || `plan:sync_failed ${r.ok}/${r.attempted}`,
       };
     } else {
       codexRefreshNote.value = { ...codexRefreshNote.value, [providerId]: "" };
@@ -557,8 +570,7 @@ async function load() {
       if (r.status !== "fulfilled") continue;
       const body = r.value;
       if (!isProviderHealthSummary(body)) {
-        error.value =
-          "网关 API 已升级：正在运行的 vibe 进程仍是旧二进制（health 无 cumulative）。请停止进程、用本仓库重新构建并启动 vibe，再硬刷新页面；前端 HMR 不会替换 Rust 进程。";
+        error.value = "gateway_api:mismatch health.cumulative missing; restart rebuilt vibe binary";
         healthMap.value = {};
         poolByProviderId.value = {};
         return;
@@ -631,8 +643,169 @@ function poolCred(providerId: string, credentialId: string): CredentialPoolStatu
 
 function codexCliRouteAriaLabel(provider: Provider): string {
   const t = codexRouteTool.value;
-  return `Codex CLI：经网关前缀 ${t.pathPrefix} 的到达请求可路由到此前端供应商「${displayProviderName(provider.name)}」，上游类型为 ${provider.kind}。`;
+  return `codex.route ${t.pathPrefix} -> ${displayProviderName(provider.name)} (${provider.kind})`;
 }
+
+type ProviderGroupKey = "native" | "bridged" | "other";
+
+interface ProviderTabOption {
+  id: "common" | ClientToolId;
+  label: string;
+  shortLabel: string;
+  icon: string;
+  description: string;
+}
+
+interface ProviderCardProtocolBadge {
+  toolId: ClientToolId;
+  toolLabel: string;
+  toolIcon: string;
+  support: ProtocolSupportInfo;
+}
+
+interface ProviderCardView {
+  provider: Provider;
+  title: string;
+  badges: ProviderCardProtocolBadge[];
+  primarySupport: ProtocolSupportInfo | null;
+  group: ProviderGroupKey;
+  sortKey: string;
+}
+
+interface ProviderSectionView {
+  key: ProviderGroupKey;
+  title: string;
+  description: string;
+  providers: ProviderCardView[];
+}
+
+const PROVIDER_TAB_OPTIONS: ProviderTabOption[] = [
+  {
+    id: "common",
+    label: "Common",
+    shortLabel: "all",
+    icon: "i-lucide-compass",
+    description: "",
+  },
+  ...CLIENT_TOOLS.map((tool) => ({
+    id: tool.id,
+    label: tool.label,
+    shortLabel: tool.shortLabel,
+    icon: tool.icon,
+    description: tool.setupHint,
+  })),
+];
+
+function providerKindFamily(kind: Provider["kind"]): string {
+  switch (kind) {
+    case "openai-responses":
+      return "OpenAI Responses";
+    case "openai-chat":
+      return "OpenAI Chat";
+    case "anthropic":
+      return "Anthropic";
+    case "gemini-native":
+      return "Gemini Native";
+    default:
+      return kind;
+  }
+}
+
+function protocolBadgeTone(mode: ProtocolSupportInfo["mode"]): string {
+  if (mode === "native") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (mode === "bridged") return "border-amber-200 bg-amber-50 text-amber-900";
+  return "border-slate-200 bg-slate-100 text-slate-600";
+}
+
+function providerCardBadges(provider: Provider): ProviderCardProtocolBadge[] {
+  return CLIENT_TOOLS.filter((tool) => tool.consumesKinds.includes(provider.kind)).map((tool) => ({
+    toolId: tool.id,
+    toolLabel: tool.shortLabel,
+    toolIcon: tool.icon,
+    support: getToolProtocolSupport(provider, tool),
+  }));
+}
+
+function rankProviderCard(
+  provider: Provider,
+  selectedTool: ClientToolInfo | null,
+): ProviderCardView {
+  const badges = providerCardBadges(provider);
+  const title = displayProviderName(provider.name);
+  const primarySupport = selectedTool ? getToolProtocolSupport(provider, selectedTool) : null;
+  const firstUsefulSupport =
+    primarySupport ??
+    badges.map((badge) => badge.support).sort((a, b) => a.order - b.order)[0] ??
+    null;
+
+  let group: ProviderGroupKey = "other";
+  if (primarySupport) {
+    group =
+      primarySupport.mode === "native"
+        ? "native"
+        : primarySupport.mode === "bridged"
+          ? "bridged"
+          : "other";
+  } else {
+    const hasNative = badges.some((badge) => badge.support.mode === "native");
+    const hasBridged = badges.some((badge) => badge.support.mode === "bridged");
+    group = hasNative ? "native" : hasBridged ? "bridged" : "other";
+  }
+
+  return {
+    provider,
+    title,
+    badges,
+    primarySupport: firstUsefulSupport,
+    group,
+    sortKey: `${provider.priority.toString().padStart(5, "0")}:${title.toLowerCase()}`,
+  };
+}
+
+const activeToolTab = computed<ClientToolInfo | null>(() => {
+  if (workspaceView.value === "codex")
+    return CLIENT_TOOLS.find((tool) => tool.id === "codex") ?? null;
+  if (workspaceView.value === "claude")
+    return CLIENT_TOOLS.find((tool) => tool.id === "claude-code") ?? null;
+  if (activeProviderTab.value === "common") return null;
+  return CLIENT_TOOLS.find((tool) => tool.id === activeProviderTab.value) ?? null;
+});
+
+const providerTabs = computed(() => PROVIDER_TAB_OPTIONS);
+
+const providerSections = computed<ProviderSectionView[]>(() => {
+  const selectedTool = activeToolTab.value;
+  const cards = providers.value
+    .map((provider) => rankProviderCard(provider, selectedTool))
+    .filter((card) => {
+      if (!selectedTool) return true;
+      return selectedTool.consumesKinds.includes(card.provider.kind);
+    })
+    .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  const groups: ProviderSectionView[] = [
+    {
+      key: "native",
+      title: "native",
+      description: "",
+      providers: cards.filter((card) => card.group === "native"),
+    },
+    {
+      key: "bridged",
+      title: "bridge",
+      description: "",
+      providers: cards.filter((card) => card.group === "bridged"),
+    },
+    {
+      key: "other",
+      title: "other",
+      description: "",
+      providers: cards.filter((card) => card.group === "other"),
+    },
+  ];
+
+  return groups.filter((section) => section.providers.length > 0);
+});
 
 function startAdd() {
   form.value = emptyForm();
@@ -782,12 +955,41 @@ async function removeCred(cred: Credential) {
   }
 }
 
+async function toggleCredentialEnabled(cred: Credential) {
+  if (credToggleBusy.value[cred.id]) return;
+  credToggleBusy.value = { ...credToggleBusy.value, [cred.id]: true };
+  const nextEnabled = !cred.enabled;
+  try {
+    await api.credentials.update(cred.id, {
+      label: cred.label,
+      auth_ref: cred.auth_ref,
+      plan_type: cred.plan_type,
+      notes: cred.notes,
+      enabled: nextEnabled,
+      priority: cred.priority,
+      oauth_access_token: cred.oauth_access_token,
+      oauth_refresh_token: null,
+      oauth_expires_at: cred.oauth_expires_at,
+      oauth_cached_email: cred.oauth_account_email ?? null,
+      oauth_cached_subject: cred.oauth_account_subject ?? null,
+      oauth_cached_plan_slug: cred.oauth_chatgpt_plan_slug ?? null,
+    });
+    await loadCreds(cred.provider_id);
+    await refreshSinglePool(cred.provider_id);
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    const { [cred.id]: _, ...rest } = credToggleBusy.value;
+    credToggleBusy.value = rest;
+  }
+}
+
 function circuitBadge(state: string) {
   if (state === "closed")
-    return { label: "正常", cls: "bg-emerald-50 text-emerald-800 border-emerald-200" };
+    return { label: "ok", cls: "bg-emerald-50 text-emerald-800 border-emerald-200" };
   if (state === "half-open")
-    return { label: "探测中", cls: "bg-amber-50 text-amber-900 border-amber-200" };
-  return { label: "熔断", cls: "bg-red-50 text-red-800 border-red-200" };
+    return { label: "half-open", cls: "bg-amber-50 text-amber-900 border-amber-200" };
+  return { label: "open", cls: "bg-red-50 text-red-800 border-red-200" };
 }
 
 function isCircuitResettable(state: string): boolean {
@@ -807,53 +1009,36 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div>
-    <div
-      class="relative rounded-2xl border border-slate-200/90 bg-gradient-to-br from-violet-100/80 via-white to-cyan-50/60 mb-6 shadow-sm"
-    >
+  <div class="mx-auto max-w-6xl">
+    <div class="relative mb-4 rounded-xl border border-slate-200/90 bg-vp-surface shadow-sm">
       <div
-        aria-hidden="true"
-        class="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl"
-      >
-        <div class="absolute -right-20 -top-24 size-64 rounded-full bg-violet-200/40 blur-3xl" />
-        <div class="absolute -bottom-24 left-24 size-72 rounded-full bg-cyan-200/30 blur-3xl" />
-      </div>
-      <div
-        class="relative z-10 flex flex-col gap-4 p-5 sm:flex-row sm:items-start sm:justify-between sm:gap-6"
+        class="relative z-10 flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between"
       >
         <div class="min-w-0 flex-1">
-          <span :class="['text-xs uppercase', pageAccent.kicker]">网关 · 上游</span>
-          <h1 :class="['text-3xl font-bold tracking-tight', pageAccent.heading]">Providers</h1>
-          <p class="text-sm text-slate-600 mt-1.5 max-w-2xl leading-relaxed">
-            优先服务 <strong class="text-slate-800">Codex</strong>：OAuth 与密钥池走网关，CLI 将
-            <code
-              class="font-mono text-violet-800 bg-violet-50 px-1 rounded border border-violet-200"
-              >/codex/v1</code
-            >
-            指到本机端口；其它客户端路由在下方列表中为每个上游单独配置。
-          </p>
+          <span :class="['text-xs uppercase', pageAccent.kicker]">Gateway</span>
+          <h1 :class="['text-2xl font-bold tracking-tight', pageAccent.heading]">Providers</h1>
         </div>
         <div class="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:w-auto">
           <button
             type="button"
             class="btn-ghost flex min-h-11 min-w-11 items-center justify-center gap-2 px-2.5 py-2 text-sm rounded-lg border border-vp-border/80 sm:px-3.5 sm:py-1.5"
-            title="从本机已安装工具导入（Claude Code、Codex CLI 等）"
-            aria-label="从本机已安装工具导入"
+            title="local:import"
+            aria-label="local:import"
             @click="openImport"
           >
             <VpIcon name="folder-input" size-class="size-4 shrink-0" />
-            <span class="hidden sm:inline">本机导入</span>
+            <span class="sr-only">local:import</span>
           </button>
           <div ref="presetTriggerWrap" class="relative">
             <button
               type="button"
               class="btn-ghost flex min-h-11 min-w-11 items-center justify-center gap-2 px-2.5 py-2 text-sm rounded-lg border border-vp-border/80 sm:px-3.5 sm:py-1.5"
-              aria-label="打开上游预设列表"
-              title="预设"
+              aria-label="presets"
+              title="presets"
               @click="showPresets = !showPresets"
             >
               <VpIcon name="sparkles" size-class="size-4 shrink-0" />
-              <span class="hidden sm:inline">预设</span>
+              <span class="sr-only">presets</span>
             </button>
           </div>
           <button
@@ -862,11 +1047,12 @@ onUnmounted(() => {
               'flex min-h-11 min-w-11 items-center justify-center gap-2 px-3 py-2 sm:py-1.5 rounded-lg text-sm font-medium',
               pageAccent.btnPrimary,
             ]"
-            aria-label="添加上游供应商"
+            aria-label="provider:add"
+            title="provider:add"
             @click="startAdd"
           >
             <VpIcon name="plus" size-class="size-4 shrink-0 text-white" />
-            <span class="hidden sm:inline">添加上游</span>
+            <span class="sr-only">provider:add</span>
           </button>
         </div>
       </div>
@@ -879,278 +1065,99 @@ onUnmounted(() => {
       {{ error }}
     </div>
 
-    <div v-if="loading" class="text-slate-500 text-sm">加载中…</div>
-    <div v-else-if="providers.length === 0" class="text-slate-500 text-sm py-12 text-center">
-      尚无上游。点击 <strong>+ 添加上游</strong> 开始配置。
+    <div v-if="loading" class="text-slate-500 text-sm">...</div>
+    <div
+      v-else-if="providers.length === 0"
+      class="font-mono text-slate-500 text-sm py-12 text-center"
+      title="empty"
+      aria-label="empty"
+    >
+      ∅
     </div>
     <div v-else class="space-y-3">
-      <div v-for="p in providers" :key="p.id" class="card-base min-w-0 overflow-hidden card-lift">
-        <!-- Provider row -->
+      <div class="card-base p-3 sm:p-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div class="min-w-0">
+            <p class="sr-only">provider:view</p>
+          </div>
+          <div v-if="workspaceView === 'overview'" class="flex flex-wrap gap-2">
+            <button
+              v-for="tab in providerTabs"
+              :key="tab.id"
+              type="button"
+              class="inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium transition-colors"
+              :class="
+                activeProviderTab === tab.id
+                  ? 'border-violet-300 bg-violet-50 text-violet-800 shadow-sm'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+              "
+              @click="activeProviderTab = tab.id"
+            >
+              <span :class="[tab.icon, 'size-4']" aria-hidden="true" />
+              <span class="hidden sm:inline">{{ tab.shortLabel }}</span>
+            </button>
+          </div>
+          <div
+            v-else
+            class="rounded-xl border border-vp-border bg-vp-surface px-3 py-2 text-xs font-medium text-vp-muted font-mono"
+          >
+            {{ workspaceView }}
+          </div>
+        </div>
         <div
-          class="px-4 py-4 bg-gradient-to-r from-slate-50/80 to-transparent border-b border-slate-100 sm:px-5"
+          v-if="activeToolTab"
+          class="mt-3 rounded-xl border border-violet-200 bg-violet-50/70 px-3 py-2 font-mono text-xs text-violet-900"
         >
-          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
-            <div
-              class="grid size-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-violet-100 to-cyan-50 text-lg ring-1 ring-slate-200"
+          {{ activeToolTab.setupHint }}
+        </div>
+      </div>
+
+      <div v-for="section in providerSections" :key="section.key" class="space-y-2.5">
+        <div class="px-1">
+          <div class="flex flex-wrap items-center gap-2">
+            <span
+              :class="[
+                section.key === 'native'
+                  ? 'i-lucide-plug'
+                  : section.key === 'bridged'
+                    ? 'i-lucide-route'
+                    : 'i-lucide-archive',
+                'size-4 text-slate-500',
+              ]"
+              aria-hidden="true"
+            />
+            <h2 class="text-sm font-semibold text-slate-900">{{ section.title }}</h2>
+            <span
+              class="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-500"
             >
-              <span v-if="p.kind === 'anthropic'">🔮</span>
-              <span v-else-if="p.kind === 'gemini-native'">✨</span>
-              <span v-else-if="p.kind === 'openai-responses'">🤖</span>
-              <span v-else>⚡</span>
-            </div>
-            <div class="w-full min-w-0 flex-1">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="min-w-0 break-words font-semibold text-slate-900">{{
-                  displayProviderName(p.name)
-                }}</span>
-                <span
-                  class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-slate-200 bg-slate-100 text-slate-600"
-                  >{{ p.kind }}</span
-                >
-                <span
-                  v-if="providerServesCodexCliRoute(p)"
-                  class="inline-flex items-center gap-0.5 rounded-md border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800"
-                  role="img"
-                  :aria-label="codexCliRouteAriaLabel(p)"
-                >
-                  <span aria-hidden="true">{{ codexRouteTool.icon }}</span>
-                  <span aria-hidden="true">Codex</span>
-                </span>
-                <span
-                  v-if="!p.enabled"
-                  class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-amber-200 bg-amber-50 text-amber-900"
-                  >已暂停</span
-                >
-                <template v-if="healthMap[p.id]?.cumulative">
-                  <span
-                    :class="circuitBadge(healthMap[p.id].cumulative.circuit_state).cls"
-                    class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border"
-                  >
-                    {{ circuitBadge(healthMap[p.id].cumulative.circuit_state).label }}
-                  </span>
-                </template>
-              </div>
-
-              <div
-                v-if="isOfficialCodexProvider(p)"
-                class="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600"
-              >
-                <span class="font-medium text-slate-800 shrink-0">Codex</span>
-                <button
-                  type="button"
-                  class="shrink-0 vp-icon-btn border border-violet-200 text-violet-700"
-                  :disabled="!!codexPlanRefreshing[p.id]"
-                  aria-label="同步 Codex 用量"
-                  title="同步用量"
-                  @click.stop="refreshCodexPlanFromChatgpt(p.id)"
-                >
-                  <VpIcon
-                    name="refresh-cw"
-                    size-class="size-4"
-                    :spin="!!codexPlanRefreshing[p.id]"
-                  />
-                </button>
-                <span v-if="codexPlanRefreshing[p.id]" class="text-slate-500">同步中…</span>
-                <template v-else>
-                  <span v-if="!codexPlanRowsByProvider[p.id]?.length" class="min-w-0">
-                    尚无 OAuth 凭证，请本机导入或下方添加。
-                  </span>
-                  <span v-else class="text-slate-600">
-                    已同步 {{ codexPlanRowsByProvider[p.id].length }} 条
-                  </span>
-                </template>
-                <p v-if="codexRefreshNote[p.id]" class="w-full text-amber-800 break-words">
-                  {{ codexRefreshNote[p.id] }}
-                </p>
-              </div>
-
-              <p
-                class="mt-1 truncate text-xs text-slate-500"
-                :title="`${p.base_url} · priority ${p.priority}`"
-              >
-                {{ p.base_url }} · 优先级 {{ p.priority }}
-              </p>
-
-              <details
-                v-if="
-                  healthMap[p.id]?.rolling || healthMap[p.id]?.cumulative || p.model_aliases.length
-                "
-                class="mt-2 rounded-lg border border-slate-200 bg-white/70 px-3 py-2 text-[11px] text-slate-600"
-              >
-                <summary
-                  class="cursor-pointer select-none font-medium text-slate-700 list-none marker:content-none [&::-webkit-details-marker]:hidden"
-                >
-                  网关与模型别名
-                </summary>
-                <div class="mt-2 space-y-2 border-t border-slate-100 pt-2">
-                  <div v-if="healthMap[p.id]?.rolling" class="flex flex-wrap gap-x-3 gap-y-0.5">
-                    <span class="text-slate-500">近 {{ healthMap[p.id]?.rolling_hours }}h</span>
-                    <span>{{ healthMap[p.id]!.rolling!.requests.toLocaleString() }} 次</span>
-                    <span
-                      :class="healthMap[p.id]!.rolling!.success_rate < 0.9 ? 'text-red-600' : ''"
-                    >
-                      {{ (healthMap[p.id]!.rolling!.success_rate * 100).toFixed(1) }}% 成功
-                    </span>
-                    <span v-if="healthMap[p.id]!.rolling!.avg_latency_ms != null">
-                      {{ healthMap[p.id]!.rolling!.avg_latency_ms }}ms
-                    </span>
-                    <span
-                      v-if="(healthMap[p.id]!.rolling!.err_429 ?? 0) > 0"
-                      class="text-amber-700"
-                    >
-                      429 ×{{ healthMap[p.id]!.rolling!.err_429 }}
-                    </span>
-                  </div>
-                  <div
-                    v-if="healthMap[p.id]?.cumulative"
-                    class="flex flex-wrap gap-x-2 gap-y-0.5 text-slate-500"
-                  >
-                    <span>
-                      累计 {{ healthMap[p.id]!.cumulative.total_requests.toLocaleString() }} 次 ·
-                      {{ (healthMap[p.id]!.cumulative.success_rate * 100).toFixed(1) }}% 成功
-                    </span>
-                    <span
-                      v-if="healthMap[p.id]!.cumulative.consecutive_failures > 0"
-                      class="text-red-600"
-                    >
-                      连失败 {{ healthMap[p.id]!.cumulative.consecutive_failures }}
-                    </span>
-                    <span
-                      v-if="healthMap[p.id]!.cumulative.last_error"
-                      class="max-w-full truncate text-red-600"
-                      :title="healthMap[p.id]!.cumulative.last_error ?? ''"
-                    >
-                      {{
-                        mapUpstreamUserMessage(healthMap[p.id]!.cumulative.last_error) ??
-                        healthMap[p.id]!.cumulative.last_error
-                      }}
-                    </span>
-                    <span
-                      v-if="isCircuitResettable(healthMap[p.id]!.cumulative.circuit_state)"
-                      class="text-amber-800"
-                    >
-                      熔断拦截中
-                    </span>
-                  </div>
-                  <div v-if="p.model_aliases.length" class="flex flex-wrap gap-1.5">
-                    <span
-                      v-for="a in p.model_aliases"
-                      :key="a.alias"
-                      class="max-w-full break-words rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-700"
-                    >
-                      {{ a.alias }}→{{ a.upstream_model }}
-                    </span>
-                  </div>
-                </div>
-              </details>
-            </div>
-
-            <div
-              class="flex w-full shrink-0 flex-wrap items-start justify-start gap-2 sm:w-auto sm:justify-end"
-            >
-              <button
-                v-if="
-                  healthMap[p.id]?.cumulative &&
-                  isCircuitResettable(healthMap[p.id].cumulative.circuit_state)
-                "
-                type="button"
-                class="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2 py-2 text-xs text-amber-900 transition-colors hover:bg-amber-100 disabled:opacity-50 sm:px-3 sm:py-1.5"
-                :disabled="!!circuitResetBusy[p.id]"
-                aria-label="重置熔断器"
-                title="重置熔断"
-                @click="resetProviderCircuit(p.id)"
-              >
-                <VpIcon name="rotate-ccw" size-class="size-3.5 shrink-0" />
-                <span class="hidden sm:inline">{{
-                  circuitResetBusy[p.id] ? "重置中…" : "重置熔断"
-                }}</span>
-              </button>
-              <button
-                type="button"
-                role="switch"
-                :aria-checked="p.enabled"
-                :aria-label="p.enabled ? `Disable provider ${p.name}` : `Enable provider ${p.name}`"
-                :disabled="!!toggleBusy[p.id]"
-                class="relative w-11 h-6 shrink-0 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:opacity-50 shadow-inner"
-                :class="p.enabled ? 'bg-emerald-500 shadow-emerald-600/20' : 'bg-slate-300'"
-                @click.stop="toggleProviderEnabled(p)"
-              >
-                <span
-                  class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform"
-                  :class="p.enabled ? 'translate-x-5' : 'translate-x-0'"
-                />
-              </button>
-              <button
-                type="button"
-                class="vp-icon-btn border border-vp-border/80"
-                :disabled="!!loadingCreds[p.id]"
-                aria-label="重新拉取凭证与密钥池"
-                title="同步凭证"
-                @click="reloadProviderCreds(p.id)"
-              >
-                <VpIcon name="refresh-cw" size-class="size-4" :spin="!!loadingCreds[p.id]" />
-              </button>
-              <button
-                type="button"
-                class="vp-icon-btn border border-vp-border/80"
-                aria-label="编辑供应商"
-                title="编辑"
-                @click="startEdit(p)"
-              >
-                <VpIcon name="pencil" size-class="size-4" />
-              </button>
-              <button
-                type="button"
-                class="vp-icon-btn border border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
-                aria-label="删除供应商"
-                title="删除"
-                @click="remove(p.id)"
-              >
-                <VpIcon name="trash-2" size-class="size-4" />
-              </button>
-            </div>
+              {{ section.providers.length }}
+            </span>
           </div>
         </div>
 
-        <!-- 凭证：单行摘要 + 每行内「高级」 -->
-        <div
-          class="border-t border-solid border-default surface-muted px-4 py-3 rounded-b-xl sm:px-5"
-        >
-          <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <span class="text-sm font-medium text-slate-800">凭证</span>
-            <button
-              type="button"
-              :class="[
-                'flex min-h-11 items-center gap-2 text-xs px-3 py-2 sm:py-1.5 rounded-lg font-medium transition-colors shadow-sm',
-                pageAccent.btnPrimary,
-              ]"
-              aria-label="添加密钥"
-              @click="startAddCred(p.id)"
-            >
-              <VpIcon name="key" size-class="size-3.5 shrink-0 text-white" />
-              <span>添加密钥</span>
-            </button>
-          </div>
-
-          <div v-if="loadingCreds[p.id]" class="text-xs text-slate-500">加载中…</div>
-          <div
-            v-else-if="!credsByProvider[p.id] || credsByProvider[p.id].length === 0"
-            class="text-xs text-slate-600"
-          >
-            无独立凭证；将使用供应商默认密钥（在「编辑上游」中配置）。
-          </div>
-          <div v-else class="space-y-2">
-            <ProviderCredentialRow
-              v-for="c in credsByProvider[p.id]"
-              :key="c.id"
-              :credential="c"
-              :pool-row="poolCred(p.id, c.id)"
-              :plan-snap="planSnapByCred[c.id] ?? null"
-              :peer-creds="credsByProvider[p.id] ?? []"
-              @edit="startEditCred($event)"
-              @delete="removeCred($event)"
-            />
-          </div>
+        <div class="grid grid-cols-1 gap-2 xl:grid-cols-2">
+          <ProviderCard
+            v-for="card in section.providers"
+            :key="card.provider.id"
+            :card="card"
+            :health="healthMap[card.provider.id]"
+            :creds="credsByProvider[card.provider.id] ?? []"
+            :loading-creds="!!loadingCreds[card.provider.id]"
+            :toggle-provider-busy="!!toggleBusy[card.provider.id]"
+            :circuit-reset-busy="!!circuitResetBusy[card.provider.id]"
+            :cred-toggle-busy="credToggleBusy"
+            :pool-rows="poolByProviderId[card.provider.id]?.credentials ?? []"
+            :plan-snap-by-cred="planSnapByCred"
+            @sync-creds="reloadProviderCreds($event)"
+            @toggle-provider="toggleProviderEnabled($event)"
+            @reset-circuit="resetProviderCircuit($event)"
+            @edit-provider="startEdit($event)"
+            @delete-provider="remove($event)"
+            @add-cred="startAddCred($event)"
+            @toggle-cred="toggleCredentialEnabled($event)"
+            @edit-cred="startEditCred($event)"
+            @delete-cred="removeCred($event)"
+          />
         </div>
       </div>
     </div>
@@ -1162,9 +1169,9 @@ onUnmounted(() => {
         class="fixed z-[105] bg-white border border-slate-200 rounded-xl shadow-lg p-3 w-72 max-h-[min(70vh,calc(100dvh-1rem))] overflow-y-auto"
         :style="{ top: `${presetMenuPos.top}px`, left: `${presetMenuPos.left}px` }"
         role="menu"
-        aria-label="上游预设"
+        aria-label="presets"
       >
-        <p class="text-xs text-slate-500 mb-2 px-1">快速填充常见上游</p>
+        <p class="sr-only">presets</p>
         <button
           v-for="preset in PRESETS"
           :key="preset.label"
@@ -1172,12 +1179,10 @@ onUnmounted(() => {
           class="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-50 text-sm flex items-center gap-2 transition-colors"
           @click="applyPreset(preset)"
         >
-          <span>{{ preset.icon }}</span>
+          <span :class="[preset.icon, 'size-4 text-slate-500']" aria-hidden="true" />
           <div>
             <div class="font-medium text-slate-900">{{ preset.label }}</div>
-            <div class="text-xs text-slate-500">
-              优先级 {{ preset.priority }} · {{ preset.kind }}
-            </div>
+            <div class="text-xs text-slate-500">p{{ preset.priority }} · {{ preset.kind }}</div>
           </div>
         </button>
       </div>
@@ -1202,14 +1207,14 @@ onUnmounted(() => {
             </span>
             <div class="min-w-0 flex-1">
               <h2 id="provider-form-title" class="font-semibold text-lg text-vp-text">
-                {{ editTarget ? "编辑" : "添加" }} 上游
+                provider.{{ editTarget ? "edit" : "add" }}
               </h2>
             </div>
             <button
               type="button"
               class="vp-icon-btn shrink-0"
-              aria-label="关闭"
-              title="关闭"
+              aria-label="close"
+              title="close"
               @click="showForm = false"
             >
               <VpIcon name="x" size-class="size-5" />
@@ -1217,33 +1222,33 @@ onUnmounted(() => {
           </div>
           <div class="px-6 py-4 overflow-y-auto max-h-[min(32rem,70vh)] space-y-3">
             <label class="block">
-              <span class="text-xs text-slate-500">名称</span>
+              <span class="sr-only">name</span>
               <input
                 v-model="form.name"
                 class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-violet-500"
               />
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">类型 Kind</span>
+              <span class="sr-only">kind</span>
               <select
                 v-model="form.kind"
                 class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
               >
-                <option value="anthropic">Anthropic</option>
-                <option value="openai-chat">OpenAI Chat (/v1/chat/completions)</option>
-                <option value="openai-responses">OpenAI Responses</option>
-                <option value="gemini-native">Gemini Native</option>
+                <option value="anthropic">anthropic</option>
+                <option value="openai-chat">openai-chat</option>
+                <option value="openai-responses">openai-responses</option>
+                <option value="gemini-native">gemini-native</option>
               </select>
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">Base URL</span>
+              <span class="sr-only">base_url</span>
               <input
                 v-model="form.base_url"
                 class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono text-slate-900"
               />
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500"> 默认 auth_ref（无凭证条目时使用） </span>
+              <span class="sr-only">auth_ref.default</span>
               <input
                 v-model="form.auth_ref"
                 placeholder="keyring:my-key  or  env:MY_API_KEY"
@@ -1251,7 +1256,7 @@ onUnmounted(() => {
               />
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">优先级（数值越小越优先）</span>
+              <span class="sr-only">priority</span>
               <input
                 v-model.number="form.priority"
                 type="number"
@@ -1260,7 +1265,7 @@ onUnmounted(() => {
             </label>
             <label class="flex items-center gap-2 text-sm">
               <input v-model="form.enabled" type="checkbox" class="rounded" />
-              Enabled
+              <span class="sr-only">enabled</span>
             </label>
           </div>
           <div
@@ -1269,20 +1274,20 @@ onUnmounted(() => {
             <button
               type="button"
               class="btn-ghost flex items-center gap-2 !px-3"
-              aria-label="取消"
+              aria-label="cancel"
               @click="showForm = false"
             >
               <VpIcon name="x" size-class="size-4" />
-              <span>取消</span>
+              <span class="sr-only">cancel</span>
             </button>
             <button
               type="button"
               class="inline-flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors"
-              aria-label="保存上游"
+              aria-label="provider:save"
               @click="save"
             >
               <VpIcon name="check" size-class="size-4 text-white" />
-              <span>保存</span>
+              <span class="sr-only">save</span>
             </button>
           </div>
         </div>
@@ -1308,14 +1313,14 @@ onUnmounted(() => {
             </span>
             <div class="min-w-0 flex-1">
               <h2 id="cred-form-title" class="font-semibold text-lg text-vp-text">
-                {{ editCred ? "编辑" : "添加" }} 凭证
+                credential.{{ editCred ? "edit" : "add" }}
               </h2>
             </div>
             <button
               type="button"
               class="vp-icon-btn shrink-0"
-              aria-label="关闭"
-              title="关闭"
+              aria-label="close"
+              title="close"
               @click="showCredForm = false"
             >
               <VpIcon name="x" size-class="size-5" />
@@ -1323,10 +1328,10 @@ onUnmounted(() => {
           </div>
           <div class="px-6 py-4 space-y-3 overflow-y-auto max-h-[min(36rem,72vh)]">
             <label class="block">
-              <span class="text-xs text-slate-500">Label</span>
+              <span class="sr-only">label</span>
               <input
                 v-model="credForm.label"
-                placeholder="e.g. Codex Pro (account 2)"
+                placeholder="label"
                 class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-violet-500"
               />
             </label>
@@ -1342,7 +1347,7 @@ onUnmounted(() => {
                 "
                 class="flex-1 py-1.5 text-xs rounded-md transition-colors"
               >
-                API Key / auth_ref
+                auth_ref
               </button>
               <button
                 @click="credAuthMode = 'oauth'"
@@ -1353,14 +1358,14 @@ onUnmounted(() => {
                 "
                 class="flex-1 py-1.5 text-xs rounded-md transition-colors"
               >
-                OAuth（Codex）
+                OAuth
               </button>
             </div>
 
             <!-- API Key mode -->
             <template v-if="credAuthMode === 'apikey'">
               <label class="block">
-                <span class="text-xs text-slate-500">Auth ref</span>
+                <span class="sr-only">auth_ref</span>
                 <input
                   v-model="credForm.auth_ref"
                   placeholder="keyring:my-key  or  env:MY_API_KEY  or  literal:sk-…"
@@ -1392,23 +1397,19 @@ onUnmounted(() => {
               >
                 <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
                   <p class="text-xs text-slate-800 font-medium">
-                    导入 Codex <code class="font-mono text-slate-600">auth*.json</code>
+                    <code class="font-mono text-slate-600">auth*.json</code>
                   </p>
                   <button
                     type="button"
                     class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-white border border-slate-200 hover:bg-slate-50 text-slate-800 transition-colors w-full sm:w-auto"
-                    aria-label="选择 JSON 文件"
-                    title="选择文件"
+                    aria-label="file:pick"
+                    title="file:pick"
                     @click="triggerAuthJsonFilePick"
                   >
                     <VpIcon name="folder-input" size-class="size-4" />
-                    <span class="hidden sm:inline">选择文件</span>
+                    <span class="sr-only">file:pick</span>
                   </button>
                 </div>
-                <p class="text-[11px] text-slate-600 leading-snug">
-                  Paste JSON below or drag-and-drop a file. Parsed only in your browser; nothing is
-                  uploaded until you save.
-                </p>
                 <textarea
                   v-model="authJsonPaste"
                   rows="5"
@@ -1421,16 +1422,16 @@ onUnmounted(() => {
                     type="button"
                     :disabled="!authJsonPaste.trim()"
                     class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-40 transition-colors"
-                    aria-label="解析 JSON 并填入字段"
+                    aria-label="json:parse"
                     @click="parseAuthJsonPaste"
                   >
                     <VpIcon name="zap" size-class="size-4 text-white" />
-                    <span>解析并填入</span>
+                    <span class="sr-only">parse</span>
                   </button>
                 </div>
               </div>
               <label class="block">
-                <span class="text-xs text-slate-500">Access Token</span>
+                <span class="sr-only">access_token</span>
                 <input
                   v-model="credForm.oauth_access_token"
                   placeholder="eyJhbGciOiJSUzI1NiJ9…"
@@ -1438,28 +1439,26 @@ onUnmounted(() => {
                 />
               </label>
               <label class="block">
-                <span class="text-xs text-slate-500"
-                  >Refresh token (write-only; never shown after save)</span
-                >
+                <span class="sr-only">refresh_token</span>
                 <input
                   v-model="credForm.oauth_refresh_token"
-                  placeholder="Leave empty to keep stored refresh token"
+                  placeholder="refresh_token"
                   type="password"
                   class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono text-slate-900"
                 />
               </label>
-              <p class="text-xs text-slate-600">
-                Expires:
+              <p class="font-mono text-xs text-slate-600">
+                exp
                 {{
                   credForm.oauth_expires_at
                     ? new Date(credForm.oauth_expires_at * 1000).toLocaleString()
-                    : "Unknown (paste auth.json to detect)"
+                    : "unknown"
                 }}
               </p>
             </template>
 
             <label class="block">
-              <span class="text-xs text-slate-500">Plan type (optional)</span>
+              <span class="sr-only">plan_type</span>
               <input
                 v-model="credForm.plan_type"
                 placeholder="claude-pro · codex-plus · codex-pro · payg · …"
@@ -1467,7 +1466,7 @@ onUnmounted(() => {
               />
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">Priority</span>
+              <span class="sr-only">priority</span>
               <input
                 v-model.number="credForm.priority"
                 type="number"
@@ -1475,16 +1474,16 @@ onUnmounted(() => {
               />
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">Notes</span>
+              <span class="sr-only">notes</span>
               <input
                 v-model="credForm.notes"
-                placeholder="optional notes"
+                placeholder="notes"
                 class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
               />
             </label>
             <label class="flex items-center gap-2 text-sm">
               <input v-model="credForm.enabled" type="checkbox" class="rounded" />
-              Enabled
+              <span class="sr-only">enabled</span>
             </label>
           </div>
           <div
@@ -1493,20 +1492,20 @@ onUnmounted(() => {
             <button
               type="button"
               class="btn-ghost flex items-center gap-2 !px-3"
-              aria-label="取消"
+              aria-label="cancel"
               @click="showCredForm = false"
             >
               <VpIcon name="x" size-class="size-4" />
-              <span>取消</span>
+              <span class="sr-only">cancel</span>
             </button>
             <button
               type="button"
               class="inline-flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors"
-              aria-label="保存凭证"
+              aria-label="credential:save"
               @click="saveCred"
             >
               <VpIcon name="check" size-class="size-4 text-white" />
-              <span>保存</span>
+              <span class="sr-only">save</span>
             </button>
           </div>
         </div>
@@ -1530,23 +1529,19 @@ onUnmounted(() => {
               <VpIcon name="download" size-class="size-5" />
             </span>
             <div class="min-w-0 flex-1">
-              <h2 id="import-local-title" class="font-semibold text-lg text-vp-text">
-                从本机工具导入
-              </h2>
+              <h2 id="import-local-title" class="sr-only">local.import</h2>
               <p class="text-sm text-vp-muted mt-1 leading-relaxed">
-                扫描本机已安装客户端。Codex 的
                 <code
                   class="font-mono text-slate-700 bg-slate-100 px-1 rounded border border-slate-200 text-xs"
                   >auth*.json</code
                 >
-                仅读取一次，OAuth 写入网关数据库。
               </p>
             </div>
             <button
               type="button"
               class="vp-icon-btn shrink-0"
-              aria-label="关闭"
-              title="关闭"
+              aria-label="close"
+              title="close"
               @click="showImport = false"
             >
               <VpIcon name="x" size-class="size-5" />
@@ -1558,7 +1553,7 @@ onUnmounted(() => {
               class="text-sm text-slate-600 py-4 text-center flex items-center justify-center gap-2"
             >
               <VpIcon name="loader-2" size-class="size-4 animate-spin" />
-              扫描中…
+              ...
             </div>
             <div
               v-else-if="importError"
@@ -1570,7 +1565,7 @@ onUnmounted(() => {
               v-else-if="localCandidates.length === 0"
               class="text-sm text-slate-600 py-4 text-center"
             >
-              未发现本地工具。请先安装 Claude Code 或 Codex CLI。
+              <span class="sr-only">empty</span>
             </div>
             <div v-else class="space-y-3">
               <div
@@ -1590,7 +1585,7 @@ onUnmounted(() => {
                         "
                         class="text-xs px-1.5 py-0.5 rounded"
                       >
-                        {{ c.token_ok ? "令牌可用" : "无令牌" }}
+                        {{ c.token_ok ? "token:ok" : "token:missing" }}
                       </span>
                       <span
                         class="text-xs px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-600"
@@ -1604,7 +1599,7 @@ onUnmounted(() => {
                     <!-- Extra credentials (additional accounts) -->
                     <div v-if="(c.extra_credentials?.length ?? 0) > 0" class="mt-2 space-y-1">
                       <div class="text-xs text-slate-600 font-medium">
-                        另有 {{ c.extra_credentials?.length ?? 0 }} 个账号将添加为凭证：
+                        +{{ c.extra_credentials?.length ?? 0 }}
                       </div>
                       <div
                         v-for="ec in c.extra_credentials ?? []"
@@ -1621,8 +1616,8 @@ onUnmounted(() => {
                     type="button"
                     class="shrink-0 inline-flex items-center justify-center rounded-lg bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-50 disabled:cursor-not-allowed p-2.5 sm:px-3 sm:py-1.5 transition-colors"
                     :disabled="importingClients.has(c.client)"
-                    :aria-label="`导入 ${c.name}`"
-                    :title="importingClients.has(c.client) ? '导入中' : '导入'"
+                    :aria-label="`import ${c.name}`"
+                    :title="importingClients.has(c.client) ? 'importing' : 'import'"
                     @click="doImport(c.client)"
                   >
                     <VpIcon
@@ -1643,11 +1638,11 @@ onUnmounted(() => {
             <button
               type="button"
               class="btn-ghost flex items-center gap-2 !px-3"
-              aria-label="关闭"
+              aria-label="close"
               @click="showImport = false"
             >
               <VpIcon name="x" size-class="size-4" />
-              <span>关闭</span>
+              <span class="sr-only">close</span>
             </button>
           </div>
         </div>

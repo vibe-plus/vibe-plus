@@ -4,6 +4,8 @@ export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: "/", redirect: "/dashboard" },
+    { path: "/codex", redirect: { path: "/dashboard", query: { view: "codex" } } },
+    { path: "/claude", redirect: { path: "/dashboard", query: { view: "claude" } } },
     {
       path: "/dashboard",
       name: "dashboard",

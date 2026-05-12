@@ -4,7 +4,8 @@ import { api, PORT, type Status } from "../api/client.ts";
 export function useProxyStatus() {
   const status = ref<Status | null>(null);
   const online = ref(false);
-  let timer: ReturnType<typeof setInterval>;
+  let ws: WebSocket | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function refresh() {
     try {
@@ -16,11 +17,45 @@ export function useProxyStatus() {
     }
   }
 
+  function connectStatusWs() {
+    ws = new WebSocket(`ws://127.0.0.1:${PORT}/_vp/ws`);
+    ws.onopen = () => {
+      online.value = true;
+    };
+    ws.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data) as { type?: string; [k: string]: unknown };
+        if (ev.type === "status-changed") {
+          const next = { ...(ev as Record<string, unknown>) } as Partial<Status> & {
+            type: "status-changed";
+          };
+          delete (next as Record<string, unknown>).type;
+          status.value = next as Status;
+          online.value = true;
+        }
+      } catch {
+        /* ignore malformed ws frames */
+      }
+    };
+    ws.onerror = () => {
+      online.value = false;
+    };
+    ws.onclose = () => {
+      online.value = false;
+      ws = null;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connectStatusWs, 2000);
+    };
+  }
+
   onMounted(() => {
     void refresh();
-    timer = setInterval(refresh, 5000);
+    connectStatusWs();
   });
-  onUnmounted(() => clearInterval(timer));
+  onUnmounted(() => {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    ws?.close();
+  });
 
   return { status, online, refresh };
 }

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Vibe Plus soft sky V mark</title>
+  <desc id="desc">A clean airy V mark using a soft sky palette.</desc>
+  <defs>
+    <linearGradient id="sky-a" x1="112" x2="400" y1="102" y2="416" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#93c5fd"/>
+      <stop offset=".45" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#5eead4"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="#f8fbff"/>
+  <path d="M113 126c15-26 54-24 67 4l70 154c3 7 13 7 16 0l71-154c13-28 52-30 67-4 7 12 7 26 1 39L318 412c-24 54-99 54-123 0L112 165c-6-13-6-27 1-39z" fill="url(#sky-a)"/>
+  <path d="M256 317v42M235 338h42" stroke="#0f766e" stroke-linecap="round" stroke-width="12"/>
+</svg>

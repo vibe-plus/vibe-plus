@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import type { Credential, CredentialPoolStatus, CredentialPlanSnapshot } from "../api/client.ts";
 import VpIcon from "./vp-icon.vue";
 import {
@@ -17,7 +18,6 @@ import {
   rlClass,
   rlPercent,
   credentialAuthShort,
-  shouldHideDbPlanTypeChip,
 } from "../utils/providers-display.ts";
 
 const props = defineProps<{
@@ -35,286 +35,233 @@ const emit = defineEmits<{
 const plan = () => primaryPlanPercent(props.planSnap);
 const status = () => mergedPoolStatus(props.credential, props.poolRow);
 const dupFp = () => isDupFingerprint(props.credential, props.peerCreds);
+const showDetail = ref(false);
 
-function statusChipClass(tone: "ok" | "warn" | "bad"): string {
-  if (tone === "ok") return "badge-green";
-  if (tone === "bad") return "badge-red";
-  return "badge-amber";
+function statusDotClass(tone: "ok" | "warn" | "bad"): string {
+  if (tone === "ok") return "bg-emerald-500";
+  if (tone === "bad") return "bg-red-500";
+  return "bg-amber-500";
+}
+
+function formatShortDuration(totalSeconds: number): string {
+  if (totalSeconds <= 0) return "now";
+  const mins = Math.floor(totalSeconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const remMin = mins % 60;
+  if (hours < 24) return remMin > 0 ? `${hours}h${remMin}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHour = hours % 24;
+  return remHour > 0 ? `${days}d${remHour}h` : `${days}d`;
+}
+
+function planResetHint(): string | null {
+  const snap = props.planSnap;
+  if (!snap) return null;
+  const windowLabel = plan().windowLabel;
+  const resetSeconds =
+    windowLabel === "7d"
+      ? snap.codex_7d_reset_after_seconds
+      : (snap.codex_5h_reset_after_seconds ?? snap.codex_7d_reset_after_seconds);
+  if (resetSeconds == null || Number.isNaN(resetSeconds)) return null;
+  return `R ${formatShortDuration(resetSeconds)}`;
 }
 </script>
 
 <template>
   <div
-    class="flex min-w-0 flex-col gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 sm:flex-row sm:items-stretch sm:gap-3"
+    class="group flex min-w-0 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1.5"
   >
-    <div class="min-w-0 flex-1 space-y-2">
-      <!-- 主行：身份 + 用量条 + 状态 -->
-      <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-        <div class="min-w-0 flex-1 space-y-1">
-          <div class="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span
-              class="truncate text-sm font-semibold text-slate-900"
-              :title="credentialPrimaryAccountLabel(credential)"
-            >
-              {{ credentialPrimaryAccountLabel(credential) }}
-            </span>
-            <span
-              v-if="
-                credential.label?.trim() &&
-                credentialPrimaryAccountLabel(credential) !== credential.label.trim()
-              "
-              class="truncate text-xs text-slate-500"
-              :title="credential.label"
-            >
-              {{ credential.label }}
-            </span>
-          </div>
-          <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-600">
-            <span v-if="credentialPlanTierHint(credential)" class="text-slate-500">
-              档位 {{ credentialPlanTierHint(credential) }}
-            </span>
-            <span
-              v-if="credential.plan_type && !shouldHideDbPlanTypeChip(credential)"
-              class="max-w-[8rem] truncate text-slate-500"
-              :title="credential.plan_type"
-            >
-              {{ credential.plan_type }}
-            </span>
-            <span :class="statusChipClass(status().tone)" class="text-xs">
-              {{ status().text }}
-            </span>
-            <span
-              v-if="!poolRow"
-              class="text-slate-500"
-              :title="'同步后网关会返回该凭证的限流与熔断指标'"
-            >
-              {{ poolRowMissingLabel() }}
-            </span>
-            <span class="text-slate-500">{{ credentialAuthShort(credential, poolRow) }}</span>
-            <span v-if="dupFp()" class="text-amber-800" title="与本供应商下其它凭证指纹相同">
-              可能重复
-            </span>
-          </div>
-        </div>
-
-        <div class="flex min-w-0 flex-1 flex-col justify-center gap-1 sm:max-w-md">
-          <div v-if="plan().pct != null" class="flex min-w-0 items-center gap-2">
-            <div class="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200">
-              <div
-                class="h-full rounded-full transition-all"
-                :class="planPctClass(plan().pct)"
-                :style="{ width: `${plan().pct}%` }"
-              />
-            </div>
-            <span class="shrink-0 font-mono text-xs tabular-nums text-slate-800">
-              {{ plan().windowLabel }} {{ plan().pct?.toFixed(0) }}%
-            </span>
-          </div>
-          <p
-            v-else-if="planSnap?.summary"
-            class="truncate text-xs text-slate-600"
-            :title="planSnap.summary ?? ''"
-          >
-            {{ planSnap.summary }}
-          </p>
-          <p v-else class="text-xs text-slate-400">暂无用量快照</p>
-        </div>
-      </div>
-
-      <details
-        class="group rounded-md border border-slate-100 bg-slate-50/80 px-2 py-1.5 text-[11px] text-slate-600"
-      >
-        <summary
-          class="cursor-pointer select-none list-none text-slate-700 marker:content-none [&::-webkit-details-marker]:hidden"
+    <div class="min-w-0 flex-1">
+      <div class="flex min-w-0 flex-wrap items-center gap-1 text-[11px]">
+        <span
+          class="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5"
         >
-          <span class="inline-flex items-center gap-1 font-medium">
-            <VpIcon
-              name="chevron-down"
-              size-class="size-3.5 shrink-0 transition-transform group-open:rotate-180"
-            />
-            高级
-          </span>
-        </summary>
-        <div class="mt-2 space-y-2 border-t border-slate-200 pt-2">
-          <div
-            v-if="
-              credential.oauth_access_token ||
-              credential.oauth_has_refresh ||
-              credential.last_used_at
-            "
-            class="flex flex-wrap gap-x-3 gap-y-0.5"
+          <span
+            class="relative inline-flex h-2.5 w-2.5 items-center justify-center rounded-full border border-slate-300"
           >
-            <template v-if="credential.oauth_access_token || credential.oauth_has_refresh">
-              <span v-if="credential.oauth_has_refresh" class="text-emerald-700">可刷新</span>
-              <span v-if="credential.oauth_expires_at">
-                <span
-                  :class="
-                    credential.oauth_expires_at * 1000 < Date.now()
-                      ? 'text-red-600'
-                      : credential.oauth_expires_at * 1000 < Date.now() + 300_000
-                        ? 'text-amber-700'
-                        : ''
-                  "
-                >
-                  {{
-                    credential.oauth_expires_at * 1000 < Date.now()
-                      ? "令牌已过期"
-                      : "到期 " + new Date(credential.oauth_expires_at * 1000).toLocaleString()
-                  }}
-                </span>
-              </span>
-            </template>
-            <span v-if="credential.last_used_at"
-              >最近使用 {{ fmtTs(credential.last_used_at) }}</span
-            >
-            <span v-if="poolRow" class="text-slate-500">
-              近窗 {{ poolRow.rolling_requests }} 次 · 成功 {{ poolRow.rolling_successes }} · 失败
-              {{ poolRow.rolling_failures }}
-            </span>
+            <span class="h-1.5 w-1.5 rounded-full" :class="statusDotClass(status().tone)" />
+          </span>
+          <span class="text-slate-700">{{ status().text }}</span>
+        </span>
+        <span
+          class="max-w-[8.5rem] truncate font-medium text-slate-900 sm:max-w-[12rem]"
+          :title="credentialPrimaryAccountLabel(credential)"
+        >
+          {{ credentialPrimaryAccountLabel(credential) }}
+        </span>
+        <span
+          v-if="credentialPlanTierHint(credential)"
+          class="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-800"
+        >
+          {{ credentialPlanTierHint(credential) }}
+        </span>
+        <span
+          v-if="plan().pct != null"
+          class="rounded bg-slate-100 px-1.5 py-0.5 font-mono tabular-nums text-slate-700"
+        >
+          {{ plan().windowLabel }} {{ plan().pct?.toFixed(0) }}%
+        </span>
+        <span v-if="planResetHint()" class="rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">
+          {{ planResetHint() }}
+        </span>
+        <span class="text-slate-500">{{ credentialAuthShort(credential, poolRow) }}</span>
+      </div>
+      <div v-if="plan().pct != null" class="mt-1 h-1 overflow-hidden rounded-full bg-slate-200/80">
+        <div
+          class="h-full rounded-full transition-all"
+          :class="planPctClass(plan().pct)"
+          :style="{ width: `${plan().pct}%` }"
+        />
+      </div>
+    </div>
+
+    <div
+      class="flex shrink-0 items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:pointer-events-none sm:group-hover:opacity-100 sm:group-hover:pointer-events-auto sm:group-focus-within:opacity-100 sm:group-focus-within:pointer-events-auto"
+    >
+      <button
+        type="button"
+        class="inline-flex size-7 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50"
+        aria-label="details"
+        title="details"
+        @click="showDetail = true"
+      >
+        <VpIcon name="file-text" size-class="size-3.5" />
+      </button>
+      <button
+        type="button"
+        class="inline-flex size-7 items-center justify-center rounded-md border border-vp-border/80 text-slate-600 hover:bg-slate-50"
+        aria-label="edit"
+        title="edit"
+        @click="emit('edit', credential)"
+      >
+        <VpIcon name="pencil" size-class="size-3.5" />
+      </button>
+      <button
+        type="button"
+        class="inline-flex size-7 items-center justify-center rounded-md border border-red-200 text-red-600 hover:bg-red-50"
+        aria-label="delete"
+        title="delete"
+        @click="emit('delete', credential)"
+      >
+        <VpIcon name="trash-2" size-class="size-3.5" />
+      </button>
+    </div>
+  </div>
+
+  <Teleport to="body">
+    <div
+      v-if="showDetail"
+      class="vp-modal-backdrop z-[120]"
+      role="dialog"
+      aria-modal="true"
+      aria-label="details"
+      @click.self="showDetail = false"
+    >
+      <div class="vp-modal-panel max-w-lg flex flex-col" @click.stop>
+        <div class="vp-modal-header">
+          <span
+            class="grid size-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-700 ring-1 ring-slate-200"
+            aria-hidden="true"
+          >
+            <VpIcon name="key" size-class="size-4.5" />
+          </span>
+          <div class="min-w-0 flex-1">
+            <h3 class="sr-only">credential</h3>
+            <p class="mt-0.5 truncate text-xs text-slate-500">
+              {{ credentialPrimaryAccountLabel(credential) }}
+            </p>
           </div>
-          <p v-if="credentialJwtPlanSlugDisplay(credential)" class="text-slate-500">
-            JWT 档位：<span class="font-mono text-slate-800">{{
-              credentialJwtPlanSlugDisplay(credential)
-            }}</span>
-          </p>
-          <p v-if="dupFp()" class="text-amber-800">
-            指纹与本供应商下另一条凭证相同，请确认是否重复导入。
+          <button
+            type="button"
+            class="vp-icon-btn shrink-0"
+            aria-label="close"
+            title="close"
+            @click="showDetail = false"
+          >
+            <VpIcon name="x" size-class="size-4.5" />
+          </button>
+        </div>
+
+        <div class="px-5 py-4 space-y-2 text-xs text-slate-700 max-h-[65vh] overflow-y-auto">
+          <p v-if="dupFp()" class="font-mono text-amber-800">fingerprint:duplicate</p>
+          <p v-if="!poolRow" class="text-slate-500">{{ poolRowMissingLabel() }}</p>
+          <p v-if="credentialJwtPlanSlugDisplay(credential)">
+            jwt.plan <span class="font-mono">{{ credentialJwtPlanSlugDisplay(credential) }}</span>
           </p>
           <p>
-            <span class="text-slate-500">指纹</span>
-            <code class="ml-1 break-all font-mono text-slate-800">{{
+            fingerprint
+            <code class="break-all font-mono">{{
               fingerprintDisplay(credential.auth_fingerprint)
             }}</code>
           </p>
           <p>
-            <span class="text-slate-500">auth_ref</span>
-            <code class="ml-1 break-all font-mono text-xs text-slate-800">{{
-              authRefPreview(credential)
-            }}</code>
+            auth_ref：<code class="break-all font-mono">{{ authRefPreview(credential) }}</code>
           </p>
           <p
             v-if="credential.auth_ref && !credential.auth_ref.startsWith('literal:')"
-            class="break-all font-mono text-[10px] text-slate-700"
+            class="break-all font-mono text-[11px] text-slate-600"
           >
             {{ credential.auth_ref }}
           </p>
-          <p v-if="credential.notes" class="text-slate-500">备注：{{ credential.notes }}</p>
-
+          <p v-if="credential.notes">notes {{ credential.notes }}</p>
+          <p v-if="credential.last_used_at">last_used {{ fmtTs(credential.last_used_at) }}</p>
+          <p v-if="lastErrorSummary(credential, poolRow)" class="text-red-600">
+            last_error {{ lastErrorSummary(credential, poolRow) }}
+          </p>
+          <p v-if="credential.consecutive_failures > 0" class="text-red-700">
+            failures {{ credential.consecutive_failures }}
+          </p>
+          <p v-if="credential.oauth_has_refresh" class="text-emerald-700">oauth.refresh</p>
+          <p v-if="credential.oauth_expires_at">
+            oauth.expires {{ new Date(credential.oauth_expires_at * 1000).toLocaleString() }}
+          </p>
+          <div
+            v-if="poolRow"
+            class="rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px]"
+          >
+            window.req {{ poolRow.rolling_requests }} · ok {{ poolRow.rolling_successes }} · err
+            {{ poolRow.rolling_failures }}
+          </div>
+          <div
+            v-if="credential.rl_requests_limit != null || credential.rl_tokens_limit != null"
+            class="rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] space-y-1"
+          >
+            <p v-if="credential.rl_requests_limit != null">
+              rate.requests {{ credential.rl_requests_remaining?.toLocaleString() }} /
+              {{ credential.rl_requests_limit?.toLocaleString() }}（{{
+                rlPercent(credential.rl_requests_remaining, credential.rl_requests_limit).toFixed(
+                  0,
+                )
+              }}%）
+            </p>
+            <p v-if="credential.rl_tokens_limit != null">
+              rate.tokens {{ credential.rl_tokens_remaining?.toLocaleString() }} /
+              {{ credential.rl_tokens_limit?.toLocaleString() }}（{{
+                rlPercent(credential.rl_tokens_remaining, credential.rl_tokens_limit).toFixed(0)
+              }}%）
+            </p>
+          </div>
           <div
             v-if="planSnap"
-            class="space-y-1.5 rounded border border-slate-200 bg-white px-2 py-2"
+            class="rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px]"
           >
-            <p class="text-[10px] font-medium uppercase tracking-wide text-slate-500">用量快照</p>
-            <p v-if="planSnap.summary" class="break-words font-mono text-[11px] text-slate-800">
+            <p v-if="planSnap.summary" class="break-words font-mono text-slate-700">
               {{ planSnap.summary }}
             </p>
-            <div v-if="planSnap.codex_5h_used_percent != null" class="flex items-center gap-2">
-              <span class="w-6 shrink-0 text-[10px] text-slate-500">5h</span>
-              <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200">
-                <div
-                  :class="planPctClass(planSnap.codex_5h_used_percent)"
-                  class="h-full rounded-full"
-                  :style="`width: ${Math.min(100, planSnap.codex_5h_used_percent)}%`"
-                />
-              </div>
-              <span class="w-10 shrink-0 text-right font-mono text-[10px] text-slate-600">
-                {{ planSnap.codex_5h_used_percent.toFixed(0) }}%
-              </span>
-            </div>
-            <div v-if="planSnap.codex_7d_used_percent != null" class="flex items-center gap-2">
-              <span class="w-6 shrink-0 text-[10px] text-slate-500">7d</span>
-              <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200">
-                <div
-                  :class="planPctClass(planSnap.codex_7d_used_percent)"
-                  class="h-full rounded-full"
-                  :style="`width: ${Math.min(100, planSnap.codex_7d_used_percent)}%`"
-                />
-              </div>
-              <span class="w-10 shrink-0 text-right font-mono text-[10px] text-slate-600">
-                {{ planSnap.codex_7d_used_percent.toFixed(0) }}%
-              </span>
-            </div>
-            <p class="text-[10px] text-slate-500">
-              {{ planSnap.captured_at ? `采集 ${fmtTs(planSnap.captured_at)} · ` : ""
+            <p v-if="planSnap.codex_5h_used_percent != null">
+              5h：{{ planSnap.codex_5h_used_percent.toFixed(0) }}%
+            </p>
+            <p v-if="planSnap.codex_7d_used_percent != null">
+              7d：{{ planSnap.codex_7d_used_percent.toFixed(0) }}%
+            </p>
+            <p class="text-slate-500">
+              {{ planSnap.captured_at ? `captured ${fmtTs(planSnap.captured_at)} · ` : ""
               }}{{ planSnap.source }}
             </p>
           </div>
-
-          <div
-            v-if="credential.rl_requests_limit != null || credential.rl_tokens_limit != null"
-            class="space-y-2"
-          >
-            <p class="text-[10px] font-medium text-slate-500">请求 / 令牌配额</p>
-            <div v-if="credential.rl_requests_limit != null" class="flex items-center gap-2">
-              <span class="w-10 shrink-0 text-[10px] text-slate-500">请求</span>
-              <div class="h-1.5 min-w-0 flex-1 rounded-full bg-slate-200">
-                <div
-                  :class="
-                    rlClass(
-                      rlPercent(credential.rl_requests_remaining, credential.rl_requests_limit),
-                    )
-                  "
-                  class="h-full rounded-full transition-all"
-                  :style="`width: ${rlPercent(credential.rl_requests_remaining, credential.rl_requests_limit)}%`"
-                />
-              </div>
-              <span class="shrink-0 font-mono text-[10px] text-slate-600">
-                {{ credential.rl_requests_remaining?.toLocaleString() }} /
-                {{ credential.rl_requests_limit?.toLocaleString() }}
-              </span>
-            </div>
-            <div v-if="credential.rl_tokens_limit != null" class="flex items-center gap-2">
-              <span class="w-10 shrink-0 text-[10px] text-slate-500">令牌</span>
-              <div class="h-1.5 min-w-0 flex-1 rounded-full bg-slate-200">
-                <div
-                  :class="
-                    rlClass(rlPercent(credential.rl_tokens_remaining, credential.rl_tokens_limit))
-                  "
-                  class="h-full rounded-full transition-all"
-                  :style="`width: ${rlPercent(credential.rl_tokens_remaining, credential.rl_tokens_limit)}%`"
-                />
-              </div>
-              <span class="shrink-0 font-mono text-[10px] text-slate-600">
-                {{ credential.rl_tokens_remaining?.toLocaleString() }} /
-                {{ credential.rl_tokens_limit?.toLocaleString() }}
-              </span>
-            </div>
-          </div>
-
-          <p v-if="credential.consecutive_failures > 0" class="text-red-700">
-            连续失败 {{ credential.consecutive_failures }} 次
-          </p>
         </div>
-      </details>
-
-      <p
-        v-if="lastErrorSummary(credential, poolRow)"
-        class="truncate text-xs text-red-600"
-        :title="lastErrorSummary(credential, poolRow) ?? ''"
-      >
-        {{ lastErrorSummary(credential, poolRow) }}
-      </p>
+      </div>
     </div>
-
-    <div class="flex shrink-0 justify-end gap-1 sm:flex-col sm:justify-start">
-      <button
-        type="button"
-        class="vp-icon-btn border border-vp-border/80"
-        aria-label="编辑凭证"
-        title="编辑"
-        @click="emit('edit', credential)"
-      >
-        <VpIcon name="pencil" size-class="size-4" />
-      </button>
-      <button
-        type="button"
-        class="vp-icon-btn border border-red-200 text-red-600 hover:bg-red-50"
-        aria-label="删除凭证"
-        title="删除"
-        @click="emit('delete', credential)"
-      >
-        <VpIcon name="trash-2" size-class="size-4" />
-      </button>
-    </div>
-  </div>
+  </Teleport>
 </template>

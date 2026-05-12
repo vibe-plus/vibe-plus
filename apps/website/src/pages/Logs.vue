@@ -5,6 +5,12 @@ import { api, type RequestLog, type LogPage, type Provider } from "../api/client
 import { useWs } from "../composables/useProxy.ts";
 import VpIcon from "../components/vp-icon.vue";
 import { resolvePageAccent } from "../utils/page-accent.ts";
+import { formatUnknownProviderId } from "../utils/provider-display.ts";
+import {
+  logMatchesWorkspaceView,
+  workspaceViewFromQuery,
+  type WorkspaceView,
+} from "../utils/workspace-view.ts";
 
 const route = useRoute();
 const pa = computed(() => resolvePageAccent(route.name));
@@ -18,11 +24,18 @@ const filterStatus = ref<"all" | "ok" | "error">("all");
 const filterProvider = ref("");
 const filterHours = ref<number | "">("");
 const providers = ref<Provider[]>([]);
+const view = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
+const providerById = computed(() => new Map(providers.value.map((p) => [p.id, p])));
+const visibleItems = computed(() =>
+  (page.value?.items ?? []).filter((log) =>
+    logMatchesWorkspaceView(log, view.value, providerById.value),
+  ),
+);
 
 const providerLabel = (id: string | null) => {
-  if (!id) return "—";
+  if (!id) return "unknown";
   const p = providers.value.find((x) => x.id === id);
-  return p ? p.name : id.slice(0, 8) + "…";
+  return p ? p.name : formatUnknownProviderId(id);
 };
 
 async function load(offset = 0) {
@@ -43,7 +56,7 @@ async function load(offset = 0) {
   }
 }
 
-watch([filterStatus, filterProvider, filterHours], () => load());
+watch([filterStatus, filterProvider, filterHours, view], () => load());
 
 useWs((ev: unknown) => {
   if (!live.value || !page.value) return;
@@ -52,6 +65,7 @@ useWs((ev: unknown) => {
   if (filterStatus.value === "ok" && (log.status_code ?? 0) >= 400) return;
   if (filterStatus.value === "error" && (log.status_code ?? 0) < 400 && !log.error) return;
   if (filterProvider.value && log.provider_id !== filterProvider.value) return;
+  if (!logMatchesWorkspaceView(log, view.value, providerById.value)) return;
   page.value.items.unshift(log);
   page.value.total++;
   if (page.value.items.length > 200) page.value.items.pop();
@@ -77,24 +91,32 @@ const detailOpen = ref(false);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
 const detailLog = ref<RequestLog | null>(null);
-const detailTab = ref<"request" | "response" | "client">("request");
+const detailTab = ref<"headers" | "request" | "response" | "client">("headers");
 
-function prettyRaw(label: "request" | "response" | "client", log: RequestLog | null): string {
+function prettyRaw(
+  label: "headers" | "request" | "response" | "client",
+  log: RequestLog | null,
+): string {
   if (!log) return "";
   const raw =
-    label === "request"
-      ? log.request_body
-      : label === "response"
-        ? log.response_body
-        : log.client_response_body;
+    label === "headers"
+      ? log.request_headers
+      : label === "request"
+        ? log.request_body
+        : label === "response"
+          ? log.response_body
+          : log.client_response_body;
   if (raw == null || raw === "") {
+    if (label === "headers") {
+      return "(No inbound headers stored — entries logged before this feature.)";
+    }
     if (label === "request") {
       return "(No inbound body stored — entries logged before this feature, or empty body.)";
     }
     if (label === "response") {
       return "(No upstream response body stored — older entries, or empty upstream payload.)";
     }
-    return "(No client-side transform trace — not a Codex WebSocket turn, or stream ended before capture.)";
+    return "(No client-side payload trace — older entries, empty payload, or stream ended before capture.)";
   }
   try {
     return JSON.stringify(JSON.parse(raw), null, 2);
@@ -119,7 +141,7 @@ async function openDetail(log: RequestLog) {
   detailLoading.value = true;
   detailError.value = null;
   detailLog.value = null;
-  detailTab.value = "request";
+  detailTab.value = "headers";
   try {
     detailLog.value = await api.logs.get(log.id);
   } catch (e) {
@@ -167,11 +189,8 @@ onBeforeUnmount(() => {
   <div>
     <div class="flex flex-wrap items-start sm:items-center justify-between gap-4 mb-6">
       <div>
-        <span :class="['text-xs uppercase', pa.kicker]">审计</span>
-        <h1 :class="['text-3xl font-bold tracking-tight', pa.heading]">请求日志</h1>
-        <p class="text-sm text-vp-muted mt-1.5 max-w-2xl leading-relaxed">
-          网关请求历史。点击行可查看请求体 / 上游响应 / 发往客户端的 Codex 帧。
-        </p>
+        <span :class="['text-xs uppercase', pa.kicker]">audit</span>
+        <h1 :class="['text-3xl font-bold tracking-tight', pa.heading]">logs</h1>
       </div>
       <label class="flex items-center gap-2 text-sm text-vp-muted cursor-pointer select-none">
         <input
@@ -190,35 +209,35 @@ onBeforeUnmount(() => {
     <!-- Filters -->
     <div class="flex flex-wrap items-center gap-3 mb-5">
       <select v-model="filterStatus" class="input-base rounded-xl min-w-0">
-        <option value="all">All status</option>
-        <option value="ok">OK only</option>
-        <option value="error">Errors only</option>
+        <option value="all">status:all</option>
+        <option value="ok">status:ok</option>
+        <option value="error">status:error</option>
       </select>
 
       <select v-model="filterProvider" class="input-base rounded-xl min-w-[160px]">
-        <option value="">All providers</option>
+        <option value="">provider:all</option>
         <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
       </select>
 
       <select v-model="filterHours" class="input-base rounded-xl min-w-0">
-        <option value="">All time</option>
-        <option :value="1">Last 1 hour</option>
-        <option :value="5">Last 5 hours</option>
-        <option :value="24">Last 24 hours</option>
-        <option :value="168">Last 7 days</option>
+        <option value="">time:all</option>
+        <option :value="1">1h</option>
+        <option :value="5">5h</option>
+        <option :value="24">24h</option>
+        <option :value="168">7d</option>
       </select>
 
       <div class="flex items-center gap-2 ml-auto shrink-0">
         <span v-if="loading" class="text-xs text-vp-muted font-mono flex items-center gap-1.5">
           <span class="size-1.5 rounded-full bg-slate-400 live-dot" />
-          加载中…
+          ...
         </span>
         <button
           type="button"
           class="vp-icon-btn"
           :disabled="loading"
-          aria-label="刷新日志列表"
-          title="刷新"
+          aria-label="refresh"
+          title="refresh"
           @click="load()"
         >
           <VpIcon name="refresh-cw" size-class="size-5" :spin="loading" />
@@ -234,30 +253,30 @@ onBeforeUnmount(() => {
             <tr
               class="text-left text-xs text-vp-muted border-b border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2.5%,var(--vp-surface))]"
             >
-              <th class="px-4 py-3 font-medium w-12">Status</th>
-              <th class="px-3 py-3 text-right font-medium w-20">Latency</th>
+              <th class="px-4 py-3 font-medium w-12">status</th>
+              <th class="px-3 py-3 text-right font-medium w-20">lat</th>
               <th class="px-3 py-3 text-right font-medium w-20">TTFB</th>
-              <th class="px-3 py-3 font-medium">Model</th>
-              <th class="px-3 py-3 font-medium">Provider</th>
-              <th class="px-3 py-3 text-right font-medium w-20">In</th>
-              <th class="px-3 py-3 text-right font-medium w-20">Out</th>
-              <th class="px-3 py-3 text-right font-medium w-20">Cache</th>
+              <th class="px-3 py-3 font-medium">model</th>
+              <th class="px-3 py-3 font-medium">provider</th>
+              <th class="px-3 py-3 text-right font-medium w-20">in</th>
+              <th class="px-3 py-3 text-right font-medium w-20">out</th>
+              <th class="px-3 py-3 text-right font-medium w-20">cache</th>
             </tr>
           </thead>
-          <tbody v-if="!page?.items.length" class="text-center">
+          <tbody v-if="!visibleItems.length" class="text-center">
             <tr>
               <td colspan="8" class="px-4 py-16 text-sm text-vp-muted">
                 <div v-if="loading" class="flex items-center justify-center gap-2">
                   <span class="size-1.5 rounded-full bg-slate-400 live-dot" />
-                  加载中…
+                  ...
                 </div>
-                <div v-else>没有符合筛选条件的日志</div>
+                <div v-else class="font-mono">empty</div>
               </td>
             </tr>
           </tbody>
           <tbody v-else class="divide-y divide-vp-border">
             <tr
-              v-for="log in page.items"
+              v-for="log in visibleItems"
               :key="log.id"
               class="hover:bg-[color-mix(in_srgb,var(--vp-text)_4%,var(--vp-surface))] transition-colors cursor-pointer"
               @click="openDetail(log)"
@@ -281,7 +300,11 @@ onBeforeUnmount(() => {
               </td>
               <td
                 class="px-3 py-2.5 text-vp-muted max-w-[14rem] truncate"
-                :title="log.provider_id ?? ''"
+                :title="
+                  log.provider_id && providerLabel(log.provider_id) !== 'unknown'
+                    ? log.provider_id
+                    : ''
+                "
               >
                 {{ providerLabel(log.provider_id) }}
               </td>
@@ -302,7 +325,7 @@ onBeforeUnmount(() => {
         v-if="page"
         class="px-5 py-3 text-xs text-vp-muted border-t border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2.5%,var(--vp-surface))]"
       >
-        显示 {{ page.items.length }} / 共 {{ page.total }} 条
+        {{ page.items.length }} / {{ page.total }}
       </div>
     </div>
 
@@ -325,19 +348,17 @@ onBeforeUnmount(() => {
               <VpIcon name="file-text" size-class="size-5" />
             </span>
             <div class="min-w-0 flex-1">
-              <h2 id="logs-detail-title" class="text-lg font-medium text-vp-text">
-                请求 / 响应 / 客户端
-              </h2>
+              <h2 id="logs-detail-title" class="text-lg font-medium text-vp-text">raw</h2>
               <p v-if="detailLog" class="text-xs text-vp-muted truncate font-mono mt-0.5">
-                {{ detailLog.id }}
+                {{ detailLog.id }} · {{ detailLog.client_transport ?? "unknown" }}
               </p>
             </div>
             <div class="flex items-center gap-1">
               <button
                 type="button"
                 class="vp-icon-btn border border-vp-border/70"
-                aria-label="复制当前标签页正文"
-                title="复制当前标签页"
+                aria-label="copy"
+                title="copy"
                 @click="copyCurrentBody"
               >
                 <VpIcon name="copy" size-class="size-5" />
@@ -345,8 +366,8 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 class="vp-icon-btn border border-vp-border/70"
-                aria-label="关闭详情"
-                title="关闭"
+                aria-label="close"
+                title="close"
                 @click="closeDetail"
               >
                 <VpIcon name="x" size-class="size-5" />
@@ -358,10 +379,22 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="px-5 py-2.5 font-medium transition-colors relative"
+              :class="detailTab === 'headers' ? 'text-vp-text' : 'text-vp-muted hover:text-vp-text'"
+              @click="detailTab = 'headers'"
+            >
+              Headers
+              <span
+                v-if="detailTab === 'headers'"
+                class="absolute bottom-0 left-4 right-4 h-0.5 bg-gradient-to-r from-violet-500 to-cyan-400 rounded-full"
+              />
+            </button>
+            <button
+              type="button"
+              class="px-5 py-2.5 font-medium transition-colors relative"
               :class="detailTab === 'request' ? 'text-vp-text' : 'text-vp-muted hover:text-vp-text'"
               @click="detailTab = 'request'"
             >
-              发往网关的请求
+              request
               <span
                 v-if="detailTab === 'request'"
                 class="absolute bottom-0 left-4 right-4 h-0.5 bg-gradient-to-r from-violet-500 to-cyan-400 rounded-full"
@@ -375,7 +408,7 @@ onBeforeUnmount(() => {
               "
               @click="detailTab = 'response'"
             >
-              上游原始响应
+              response
               <span
                 v-if="detailTab === 'response'"
                 class="absolute bottom-0 left-4 right-4 h-0.5 bg-gradient-to-r from-violet-500 to-cyan-400 rounded-full"
@@ -387,7 +420,7 @@ onBeforeUnmount(() => {
               :class="detailTab === 'client' ? 'text-vp-text' : 'text-vp-muted hover:text-vp-text'"
               @click="detailTab = 'client'"
             >
-              发往客户端（Codex WS）
+              client
               <span
                 v-if="detailTab === 'client'"
                 class="absolute bottom-0 left-4 right-4 h-0.5 bg-gradient-to-r from-violet-500 to-cyan-400 rounded-full"
@@ -400,7 +433,7 @@ onBeforeUnmount(() => {
           >
             <div v-if="detailLoading" class="text-vp-muted text-sm flex items-center gap-2">
               <span class="size-1.5 rounded-full bg-vp-muted/80 live-dot" />
-              加载中…
+              ...
             </div>
             <div v-else-if="detailError" class="text-red-600 text-sm">{{ detailError }}</div>
             <pre

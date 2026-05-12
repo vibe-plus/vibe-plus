@@ -1,10 +1,22 @@
-import { defineConfig, presetUno, presetWebFonts } from "unocss";
+import { defineConfig, presetIcons, presetUno, presetWebFonts } from "unocss";
 import { getPageAccentSafelistTokens } from "./src/utils/page-accent.ts";
+import { lobeIconsCollection, vibePlusIconsCollection } from "./uno-icons.ts";
 
 export default defineConfig({
   safelist: getPageAccentSafelistTokens(),
   presets: [
     presetUno(),
+    presetIcons({
+      collections: {
+        lucide: () => import("@iconify-json/lucide/icons.json").then((i) => i.default),
+        lobe: lobeIconsCollection,
+        vp: vibePlusIconsCollection,
+      },
+      extraProperties: {
+        display: "inline-block",
+        "vertical-align": "middle",
+      },
+    }),
     presetWebFonts({
       provider: "none",
       fonts: {
@@ -14,20 +26,25 @@ export default defineConfig({
     }),
   ],
   shortcuts: {
-    "layout-shell": "min-h-screen flex antialiased font-sans bg-vp-bg text-vp-text",
+    "layout-shell":
+      "min-h-screen flex flex-col sm:flex-row antialiased font-sans bg-vp-bg text-vp-text",
     "nav-aside":
-      "shrink-0 border-r border-vp-border bg-vp-surface flex flex-col relative shadow-sm",
+      "shrink-0 border-b sm:border-b-0 sm:border-r border-vp-border bg-vp-surface flex sm:flex-col relative shadow-sm",
     "nav-link":
-      "flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-200 border",
+      "flex items-center justify-center sm:justify-start gap-2 sm:gap-3 px-3 py-2 sm:px-3.5 sm:py-2.5 rounded-xl text-[13px] font-medium transition-all duration-200",
     "nav-link--idle":
-      "text-vp-muted hover:text-vp-text border-transparent hover:bg-[color-mix(in_srgb,var(--vp-text)_5%,var(--vp-surface))]",
+      "text-vp-muted hover:text-vp-text hover:bg-[color-mix(in_srgb,var(--vp-text)_5%,var(--vp-surface))]",
     "nav-link--active":
-      "border-[color-mix(in_srgb,var(--vp-primary)_28%,var(--vp-border))] bg-[color-mix(in_srgb,var(--vp-primary)_11%,var(--vp-surface))] text-[color-mix(in_srgb,var(--vp-primary)_35%,var(--vp-text))] shadow-sm",
-    "nav-icon": "size-7 rounded-lg flex items-center justify-center transition-all duration-200",
-    "nav-icon--idle":
-      "bg-[color-mix(in_srgb,var(--vp-text)_7%,var(--vp-surface))] text-vp-muted group-hover:bg-[color-mix(in_srgb,var(--vp-text)_11%,var(--vp-surface))] group-hover:text-vp-text",
-    "nav-icon--active":
-      "bg-[color-mix(in_srgb,var(--vp-primary)_16%,var(--vp-surface))] text-[color-mix(in_srgb,var(--vp-primary)_12%,var(--vp-text))]",
+      "bg-[color-mix(in_srgb,var(--vp-primary)_12%,var(--vp-surface))] text-[color-mix(in_srgb,var(--vp-primary)_34%,var(--vp-text))] shadow-sm",
+    "nav-icon": "size-7 rounded-lg flex items-center justify-center transition-colors duration-200",
+    "nav-icon--idle": "text-vp-muted group-hover:text-vp-text",
+    "nav-icon--active": "text-[color-mix(in_srgb,var(--vp-primary)_18%,var(--vp-text))]",
+    "top-tabs":
+      "sticky top-0 z-20 flex items-center gap-1 overflow-x-auto rounded-xl border border-vp-border bg-[color-mix(in_srgb,var(--vp-surface)_92%,white)] p-1 shadow-sm backdrop-blur",
+    "top-tab":
+      "inline-flex h-9 min-w-9 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 sm:px-3 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)]",
+    "top-tab--idle": "text-vp-muted hover:bg-vp-surface hover:text-vp-text",
+    "top-tab--active": "bg-vp-surface text-vp-text shadow-sm ring-1 ring-vp-border",
     "main-canvas": "flex-1 min-w-0 overflow-auto bg-vp-bg relative",
     "brand-mark":
       "size-8 rounded-xl bg-gradient-to-br from-vp-primary to-[color-mix(in_srgb,var(--vp-primary)_65%,#1e1b4b)] flex items-center justify-center text-white text-sm font-bold shadow-md shadow-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)]",
@@ -48,11 +65,11 @@ export default defineConfig({
       "text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-red-200 bg-red-50 text-red-800",
     "badge-purple":
       "text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-md border border-indigo-200 bg-indigo-50 text-indigo-800",
-    "stat-value": "text-2xl sm:text-3xl font-bold text-vp-text tracking-tight",
+    "stat-value": "text-xl sm:text-2xl font-bold text-vp-text tracking-tight",
     "stat-label": "text-xs text-vp-muted uppercase tracking-wide",
     /** 主内容区：柔和浅色表面（嵌在浅色 layout 内） */
     "page-surface":
-      "min-w-0 rounded-3xl border border-vp-border bg-[color-mix(in_srgb,var(--vp-surface)_96%,white)] text-vp-text shadow-[0_10px_44px_color-mix(in_srgb,var(--vp-text)_7%,transparent)]",
+      "min-w-0 rounded-2xl sm:rounded-3xl border border-vp-border bg-[color-mix(in_srgb,var(--vp-surface)_96%,white)] text-vp-text shadow-[0_10px_44px_color-mix(in_srgb,var(--vp-text)_7%,transparent)]",
     "vp-modal-backdrop":
       "fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-6 bg-[color-mix(in_srgb,var(--vp-text)_42%,transparent)] backdrop-blur-md",
     "vp-modal-panel":

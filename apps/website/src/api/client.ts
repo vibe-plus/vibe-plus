@@ -67,6 +67,14 @@ export interface Route {
   tier: RouteTier;
   priority: number;
 }
+export interface RouteInput {
+  name: string;
+  match_model: string;
+  target_provider_id: string | null;
+  target_model: string | null;
+  tier: RouteTier;
+  priority: number;
+}
 export interface RequestLog {
   id: string;
   started_at: number;
@@ -90,6 +98,8 @@ export interface RequestLog {
   upstream_http_status?: number | null;
   upstream_error_preview?: string | null;
   dedupe_key?: string | null;
+  client_transport?: string | null;
+  request_headers?: string | null;
   /** Present on `GET /_vp/logs/:id`; omitted from list endpoint to save bandwidth. */
   request_body?: string | null;
   response_body?: string | null;
@@ -109,7 +119,150 @@ export interface Status {
   providers_total: number;
   providers_enabled: number;
   requests_last_hour: number;
+  codex_ws_active?: number;
+  codex_ws_total?: number;
+  codex_ws_requests_total?: number;
+  codex_http_responses_total?: number;
+  codex_last_transport?: string | null;
 }
+export interface ClientStatus {
+  client: string;
+  config_path: string;
+  config_exists: boolean;
+  taken_over: boolean;
+  expected_base_url: string;
+  configured_base_url: string | null;
+  auth_proxy_managed: boolean | null;
+  model_overrides_present: string[];
+  notes: string[];
+}
+export interface ClientTakeoverResult {
+  client: string;
+  config_path: string;
+  backup_path: string | null;
+  status: ClientStatus;
+}
+
+export interface VibeConfig {
+  server: {
+    host: string;
+    port: number;
+  };
+  failover: {
+    failure_threshold: number;
+    success_threshold: number;
+    open_timeout_secs: number;
+    inject_cache: boolean;
+  };
+  log: {
+    bodies: boolean;
+    redact_sensitive_headers: boolean;
+  };
+  codex?: {
+    summary: CodexSummaryConfig;
+  };
+  claude?: {
+    native: ClaudeNativeConfig;
+    summary: CodexSummaryConfig;
+    routing: ClaudeRoutingConfig;
+    fallback: ClaudeFallbackConfig;
+    request: ClaudeRequestConfig;
+    status_line: ClaudeStatusLineConfig;
+  };
+}
+
+export type ClaudeNativeEffort = "default" | "max";
+
+export interface ClaudeNativeConfig {
+  manage_settings_json: boolean;
+  proxy_env: boolean;
+  clear_model_overrides_on_takeover: boolean;
+  write_model_overrides_on_takeover: boolean;
+  default_model: string | null;
+  small_fast_model: string | null;
+  haiku_model: string | null;
+  sonnet_model: string | null;
+  opus_model: string | null;
+  max_output_tokens: number | null;
+  disable_nonessential_traffic: boolean;
+  enable_tool_search: boolean;
+  experimental_agent_teams: boolean;
+  effort: ClaudeNativeEffort;
+  disable_auto_updater: boolean;
+  hide_attribution: boolean;
+}
+
+export interface ClaudeRoutingConfig {
+  enabled: boolean;
+  default_model: string;
+  background_model: string;
+  think_model: string;
+  long_context_model: string;
+  long_context_threshold_tokens: number;
+  web_search_model: string;
+  image_model: string;
+  route_haiku_to_background: boolean;
+  enable_subagent_model_tag: boolean;
+}
+
+export interface ClaudeFallbackConfig {
+  enabled: boolean;
+  default: string[];
+  background: string[];
+  think: string[];
+  long_context: string[];
+  web_search: string[];
+  image: string[];
+}
+
+export type ClaudeThinkingPolicy = "preserve" | "remove" | "force_enabled";
+
+export interface ClaudeRequestConfig {
+  api_timeout_ms: number;
+  max_tokens_cap: number | null;
+  default_max_tokens: number | null;
+  disable_web_search: boolean;
+  thinking_policy: ClaudeThinkingPolicy;
+  thinking_budget_tokens: number | null;
+}
+
+export type ClaudeStatusLineStyle = "compact" | "detailed";
+
+export interface ClaudeStatusLineConfig {
+  enabled: boolean;
+  style: ClaudeStatusLineStyle;
+  show_provider: boolean;
+  show_model: boolean;
+  show_usage: boolean;
+}
+
+export type CodexSummaryClientKind = "app" | "cli" | "unknown";
+export type CodexSummaryStyle =
+  | "formula_compact"
+  | "plain_compact"
+  | "inline_chips"
+  | "status_bar"
+  | "english_light"
+  | "chinese_light"
+  | "formula_labeled"
+  | "ascii_plain";
+
+export interface CodexSummaryClientConfig {
+  enabled: boolean;
+  style: CodexSummaryStyle;
+}
+
+export interface CodexSummaryConfig {
+  enabled: boolean;
+  show_speed: boolean;
+  show_input: boolean;
+  show_output: boolean;
+  show_cache: boolean;
+  show_latency: boolean;
+  speed_decimal_places: number;
+  clients: Record<CodexSummaryClientKind, CodexSummaryClientConfig>;
+}
+
 export interface UsageSummary {
   range: string;
   requests: number;
@@ -223,6 +376,28 @@ export interface CodexPlanRefreshResult {
   ok: number;
   errors: string[];
 }
+
+export interface CodexHistoryUnifyInput {
+  provider: string;
+  from_providers: string[];
+  apply: boolean;
+  no_backup: boolean;
+  codex_home: string | null;
+}
+
+export interface CodexHistorySummary {
+  codex_home: string;
+  provider: string;
+  from_providers: string[];
+  applied: boolean;
+  sqlite_files_seen: number;
+  sqlite_files_changed: number;
+  sqlite_rows_changed: number;
+  rollout_files_seen: number;
+  rollout_files_changed: number;
+  rollout_fields_changed: number;
+  backups_created: number;
+}
 export interface HealthSummary {
   providers: ProviderHealth[];
   total_providers: number;
@@ -244,6 +419,10 @@ export interface ProviderStat {
   avg_latency_ms: number;
   input_tokens: number;
   output_tokens: number;
+  /** 全链路：成功且 latency_ms>0 的窗口内 sum(out)/sum(latency) */
+  output_tokens_per_sec: number;
+  /** 解码段：有首字时间且 latency>首字 的请求上 sum(out)/sum(latency−首字) */
+  decode_output_tokens_per_sec: number;
   /** Counts in the same rolling window as other provider fields */
   err_429?: number;
   err_503?: number;
@@ -258,6 +437,8 @@ export interface DashboardStats {
   success_rate_in_window?: number;
   input_tokens_in_window?: number;
   output_tokens_in_window?: number;
+  output_tokens_per_sec_in_window?: number;
+  decode_output_tokens_per_sec_in_window?: number;
   requests_last_hour: number;
   requests_last_24h: number;
   success_rate_last_hour: number;
@@ -342,6 +523,20 @@ export interface LocalCandidate {
   extra_credentials: ExtraCredential[];
 }
 
+export interface CcsProfileExportBundle {
+  schemaVersion: 1;
+  exportedAt?: string;
+  profile: {
+    name: string;
+    target?: string;
+  };
+  settings: Record<string, unknown>;
+}
+
+export interface CcSwitchDeeplinkImport {
+  url: string;
+}
+
 export interface LogFilters {
   limit?: number;
   offset?: number;
@@ -350,9 +545,78 @@ export interface LogFilters {
   status?: "ok" | "error";
 }
 
+export type ToolConfigId = "codex";
+
+export interface ToolConfigRaw {
+  tool: ToolConfigId;
+  path: string;
+  exists: boolean;
+  mtime_ms: number | null;
+  raw_text: string;
+}
+
+export interface CodexFileEntry {
+  name: string;
+  path: string;
+  kind: "file" | "dir";
+  size: number | null;
+  mtime_ms: number | null;
+}
+
+export interface CodexFileList {
+  root: string;
+  path: string;
+  abs_path: string;
+  entries: CodexFileEntry[];
+}
+
+export interface CodexFile {
+  root: string;
+  path: string;
+  abs_path: string;
+  exists: boolean;
+  mtime_ms: number | null;
+  raw_text: string;
+}
+
+export interface CodexProviderSettings {
+  id: string;
+  name: string;
+  base_url: string;
+  wire_api: string;
+  requires_openai_auth: boolean;
+  supports_websockets: boolean;
+  websocket_connect_timeout_ms: number;
+  request_max_retries: number;
+  stream_max_retries: number;
+  stream_idle_timeout_ms: number;
+}
+
+export interface CodexFeatureSetting {
+  key: string;
+  enabled: boolean;
+  default_enabled: boolean;
+  stage: string;
+}
+
+export interface CodexConfigSettings {
+  tool: ToolConfigId;
+  path: string;
+  exists: boolean;
+  mtime_ms: number | null;
+  model_provider: string;
+  provider: CodexProviderSettings;
+  features: CodexFeatureSetting[];
+}
+
 export const api = {
   ping: () => req<{ ok: boolean }>("/health"),
   status: () => req<Status>("/status"),
+  config: {
+    get: () => req<VibeConfig>("/_vp/config"),
+    save: (input: VibeConfig) =>
+      req<VibeConfig>("/_vp/config", { method: "PUT", body: JSON.stringify(input) }),
+  },
   providers: {
     list: () => req<Provider[]>("/_vp/providers"),
     create: (input: ProviderInput) =>
@@ -372,6 +636,16 @@ export const api = {
       req<Provider[]>("/_vp/providers/import-local", {
         method: "POST",
         body: JSON.stringify(clients),
+      }),
+    importCcsBundle: (bundle: CcsProfileExportBundle) =>
+      req<Provider>("/_vp/providers/import-ccs", {
+        method: "POST",
+        body: JSON.stringify(bundle),
+      }),
+    importCcSwitchDeeplink: (input: CcSwitchDeeplinkImport) =>
+      req<Provider>("/_vp/providers/import-ccswitch", {
+        method: "POST",
+        body: JSON.stringify(input),
       }),
     codexPlan: (providerId: string) =>
       req<ProviderCodexPlanItem[]>(`/_vp/providers/${providerId}/codex-plan`),
@@ -397,7 +671,14 @@ export const api = {
     refreshPlan: (id: string) =>
       req<CredentialPlanSnapshot>(`/_vp/credentials/${id}/plan/refresh`, { method: "POST" }),
   },
-  routes: { list: () => req<Route[]>("/_vp/routes") },
+  routes: {
+    list: () => req<Route[]>("/_vp/routes"),
+    create: (input: RouteInput) =>
+      req<Route>("/_vp/routes", { method: "POST", body: JSON.stringify(input) }),
+    update: (id: string, input: RouteInput) =>
+      req<Route>(`/_vp/routes/${id}`, { method: "PUT", body: JSON.stringify(input) }),
+    delete: (id: string) => req<void>(`/_vp/routes/${id}`, { method: "DELETE" }),
+  },
   logs: {
     list: (f: LogFilters = {}) => {
       const p = new URLSearchParams();
@@ -412,4 +693,69 @@ export const api = {
   },
   usage: (hours = 24) => req<UsageSummary>(`/_vp/usage/summary?hours=${hours}`),
   stats: (hours = 24) => req<DashboardStats>(`/_vp/stats/dashboard?hours=${hours}`),
+  clients: {
+    status: (client: string) =>
+      req<ClientStatus>(`/_vp/clients/${encodeURIComponent(client)}/status`),
+    takeover: (client: string) =>
+      req<ClientTakeoverResult>(`/_vp/clients/${encodeURIComponent(client)}/takeover`, {
+        method: "POST",
+      }),
+    restore: (client: string) =>
+      req<ClientTakeoverResult>(`/_vp/clients/${encodeURIComponent(client)}/restore`, {
+        method: "POST",
+      }),
+  },
+  toolConfigs: {
+    getRaw: (tool: ToolConfigId) => req<ToolConfigRaw>(`/_vp/tool-configs/${tool}/raw`),
+    saveRaw: (tool: ToolConfigId, rawText: string) =>
+      req<ToolConfigRaw>(`/_vp/tool-configs/${tool}/raw`, {
+        method: "PUT",
+        body: JSON.stringify({ raw_text: rawText }),
+      }),
+    getCodexSettings: () => req<CodexConfigSettings>("/_vp/tool-configs/codex/settings"),
+    saveCodexSettings: (input: CodexConfigSettings) =>
+      req<CodexConfigSettings>("/_vp/tool-configs/codex/settings", {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
+  },
+  codexHistory: {
+    preview: (provider = "vibeplus") =>
+      req<CodexHistorySummary>(
+        `/_vp/codex-history/preview?provider=${encodeURIComponent(provider)}`,
+      ),
+    unify: (input: Partial<CodexHistoryUnifyInput> = {}) =>
+      req<CodexHistorySummary>("/_vp/codex-history/unify", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: input.provider ?? "vibeplus",
+          from_providers: input.from_providers ?? [],
+          apply: true,
+          no_backup: input.no_backup ?? false,
+          codex_home: input.codex_home ?? null,
+        }),
+      }),
+  },
+  codexFiles: {
+    list: (path = "") => req<CodexFileList>(`/_vp/codex-files?path=${encodeURIComponent(path)}`),
+    read: (path = "config.toml") =>
+      req<CodexFile>(`/_vp/codex-files/file?path=${encodeURIComponent(path)}`),
+    write: (path: string, rawText: string) =>
+      req<CodexFile>("/_vp/codex-files/file", {
+        method: "PUT",
+        body: JSON.stringify({ path, raw_text: rawText }),
+      }),
+    delete: (path: string) =>
+      req<void>(`/_vp/codex-files/file?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+    mkdir: (path: string) =>
+      req<CodexFileList>("/_vp/codex-files/dir", {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      }),
+    move: (from: string, to: string, overwrite = false) =>
+      req<CodexFile>("/_vp/codex-files/move", {
+        method: "POST",
+        body: JSON.stringify({ from, to, overwrite }),
+      }),
+  },
 };

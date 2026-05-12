@@ -1,40 +1,259 @@
 <script setup lang="ts">
-import { RouterView, RouterLink, useRoute } from "vue-router";
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
+import { RouterView, RouterLink, useRoute, useRouter } from "vue-router";
+import { api, type ClientStatus } from "./api/client.ts";
 import { useProxyStatus } from "./composables/useProxy.ts";
+import { useSmartIntake } from "./composables/use-smart-intake.ts";
 import VpIcon from "./components/vp-icon.vue";
 import type { vp_icon_name } from "./components/vp-icon.vue";
-import { CLIENT_TOOLS, toolProxyExample } from "./utils/client-tools.ts";
+import SmartIntake from "./components/SmartIntake.vue";
+import { workspaceViewFromQuery, type WorkspaceView } from "./utils/workspace-view.ts";
 
 const { online, status } = useProxyStatus();
 const route = useRoute();
+const router = useRouter();
+const {
+  items: intakeItems,
+  authItems: intakeAuthItems,
+  configItems: intakeConfigItems,
+  ccsProfileItems: intakeCcsProfileItems,
+  dragActive: intakeDragActive,
+  dragIntent: intakeDragIntent,
+  busy: intakeBusy,
+  message: intakeMessage,
+  error: intakeError,
+  clipboardWatch: intakeClipboardWatch,
+  clipboardWatchAvailable: intakeClipboardWatchAvailable,
+  readClipboard,
+  toggleClipboardWatch,
+  importCodexAuth,
+  importCcsProfile,
+  saveCodexConfig,
+  goCodex,
+  dismiss: dismissIntake,
+} = useSmartIntake();
 
-const codexTool = CLIENT_TOOLS.find((t) => t.id === "codex")!;
-const codexProxyExample = computed(() => toolProxyExample(codexTool));
+type SidebarView = {
+  id: WorkspaceView;
+  label: string;
+  icon: vp_icon_name;
+  iconClass?: string;
+  takeoverClient?: "codex" | "claude";
+};
 
-const nav: { to: string; label: string; icon: vp_icon_name }[] = [
-  { to: "/dashboard", label: "Dashboard", icon: "layout-dashboard" },
-  { to: "/providers", label: "Providers", icon: "server" },
-  { to: "/routes", label: "Routes", icon: "route" },
-  { to: "/logs", label: "Logs", icon: "file-text" },
-  { to: "/usage", label: "Usage", icon: "pie-chart" },
-  { to: "/settings", label: "Settings", icon: "settings" },
+const views: SidebarView[] = [
+  { id: "overview", label: "All", icon: "layout-dashboard" },
+  {
+    id: "codex",
+    label: "Codex",
+    icon: "terminal",
+    iconClass: "i-lobe-codex-color",
+    takeoverClient: "codex",
+  },
+  {
+    id: "claude",
+    label: "Claude",
+    icon: "sparkles",
+    iconClass: "i-lobe-claude-color",
+    takeoverClient: "claude",
+  },
 ];
+
+const topTabs: { to: string; label: string; icon: vp_icon_name; scoped?: boolean }[] = [
+  { to: "/dashboard", label: "Dashboard", icon: "layout-dashboard", scoped: true },
+  { to: "/providers", label: "Providers", icon: "server", scoped: true },
+  { to: "/routes", label: "Routes", icon: "route", scoped: true },
+  { to: "/logs", label: "Logs", icon: "file-text", scoped: true },
+  { to: "/usage", label: "Usage", icon: "pie-chart", scoped: true },
+  { to: "/settings", label: "Settings", icon: "settings", scoped: true },
+];
+
+const currentView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
+const takeoverStatus = shallowRef<Record<"codex" | "claude", ClientStatus | null>>({
+  codex: null,
+  claude: null,
+});
+const takeoverBusy = ref<Record<"codex" | "claude", boolean>>({ codex: false, claude: false });
+const takeoverError = shallowRef<string | null>(null);
+const codexingTick = ref(0);
+const allRequestPulseUntil = ref(0);
+const codexRequestPulseUntil = ref(0);
+const lastAllRequestCounter = ref<number | null>(null);
+const lastCodexRequestCounter = ref<number | null>(null);
+let codexingTimer: ReturnType<typeof setInterval> | null = null;
+
+const viewPrefix = computed(() => {
+  if (currentView.value === "codex") return "Codex";
+  if (currentView.value === "claude") return "Claude";
+  return "";
+});
+
+const codexTakenOver = computed(() => takeoverStatus.value.codex?.taken_over ?? false);
+const claudeTakenOver = computed(() => takeoverStatus.value.claude?.taken_over ?? false);
+const takenOverByClient = computed<Record<"codex" | "claude", boolean>>(() => ({
+  codex: codexTakenOver.value,
+  claude: claudeTakenOver.value,
+}));
+const allBusy = computed(() => {
+  return codexingTick.value >= 0 && Date.now() < allRequestPulseUntil.value;
+});
+const codexBusy = computed(() => {
+  if (!online.value || !status.value) return false;
+  return (status.value.codex_ws_active ?? 0) > 0 || Date.now() < codexRequestPulseUntil.value;
+});
+function animatedWord(word: string) {
+  const letters = word.split("");
+  const index = codexingTick.value % letters.length;
+  letters[index] = letters[index].toUpperCase();
+  return letters.join("");
+}
+const allLabel = computed(() => {
+  if (!allBusy.value) return "All";
+  return animatedWord("Alling");
+});
+const codexLabel = computed(() => {
+  if (!codexTakenOver.value || !codexBusy.value) return "Codex";
+  return animatedWord("Codexing");
+});
+const viewLabel = computed<Record<WorkspaceView, string>>(() => ({
+  overview: allLabel.value,
+  codex: codexLabel.value,
+  claude: "Claude",
+}));
 
 function isActive(to: string): boolean {
   return route.path === to || route.path.startsWith(to + "/");
 }
+
+function tabTo(item: (typeof topTabs)[number]) {
+  if (!item.scoped) return item.to;
+  return currentView.value === "overview"
+    ? item.to
+    : { path: item.to, query: { view: currentView.value } };
+}
+
+function setView(view: WorkspaceView) {
+  const query = { ...route.query };
+  if (view === "overview") delete query.view;
+  else query.view = view;
+  void router.push({ path: "/dashboard", query });
+}
+
+function tabLabel(label: string) {
+  if (!viewPrefix.value) return label;
+  if (label === "Dashboard") return viewPrefix.value;
+  return label;
+}
+
+function takeoverTitle(client: "codex" | "claude") {
+  return (
+    takeoverStatus.value[client]?.configured_base_url ?? takeoverError.value ?? `${client}:takeover`
+  );
+}
+
+function onTakeoverClick(event: MouseEvent, client: "codex" | "claude") {
+  event.stopPropagation();
+  void setTakeover(client, !takenOverByClient.value[client]);
+}
+
+async function refreshTakeoverStatus() {
+  try {
+    const [codex, claude] = await Promise.all([
+      api.clients.status("codex"),
+      api.clients.status("claude"),
+    ]);
+    takeoverStatus.value = { codex, claude };
+    takeoverError.value = null;
+  } catch (err) {
+    takeoverError.value = (err as Error).message || "takeover:status";
+  }
+}
+
+async function setTakeover(client: "codex" | "claude", next: boolean) {
+  takeoverBusy.value = { ...takeoverBusy.value, [client]: true };
+  takeoverError.value = null;
+  try {
+    const result = next ? await api.clients.takeover(client) : await api.clients.restore(client);
+    takeoverStatus.value = { ...takeoverStatus.value, [client]: result.status };
+  } catch (err) {
+    takeoverError.value = (err as Error).message || "takeover:update";
+    await refreshTakeoverStatus();
+  } finally {
+    takeoverBusy.value = { ...takeoverBusy.value, [client]: false };
+  }
+}
+
+watch(
+  codexBusy,
+  (active) => {
+    if (active && codexingTimer == null) {
+      codexingTimer = setInterval(() => {
+        codexingTick.value += 1;
+      }, 220);
+      return;
+    }
+    if (!active && codexingTimer != null) {
+      clearInterval(codexingTimer);
+      codexingTimer = null;
+      codexingTick.value = 0;
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () =>
+    (status.value?.codex_ws_requests_total ?? 0) + (status.value?.codex_http_responses_total ?? 0),
+  (next) => {
+    if (lastCodexRequestCounter.value == null) {
+      lastCodexRequestCounter.value = next;
+      return;
+    }
+    if (next > lastCodexRequestCounter.value) {
+      codexRequestPulseUntil.value = Date.now() + 3500;
+    }
+    lastCodexRequestCounter.value = next;
+  },
+);
+
+watch(
+  () => status.value?.requests_last_hour ?? 0,
+  (next) => {
+    if (lastAllRequestCounter.value == null) {
+      lastAllRequestCounter.value = next;
+      return;
+    }
+    if (next > lastAllRequestCounter.value) {
+      allRequestPulseUntil.value = Date.now() + 3500;
+    }
+    lastAllRequestCounter.value = next;
+  },
+);
+
+onMounted(() => {
+  void refreshTakeoverStatus();
+});
+
+onUnmounted(() => {
+  if (codexingTimer) clearInterval(codexingTimer);
+});
 </script>
 
 <template>
   <div class="layout-shell">
-    <aside class="nav-aside noise-overlay w-[4.25rem] lg:w-56 transition-[width] duration-200">
-      <div class="px-3 lg:px-5 pt-5 lg:pt-6 pb-4 lg:pb-5 border-b border-vp-border relative z-10">
+    <aside
+      class="nav-aside noise-overlay w-full sm:w-[4.25rem] lg:w-56 transition-[width] duration-200"
+    >
+      <div
+        class="hidden sm:block px-3 lg:px-5 pt-5 lg:pt-6 pb-4 lg:pb-5 border-b border-vp-border relative z-10"
+      >
         <div class="flex items-center justify-center lg:justify-start gap-2.5">
-          <div class="brand-mark shrink-0">v</div>
+          <span
+            class="brand-mark--image i-vp-logo shrink-0 shadow-md shadow-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)]"
+            aria-hidden="true"
+          />
           <div class="min-w-0 hidden lg:block">
-            <span class="font-semibold text-[15px] tracking-tight text-vp-text">vibe</span>
-            <span class="text-vp-primary text-xs ml-1 font-medium">plus</span>
+            <span class="font-semibold text-[15px] tracking-tight text-vp-text">Vibe Plus</span>
           </div>
         </div>
         <div class="flex items-center justify-center lg:justify-start gap-2 mt-3 px-0.5 flex-wrap">
@@ -61,71 +280,117 @@ function isActive(to: string): boolean {
         >
           {{ online ? (status?.port ?? "?") : "—" }}
         </p>
-        <RouterLink
-          to="/providers"
-          class="mt-3 hidden lg:block rounded-lg border border-teal-200 bg-teal-50/90 px-2.5 py-2 text-left hover:bg-teal-50 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-teal-400/50"
-          title="在 Providers 配置 Codex 上游与密钥池"
-        >
-          <div
-            class="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-teal-800"
-          >
-            <VpIcon name="terminal" size-class="size-3.5 text-teal-700" />
-            Codex CLI
-          </div>
-          <code
-            class="mt-1 block text-[10px] font-mono text-teal-900 break-all leading-snug opacity-95"
-            >{{ codexProxyExample }}</code
-          >
-        </RouterLink>
       </div>
 
-      <nav class="flex-1 py-3 px-1.5 lg:px-2.5 space-y-0.5 relative z-10" aria-label="主导航">
-        <RouterLink
-          v-for="item in nav"
-          :key="item.to"
-          :to="item.to"
-          :aria-label="item.label"
-          :title="item.label"
-          class="nav-link flex-col justify-center gap-1 lg:flex-row lg:justify-start lg:gap-3 px-2 lg:px-3.5 outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-vp-surface"
-          :class="isActive(item.to) ? 'nav-link--active' : 'nav-link--idle'"
+      <nav
+        class="flex flex-1 gap-1 overflow-x-auto px-2 py-2 sm:block sm:space-y-1 sm:overflow-visible sm:px-2 sm:py-3 lg:px-3 relative z-10"
+        aria-label="视角"
+      >
+        <button
+          v-for="item in views"
+          :key="item.id"
+          type="button"
+          :aria-label="viewLabel[item.id]"
+          :title="viewLabel[item.id]"
+          class="nav-link group w-28 shrink-0 flex-row px-3 sm:w-full sm:flex-col sm:gap-1 sm:px-0 lg:flex-row lg:justify-start lg:gap-3 lg:px-3 outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-vp-surface"
+          :class="currentView === item.id ? 'nav-link--active' : 'nav-link--idle'"
+          @click="setView(item.id)"
         >
           <span
-            class="nav-icon size-8 lg:size-7"
-            :class="isActive(item.to) ? 'nav-icon--active' : 'nav-icon--idle'"
+            class="nav-icon size-8 lg:size-7 shrink-0"
+            :class="currentView === item.id ? 'nav-icon--active' : 'nav-icon--idle'"
           >
-            <VpIcon :name="item.icon" size-class="size-[1.05rem] lg:size-[1.125rem]" />
+            <span
+              v-if="item.iconClass"
+              :class="[item.iconClass, 'size-[1.25rem]']"
+              aria-hidden="true"
+            />
+            <VpIcon v-else :name="item.icon" size-class="size-[1.05rem] lg:size-[1.125rem]" />
           </span>
-          <span class="hidden lg:inline truncate">{{ item.label }}</span>
-        </RouterLink>
-      </nav>
-
-      <div class="px-2 lg:px-5 py-4 border-t border-vp-border relative z-10">
-        <div
-          class="flex items-center justify-center lg:justify-start gap-2 text-[11px] text-vp-muted"
-        >
-          <span class="size-1 rounded-full bg-vp-border shrink-0 hidden lg:inline" />
-          <span class="hidden lg:inline truncate">vibe-plus dashboard</span>
-          <span class="lg:hidden font-mono text-[9px] text-vp-muted" title="vibe-plus dashboard"
-            >vp</span
+          <span class="inline min-w-0 flex-1 truncate text-left sm:hidden lg:inline">{{
+            viewLabel[item.id]
+          }}</span>
+          <span
+            v-if="item.takeoverClient"
+            class="hidden lg:inline-flex size-4 shrink-0 items-center justify-center rounded-full transition-colors"
+            :class="
+              takenOverByClient[item.takeoverClient]
+                ? 'bg-sky-50 text-sky-700 ring-1 ring-sky-200'
+                : 'text-vp-muted opacity-30 group-hover:opacity-100 group-hover:bg-vp-surface group-hover:ring-1 group-hover:ring-vp-border'
+            "
+            :title="takeoverTitle(item.takeoverClient)"
+            role="switch"
+            :aria-checked="takenOverByClient[item.takeoverClient]"
+            @click="onTakeoverClick($event, item.takeoverClient)"
           >
-        </div>
-      </div>
+            <span
+              class="size-1.5 rounded-full"
+              :class="
+                item.takeoverClient === 'codex' && codexBusy
+                  ? 'bg-emerald-500 animate-pulse'
+                  : takenOverByClient[item.takeoverClient]
+                    ? 'bg-sky-500'
+                    : 'bg-vp-border'
+              "
+            />
+          </span>
+        </button>
+      </nav>
     </aside>
 
     <main class="main-canvas">
-      <div
-        class="gradient-orb size-[500px] bg-vp-primary/12 top-[-200px] right-[-200px] rounded-full"
-      />
-      <div
-        class="gradient-orb size-[400px] bg-vp-brand-light/10 bottom-[-150px] left-[-150px] rounded-full"
-      />
-      <div class="relative z-10 p-3 sm:p-5 lg:p-8 max-w-7xl mx-auto">
+      <div class="relative z-10 p-2 sm:p-3 lg:p-4 xl:p-5 max-w-[96rem] mx-auto">
         <div
-          class="page-surface p-4 sm:p-6 lg:p-10 min-h-[calc(100dvh-1.5rem)] sm:min-h-[calc(100dvh-2.5rem)]"
+          class="page-surface p-2.5 sm:p-3 lg:p-4 min-h-[calc(100dvh-1rem)] sm:min-h-[calc(100dvh-1.5rem)]"
         >
+          <nav class="top-tabs mb-4" aria-label="工具导航">
+            <RouterLink
+              v-for="item in topTabs"
+              :key="item.to"
+              :to="tabTo(item)"
+              class="top-tab"
+              :class="isActive(item.to) ? 'top-tab--active' : 'top-tab--idle'"
+              :title="tabLabel(item.label)"
+              :aria-label="tabLabel(item.label)"
+            >
+              <VpIcon :name="item.icon" size-class="size-4" />
+              <span class="sr-only">{{ tabLabel(item.label) }}</span>
+            </RouterLink>
+          </nav>
           <RouterView />
         </div>
       </div>
     </main>
+    <SmartIntake
+      :items="intakeItems"
+      :auth-count="intakeAuthItems.length"
+      :config-count="intakeConfigItems.length"
+      :ccs-profile-count="intakeCcsProfileItems.length"
+      :drag-active="intakeDragActive"
+      :drag-intent="intakeDragIntent"
+      :busy="intakeBusy"
+      :message="intakeMessage"
+      :error="intakeError"
+      :clipboard-watch="intakeClipboardWatch"
+      :clipboard-watch-available="intakeClipboardWatchAvailable"
+      @read-clipboard="readClipboard"
+      @toggle-clipboard-watch="toggleClipboardWatch"
+      @import-auth="importCodexAuth"
+      @import-ccs-profile="importCcsProfile"
+      @save-config="saveCodexConfig"
+      @go-codex="goCodex"
+      @dismiss="dismissIntake"
+    />
   </div>
 </template>
+
+<style scoped>
+.brand-mark--image {
+  display: inline-block;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.8rem;
+  overflow: hidden;
+  object-fit: contain;
+}
+</style>

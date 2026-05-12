@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Vibe Plus leaf V mark</title>
+  <desc id="desc">A gentle green and blue V mark with a natural lightweight tone.</desc>
+  <defs>
+    <linearGradient id="leaf-a" x1="112" x2="400" y1="102" y2="416" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#86efac"/>
+      <stop offset=".48" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="#f7fdf9"/>
+  <path d="M113 126c15-26 54-24 67 4l70 154c3 7 13 7 16 0l71-154c13-28 52-30 67-4 7 12 7 26 1 39L318 412c-24 54-99 54-123 0L112 165c-6-13-6-27 1-39z" fill="url(#leaf-a)"/>
+  <circle cx="256" cy="331" r="29" fill="#f7fdf9"/>
+  <path d="M256 314v34M239 331h34" stroke="#047857" stroke-linecap="round" stroke-width="9"/>
+</svg>

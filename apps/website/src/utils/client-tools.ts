@@ -4,6 +4,15 @@ import { PORT } from "../api/client.ts";
 /** 本地 CLI / IDE 插件连到 vibe 网关时使用的「工具」维度（与供应商 kind 不同）。 */
 export type ClientToolId = "codex" | "claude-code" | "opencode";
 
+export type ProtocolSupportMode = "native" | "bridged" | "unsupported";
+
+export interface ProtocolSupportInfo {
+  mode: ProtocolSupportMode;
+  label: string;
+  detail: string;
+  order: number;
+}
+
 export interface ClientToolInfo {
   id: ClientToolId;
   label: string;
@@ -22,30 +31,30 @@ export const CLIENT_TOOLS: readonly ClientToolInfo[] = [
     id: "codex",
     label: "Codex CLI",
     shortLabel: "Codex",
-    icon: "🤖",
+    icon: "i-lucide-terminal",
     pathPrefix: "/codex/v1",
-    consumesKinds: ["openai-responses"],
+    consumesKinds: ["openai-responses", "openai-chat"],
     /** 优先路径：OAuth 走网关密钥池，CLI 只连本机 */
-    setupHint: "Codex：网关前缀 `/codex/v1`（OAuth/密钥池）；CLI 指向本机端口即可。",
+    setupHint: "/codex/v1",
   },
   {
     id: "claude-code",
     label: "Claude Code",
-    shortLabel: "Claude Code",
-    icon: "🔮",
+    shortLabel: "Claude",
+    icon: "i-lucide-sparkles",
     /** 与 `vibe takeover claude` 一致：BASE_URL 指向 /claude（SDK 再请求 /v1/messages） */
     pathPrefix: "/claude",
     consumesKinds: ["anthropic"],
-    setupHint: "Claude：`ANTHROPIC_BASE_URL` → `…/claude`（与 takeover 一致）。",
+    setupHint: "ANTHROPIC_BASE_URL -> /claude",
   },
   {
     id: "opencode",
     label: "OpenCode",
     shortLabel: "OpenCode",
-    icon: "📦",
+    icon: "i-lucide-package",
     pathPrefix: "/opencode/v1",
     consumesKinds: ["openai-chat", "openai-responses"],
-    setupHint: "OpenCode：`baseURL` → `…/opencode/v1`。",
+    setupHint: "baseURL -> /opencode/v1",
   },
 ];
 
@@ -59,6 +68,74 @@ export function getCodexClientTool(): ClientToolInfo {
 /** 上游 kind 可被 Codex CLI 使用的网关路径前缀（如 `/codex/v1`）路由到。 */
 export function providerServesCodexCliRoute(p: Provider): boolean {
   return getCodexClientTool().consumesKinds.includes(p.kind);
+}
+
+export function getToolProtocolSupport(
+  provider: Pick<Provider, "kind">,
+  tool: ClientToolInfo,
+): ProtocolSupportInfo {
+  if (!tool.consumesKinds.includes(provider.kind)) {
+    return {
+      mode: "unsupported",
+      label: "none",
+      detail: "none",
+      order: 99,
+    };
+  }
+
+  if (tool.id === "codex") {
+    if (provider.kind === "openai-responses") {
+      return {
+        mode: "native",
+        label: "native",
+        detail: "responses",
+        order: 0,
+      };
+    }
+    if (provider.kind === "openai-chat") {
+      return {
+        mode: "bridged",
+        label: "bridge",
+        detail: "responses->chat",
+        order: 1,
+      };
+    }
+  }
+
+  if (tool.id === "opencode") {
+    if (provider.kind === "openai-chat") {
+      return {
+        mode: "native",
+        label: "native",
+        detail: "chat",
+        order: 0,
+      };
+    }
+    if (provider.kind === "openai-responses") {
+      return {
+        mode: "native",
+        label: "native",
+        detail: "responses",
+        order: 0,
+      };
+    }
+  }
+
+  if (tool.id === "claude-code" && provider.kind === "anthropic") {
+    return {
+      mode: "native",
+      label: "native",
+      detail: "anthropic",
+      order: 0,
+    };
+  }
+
+  return {
+    mode: "native",
+    label: "native",
+    detail: "native",
+    order: 0,
+  };
 }
 
 export function defaultProxyOrigin(port: number = PORT): string {
