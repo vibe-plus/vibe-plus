@@ -28,17 +28,23 @@ pub fn run(args: ConfigArgs) -> Result<()> {
             let parts: Vec<&str> = key.split('.').collect();
             let mut cur = &v;
             for part in &parts {
-                cur = cur.get(part).ok_or_else(|| anyhow::anyhow!("key not found: {key}"))?;
+                cur = cur
+                    .get(part)
+                    .ok_or_else(|| anyhow::anyhow!("key not found: {key}"))?;
             }
             println!("{cur}");
         }
         ConfigCmd::Set { key, value } => {
             let mut v = serde_json::to_value(&cfg)?;
             let parts: Vec<&str> = key.split('.').collect();
-            let (last, head) = parts.split_last().ok_or_else(|| anyhow::anyhow!("empty key"))?;
+            let (last, head) = parts
+                .split_last()
+                .ok_or_else(|| anyhow::anyhow!("empty key"))?;
             let mut cur = &mut v;
             for part in head {
-                cur = cur.get_mut(part).ok_or_else(|| anyhow::anyhow!("key not found: {part}"))?;
+                cur = cur
+                    .get_mut(part)
+                    .ok_or_else(|| anyhow::anyhow!("key not found: {part}"))?;
             }
             let new_val: serde_json::Value = serde_json::from_str(&value)
                 .unwrap_or_else(|_| serde_json::Value::String(value.clone()));

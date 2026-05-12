@@ -13,37 +13,55 @@ pub async fn run() -> Result<()> {
         let alive = pid > 0 && unsafe { libc::kill(pid as i32, 0) == 0 };
         #[cfg(not(unix))]
         let alive = false;
-        if alive { print!("[ok]  "); println!("process running (pid {pid})"); true }
-        else { print!("[!!]  "); println!("pid file exists but process is dead"); false }
+        if alive {
+            print!("[ok]  ");
+            println!("process running (pid {pid})");
+            true
+        } else {
+            print!("[!!]  ");
+            println!("pid file exists but process is dead");
+            false
+        }
     } else {
-        print!("[--]  "); println!("not started"); false
+        print!("[--]  ");
+        println!("not started");
+        false
     };
 
     // 2. port reachable
     if running {
-        let url = format!("http://127.0.0.1:{}/health", super::DEFAULT_PORT);
+        let base_url = super::configured_base_url()?;
+        let url = format!("{base_url}/health");
         match reqwest::get(&url).await {
             Ok(r) if r.status().is_success() => {
-                print!("[ok]  "); println!("port {} reachable", super::DEFAULT_PORT);
+                print!("[ok]  ");
+                println!("gateway reachable at {base_url}");
             }
-            _ => { print!("[!!]  "); println!("port {} not responding", super::DEFAULT_PORT); }
+            _ => {
+                print!("[!!]  ");
+                println!("gateway not responding at {base_url}");
+            }
         }
     }
 
     // 3. DB
     let db_path = paths::db_path()?;
     if db_path.exists() {
-        print!("[ok]  "); println!("db at {}", db_path.display());
+        print!("[ok]  ");
+        println!("db at {}", db_path.display());
     } else {
-        print!("[--]  "); println!("db not created yet (start vibe first)");
+        print!("[--]  ");
+        println!("db not created yet (start vibe first)");
     }
 
     // 4. config
     let cfg_path = paths::config_path()?;
     if cfg_path.exists() {
-        print!("[ok]  "); println!("config at {}", cfg_path.display());
+        print!("[ok]  ");
+        println!("config at {}", cfg_path.display());
     } else {
-        print!("[--]  "); println!("no config (defaults will be used)");
+        print!("[--]  ");
+        println!("no config (defaults will be used)");
     }
 
     println!();

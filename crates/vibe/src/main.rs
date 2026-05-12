@@ -22,13 +22,27 @@ enum Command {
     Stop,
     /// Show running status.
     Status,
+    /// Render Claude Code statusLine text from stdin JSON.
+    Statusline,
     /// Diagnose config, port, and provider reachability.
     Doctor,
     /// Manage upstream providers.
     #[command(subcommand)]
     Provider(cmd::provider::ProviderCmd),
+    /// Manage explicit model routing rules.
+    #[command(subcommand)]
+    Route(cmd::route::RouteCmd),
+    /// Manage OS startup for the local proxy daemon.
+    #[command(subcommand)]
+    Autostart(cmd::autostart::AutostartCmd),
     /// Guide Claude Code / OpenCode / Codex to use the local proxy.
     Takeover(cmd::takeover::TakeoverArgs),
+    /// Inspect or repair local Codex App history metadata.
+    #[command(name = "codex-history")]
+    CodexHistory(cmd::codex_history::CodexHistoryArgs),
+    /// Inspect local client takeover state.
+    #[command(subcommand)]
+    Client(cmd::client::ClientCmd),
     /// Tail the request log.
     Logs(cmd::logs::LogsArgs),
     /// Run a subprocess with local proxy env vars injected.
@@ -49,9 +63,14 @@ async fn main() -> Result<()> {
         Command::Start(a) => cmd::start::run(a).await,
         Command::Stop => cmd::stop::run(),
         Command::Status => cmd::status::run().await,
+        Command::Statusline => cmd::statusline::run(),
         Command::Doctor => cmd::doctor::run().await,
         Command::Provider(c) => cmd::provider::run(c).await,
+        Command::Route(c) => cmd::route::run(c).await,
+        Command::Autostart(c) => cmd::autostart::run(c),
         Command::Takeover(a) => cmd::takeover::run(a).await,
+        Command::CodexHistory(a) => cmd::codex_history::run(a),
+        Command::Client(c) => cmd::client::run(c).await,
         Command::Logs(a) => cmd::logs::run(a).await,
         Command::Run(a) => cmd::run::run(a),
         Command::Config(a) => cmd::config::run(a),

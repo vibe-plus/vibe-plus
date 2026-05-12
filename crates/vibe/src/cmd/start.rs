@@ -4,10 +4,14 @@ use std::net::SocketAddr;
 use vibe_core::{config::Config, paths, state::AppState};
 use vibe_db::Db;
 
+fn default_port() -> u16 {
+    super::configured_port()
+}
+
 #[derive(Args)]
 pub struct StartArgs {
     /// Port to listen on.
-    #[arg(long, default_value_t = super::DEFAULT_PORT)]
+    #[arg(long, default_value_t = default_port())]
     pub port: u16,
 
     /// Run in the foreground instead of daemonising.
@@ -39,7 +43,9 @@ pub async fn run(args: StartArgs) -> Result<()> {
 pub async fn start_server(port: u16) -> Result<()> {
     let db_path = paths::db_path()?;
     let cfg_path = paths::config_path()?;
-    let cfg = Config::load_or_init(&cfg_path)?;
+    let mut cfg = Config::load_or_init(&cfg_path)?;
+    cfg.server.port = port;
+    cfg.save(&cfg_path)?;
     let db = Db::open(&db_path)?;
     let state = AppState::init(db, cfg, port)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;

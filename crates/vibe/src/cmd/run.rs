@@ -12,7 +12,7 @@ pub fn run(args: RunArgs) -> Result<()> {
     if args.command.is_empty() {
         anyhow::bail!("usage: vibe run -- <command> [args…]");
     }
-    let endpoint = format!("http://127.0.0.1:{}", super::DEFAULT_PORT);
+    let endpoint = super::configured_base_url()?;
     let status = std::process::Command::new(&args.command[0])
         .args(&args.command[1..])
         .env("ANTHROPIC_BASE_URL", &endpoint)
