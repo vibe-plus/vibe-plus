@@ -28,9 +28,7 @@ pub enum Wire {
 pub fn select(provider: &Provider) -> Box<dyn Adapter + Send + Sync> {
     match provider.kind {
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicAdapter),
-        ProviderKind::OpenaiChat | ProviderKind::OpenaiResponses => {
-            Box::new(openai::OpenaiAdapter)
-        }
+        ProviderKind::OpenaiChat | ProviderKind::OpenaiResponses => Box::new(openai::OpenaiAdapter),
         ProviderKind::GeminiNative => Box::new(gemini::GeminiAdapter),
     }
 }
@@ -71,7 +69,10 @@ pub trait Adapter {
     fn rewrite_body_model(&self, body: &[u8], upstream_model: &str) -> Result<Bytes> {
         let mut v: serde_json::Value = serde_json::from_slice(body)?;
         if let Some(obj) = v.as_object_mut() {
-            obj.insert("model".into(), serde_json::Value::String(upstream_model.into()));
+            obj.insert(
+                "model".into(),
+                serde_json::Value::String(upstream_model.into()),
+            );
         }
         Ok(Bytes::from(serde_json::to_vec(&v)?))
     }

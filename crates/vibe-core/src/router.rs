@@ -15,7 +15,7 @@
 
 use crate::providers::Wire;
 use anyhow::{Context, Result};
-use vibe_protocol::{Provider, ProviderKind};
+use vibe_protocol::{Provider, ProviderKind, Route};
 
 pub struct Pick {
     pub provider: Provider,
@@ -62,19 +62,54 @@ pub fn candidates(providers: &[Provider], wire: Wire, requested_model: &str) -> 
             }
             if p.model_aliases.is_empty() {
                 // Pass-through provider: accepts any model.
-                Some((p.priority, Pick { provider: p.clone(), upstream_model: requested_model.to_string() }))
+                Some((
+                    p.priority,
+                    Pick {
+                        provider: p.clone(),
+                        upstream_model: requested_model.to_string(),
+                    },
+                ))
             } else {
                 // Alias-configured provider: only match if an alias entry matches.
                 p.model_aliases
                     .iter()
                     .find(|a| a.alias == requested_model || a.upstream_model == requested_model)
-                    .map(|a| (p.priority, Pick { provider: p.clone(), upstream_model: a.upstream_model.clone() }))
+                    .map(|a| {
+                        (
+                            p.priority,
+                            Pick {
+                                provider: p.clone(),
+                                upstream_model: a.upstream_model.clone(),
+                            },
+                        )
+                    })
             }
         })
         .collect();
 
     result.sort_by_key(|(priority, _)| *priority);
     result.into_iter().map(|(_, pick)| pick).collect()
+}
+
+pub fn matching_route<'a>(routes: &'a [Route], requested_model: &str) -> Option<&'a Route> {
+    routes.iter().find(|r| r.match_model == requested_model)
+}
+
+pub fn candidates_with_routes(
+    providers: &[Provider],
+    routes: &[Route],
+    wire: Wire,
+    requested_model: &str,
+) -> (Option<Route>, Vec<Pick>) {
+    let Some(route) = matching_route(routes, requested_model) else {
+        return (None, candidates(providers, wire, requested_model));
+    };
+    let routed_model = route.target_model.as_deref().unwrap_or(requested_model);
+    let mut picks = candidates(providers, wire, routed_model);
+    if let Some(provider_id) = route.target_provider_id.as_deref() {
+        picks.retain(|p| p.provider.id == provider_id);
+    }
+    (Some(route.clone()), picks)
 }
 
 /// Returns the single best provider (first of `candidates`).

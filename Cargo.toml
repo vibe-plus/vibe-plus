@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/vibe", "crates/vibe-core", "crates/vibe-db", "crates/vibe-protocol"]
+members = [
+  "apps/desktop",
+  "crates/vibe",
+  "crates/vibe-core",
+  "crates/vibe-db",
+  "crates/vibe-protocol",
+]
 
 [workspace.package]
 version = "0.0.1"
@@ -31,10 +37,12 @@ futures = "0.3"
 futures-util = "0.3"
 bytes = "1"
 http = "1"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 # serde / json
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 toml = "0.8"
 
 # storage
@@ -56,6 +64,12 @@ directories = "5"
 keyring = "3"
 ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
 base64 = "0.22"
+url = "2"
+
+# desktop shell
+tao = "0.35"
+tray-icon = "0.24"
+wry = "0.55"
 
 [profile.release]
 lto = "thin"

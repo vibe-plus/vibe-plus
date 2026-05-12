@@ -64,7 +64,9 @@ impl CircuitBreakers {
     /// Returns whether a request is allowed for this provider.
     pub fn allow(&self, provider_id: &str) -> bool {
         let mut map = self.inner.lock().unwrap();
-        let b = map.entry(provider_id.to_string()).or_insert_with(Breaker::new);
+        let b = map
+            .entry(provider_id.to_string())
+            .or_insert_with(Breaker::new);
         match b.state {
             State::Closed => true,
             State::Open => {
@@ -83,7 +85,9 @@ impl CircuitBreakers {
 
     pub fn record_success(&self, provider_id: &str) {
         let mut map = self.inner.lock().unwrap();
-        let b = map.entry(provider_id.to_string()).or_insert_with(Breaker::new);
+        let b = map
+            .entry(provider_id.to_string())
+            .or_insert_with(Breaker::new);
         b.consecutive_failures = 0;
         match b.state {
             State::HalfOpen => {
@@ -101,7 +105,9 @@ impl CircuitBreakers {
 
     pub fn record_failure(&self, provider_id: &str) {
         let mut map = self.inner.lock().unwrap();
-        let b = map.entry(provider_id.to_string()).or_insert_with(Breaker::new);
+        let b = map
+            .entry(provider_id.to_string())
+            .or_insert_with(Breaker::new);
         b.consecutive_failures += 1;
         b.consecutive_successes = 0;
         match b.state {
@@ -109,7 +115,11 @@ impl CircuitBreakers {
                 if b.consecutive_failures >= self.cfg.failure_threshold {
                     b.state = State::Open;
                     b.opened_at = Some(Instant::now());
-                    tracing::warn!(provider_id, consecutive_failures = b.consecutive_failures, "circuit opened");
+                    tracing::warn!(
+                        provider_id,
+                        consecutive_failures = b.consecutive_failures,
+                        "circuit opened"
+                    );
                 }
             }
             State::HalfOpen => {
@@ -123,7 +133,9 @@ impl CircuitBreakers {
 
     pub fn state_of(&self, provider_id: &str) -> State {
         let map = self.inner.lock().unwrap();
-        map.get(provider_id).map(|b| b.state).unwrap_or(State::Closed)
+        map.get(provider_id)
+            .map(|b| b.state)
+            .unwrap_or(State::Closed)
     }
 
     /// Returns true if the circuit is currently blocking requests (Open and within timeout).
@@ -141,14 +153,18 @@ impl CircuitBreakers {
 
     pub fn consecutive_failures(&self, provider_id: &str) -> u32 {
         let map = self.inner.lock().unwrap();
-        map.get(provider_id).map(|b| b.consecutive_failures).unwrap_or(0)
+        map.get(provider_id)
+            .map(|b| b.consecutive_failures)
+            .unwrap_or(0)
     }
 
     /// 手动重置熔断状态（用于 UI 运维操作）。
     /// 将状态强制置为 Closed，并清空失败/成功计数与打开时间。
     pub fn reset(&self, provider_id: &str) {
         let mut map = self.inner.lock().unwrap();
-        let b = map.entry(provider_id.to_string()).or_insert_with(Breaker::new);
+        let b = map
+            .entry(provider_id.to_string())
+            .or_insert_with(Breaker::new);
         b.state = State::Closed;
         b.consecutive_failures = 0;
         b.consecutive_successes = 0;
@@ -174,7 +190,9 @@ mod tests {
     #[test]
     fn closes_after_enough_successes_in_half_open() {
         let cb = CircuitBreakers::new(cfg());
-        for _ in 0..3 { cb.record_failure("p1"); }
+        for _ in 0..3 {
+            cb.record_failure("p1");
+        }
         assert_eq!(cb.state_of("p1"), State::Open);
         assert!(!cb.allow("p1")); // still within timeout
 
@@ -195,7 +213,9 @@ mod tests {
     #[test]
     fn reopens_on_half_open_failure() {
         let cb = CircuitBreakers::new(cfg());
-        for _ in 0..3 { cb.record_failure("p2"); }
+        for _ in 0..3 {
+            cb.record_failure("p2");
+        }
         {
             let mut map = cb.inner.lock().unwrap();
             map.get_mut("p2").unwrap().opened_at = Some(Instant::now() - Duration::from_secs(2));

@@ -60,9 +60,8 @@ pub fn parse_codex_auth_json(content: &str) -> Result<CodexAuthImportTokens> {
 
     match mode {
         "chatgpt" => {
-            let (access, refresh, exp) = oauth_triple_from_json(&v).with_context(|| {
-                "chatgpt mode requires non-empty tokens.access_token"
-            })?;
+            let (access, refresh, exp) = oauth_triple_from_json(&v)
+                .with_context(|| "chatgpt mode requires non-empty tokens.access_token")?;
             let mut t = CodexAuthImportTokens {
                 oauth_access_token: access,
                 oauth_refresh_token: refresh,
@@ -141,7 +140,8 @@ mod tests {
 
     #[test]
     fn apikey_mode() {
-        let t = parse_codex_auth_json(r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-real-key"}"#).unwrap();
+        let t = parse_codex_auth_json(r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-real-key"}"#)
+            .unwrap();
         assert!(t.is_api_key_mode);
         assert_eq!(t.oauth_access_token, "sk-real-key");
     }

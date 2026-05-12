@@ -76,10 +76,7 @@ pub fn chatgpt_oauth_hints_from_access_token(token: &str) -> ChatgptOauthHints {
         return ChatgptOauthHints::default();
     };
     let mut out = ChatgptOauthHints::default();
-    out.subject = v
-        .get("sub")
-        .and_then(|x| x.as_str())
-        .map(str::to_string);
+    out.subject = v.get("sub").and_then(|x| x.as_str()).map(str::to_string);
     out.email = v
         .get("email")
         .and_then(|x| x.as_str())
@@ -107,9 +104,7 @@ pub fn chatgpt_oauth_hints_from_access_token(token: &str) -> ChatgptOauthHints {
 fn chatgpt_plan_type_json_as_slug(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(map) => map
-            .values()
-            .find_map(|x| x.as_str().map(str::to_string)),
+        serde_json::Value::Object(map) => map.values().find_map(|x| x.as_str().map(str::to_string)),
         _ => None,
     }
 }
@@ -137,7 +132,10 @@ mod tests {
     }
 
     fn fake_chatgpt_access_jwt(email: &str, plan: &str) -> String {
-        let header = JwtHeader { alg: "none", typ: "JWT" };
+        let header = JwtHeader {
+            alg: "none",
+            typ: "JWT",
+        };
         let payload = json!({
             "sub": "user-sub-1",
             "email": email,
@@ -163,7 +161,10 @@ mod tests {
 
     #[test]
     fn chatgpt_oauth_hints_profile_email_fallback() {
-        let header = JwtHeader { alg: "none", typ: "JWT" };
+        let header = JwtHeader {
+            alg: "none",
+            typ: "JWT",
+        };
         let payload = json!({
             "sub": "s",
             "https://api.openai.com/profile": { "email": "prof@example.com" },

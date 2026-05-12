@@ -13,8 +13,13 @@
 
 use crate::cache;
 use crate::circuit_breaker::CircuitBreakers;
+use crate::claude_control::ClaudeRouteScenario;
+use crate::claude_summary::ClaudeClientKind;
+use crate::codex_summary::CodexClientKind;
+use crate::codex_visual::{self, CodexVisualContext};
 use crate::providers::{self, Adapter, Wire};
 use crate::state::AppState;
+use crate::stream_trace::{empty_stream_fields, StreamTraceStats};
 use crate::transforms;
 use crate::usage::Usage;
 use crate::{router, secrets};
@@ -34,6 +39,17 @@ use vibe_protocol::{Credential, CredentialPlanSnapshot, ProviderKind, RequestLog
 #[derive(Clone, Debug)]
 pub struct VibeLogId(pub String);
 
+/// Carried on streaming/non-streaming [`Response`] extensions so the Codex
+/// route wrapper can emit client-visible route/quota status without affecting
+/// plain OpenAI-compatible routes.
+#[derive(Clone, Debug)]
+pub struct VibeCodexVisual(pub CodexVisualContext);
+
+/// Carried on Codex route responses so wrappers can render Vibe+ summaries
+/// according to the original client (Desktop, CLI, or unknown).
+#[derive(Clone, Debug)]
+pub struct VibeCodexClientKind(pub CodexClientKind);
+
 // ---------------------------------------------------------------------------
 // ChatGPT Codex HTTP API: non-empty `instructions`
 // ---------------------------------------------------------------------------
@@ -44,7 +60,7 @@ pub struct VibeLogId(pub String);
 const CHATGPT_CODEX_FALLBACK_INSTRUCTIONS: &str =
     "You are Codex, OpenAI's coding agent. Help with software engineering tasks using available tools.";
 
-fn inject_chatgpt_codex_instructions_if_missing(
+pub(crate) fn inject_chatgpt_codex_instructions_if_missing(
     provider: &vibe_protocol::Provider,
     wire: Wire,
     body: Bytes,
@@ -52,27 +68,8 @@ fn inject_chatgpt_codex_instructions_if_missing(
     if wire != Wire::OpenaiResponses || !router::provider_is_chatgpt_codex_official(provider) {
         return body;
     }
-    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return body;
-    };
-    let Some(obj) = v.as_object_mut() else {
-        return body;
-    };
-    let empty = match obj.get("instructions") {
-        None => true,
-        Some(serde_json::Value::Null) => true,
-        Some(serde_json::Value::String(s)) => s.trim().is_empty(),
-        Some(_) => false,
-    };
-    if !empty {
-        return body;
-    }
-    obj.insert(
-        "instructions".into(),
-        serde_json::Value::String(CHATGPT_CODEX_FALLBACK_INSTRUCTIONS.into()),
-    );
     tracing::debug!("injected default instructions for ChatGPT Codex (client omitted empty)");
-    serde_json::to_vec(&v).map(Bytes::from).unwrap_or(body)
+    transforms::ensure_responses_instructions_if_missing(&body, CHATGPT_CODEX_FALLBACK_INSTRUCTIONS)
 }
 
 // ---------------------------------------------------------------------------
@@ -80,13 +77,17 @@ fn inject_chatgpt_codex_instructions_if_missing(
 // ---------------------------------------------------------------------------
 
 /// Per-request metadata persisted alongside [`RequestLog`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct LogCtx {
     pub wire: Wire,
     pub route_prefix: Option<String>,
     pub credential_id: Option<String>,
     pub cb_key: Option<String>,
     pub dedupe_key: Option<String>,
+    pub client_transport: Option<String>,
+    pub request_headers: Option<String>,
+    pub codex_client_kind: CodexClientKind,
+    pub claude_client_kind: ClaudeClientKind,
 }
 
 fn wire_as_str(wire: Wire) -> &'static str {
@@ -102,6 +103,454 @@ fn needs_chat_to_responses_bridge(wire: Wire, provider_kind: ProviderKind) -> bo
     wire == Wire::OpenaiResponses && provider_kind == ProviderKind::OpenaiChat
 }
 
+pub(crate) fn request_model_for_body(
+    wire: Wire,
+    upstream_path: Option<&str>,
+    body: &[u8],
+) -> String {
+    if wire == Wire::GeminiNative {
+        upstream_path
+            .and_then(|p| p.rsplit('/').next())
+            .and_then(|s| s.split(':').next())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        extract_model(body).unwrap_or_default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn request_log_from_parts(
+    ctx: &LogCtx,
+    id: &str,
+    started_at: i64,
+    started_instant: &Instant,
+    app: &Option<String>,
+    provider_id: Option<&str>,
+    requested_model: &str,
+    upstream_model: &str,
+    status_code: Option<i32>,
+    upstream_http_status: Option<i32>,
+    upstream_error_preview: Option<String>,
+    error: Option<String>,
+    usage: Usage,
+    request_body: Option<String>,
+    response_body: Option<String>,
+) -> RequestLog {
+    build_log(
+        ctx,
+        id,
+        started_at,
+        started_instant,
+        app,
+        provider_id,
+        requested_model,
+        upstream_model,
+        status_code,
+        upstream_http_status,
+        upstream_error_preview,
+        error,
+        usage,
+        request_body,
+        response_body,
+    )
+}
+
+pub(crate) fn persist_request_log(state: &AppState, log: RequestLog) {
+    persist_log(state, log);
+}
+
+pub(crate) fn mark_provider_health(
+    state: &AppState,
+    provider_id: &str,
+    success: bool,
+    latency_ms: i64,
+    error: Option<String>,
+) {
+    fire_health(state, provider_id, success, latency_ms, error);
+}
+
+pub(crate) async fn record_codex_plan_from_response_headers(
+    state: &AppState,
+    headers: &http::HeaderMap,
+    provider: &vibe_protocol::Provider,
+    credential_id: Option<&str>,
+) {
+    maybe_record_codex_plan(state, headers, provider, credential_id);
+}
+
+#[derive(Debug)]
+pub(crate) enum PreparedForwardError {
+    Db(String),
+    NoCandidates {
+        log_id: String,
+        started_at: i64,
+        started_instant: Instant,
+        app: Option<String>,
+        requested_model: String,
+        log_ctx: LogCtx,
+        request_snapshot: Option<String>,
+    },
+    Exhausted {
+        log_id: String,
+        started_at: i64,
+        started_instant: Instant,
+        app: Option<String>,
+        requested_model: String,
+        log_ctx: LogCtx,
+        request_snapshot: Option<String>,
+        message: String,
+    },
+}
+
+pub(crate) struct PreparedForward {
+    pub log_id: String,
+    pub started_at: i64,
+    pub started_instant: Instant,
+    pub app: Option<String>,
+    pub log_ctx: LogCtx,
+    pub request_snapshot: Option<String>,
+    pub provider: vibe_protocol::Provider,
+    pub upstream_model: String,
+    pub requested_model: String,
+    pub credential_id: Option<String>,
+    pub secret: Option<String>,
+    pub body_up: Bytes,
+    pub visual: CodexVisualContext,
+}
+
+pub(crate) async fn prepare_forward_once(
+    state: &AppState,
+    wire: Wire,
+    upstream_path: Option<&str>,
+    req_headers: &HeaderMap,
+    body: Bytes,
+    route_prefix: Option<String>,
+    preserve_ws_envelope: bool,
+) -> Result<PreparedForward, PreparedForwardError> {
+    let mut body = if wire == Wire::OpenaiResponses && !preserve_ws_envelope {
+        let stripped = transforms::strip_ws_envelope(&body);
+        if route_prefix.as_deref() == Some("codex-v1") {
+            transforms::strip_vibe_codex_status_messages(&stripped)
+        } else {
+            stripped
+        }
+    } else if wire == Wire::OpenaiResponses && route_prefix.as_deref() == Some("codex-v1") {
+        transforms::strip_vibe_codex_status_messages(&body)
+    } else {
+        body
+    };
+
+    let started_at = chrono::Utc::now().timestamp();
+    let started_instant = Instant::now();
+    let log_id = uuid::Uuid::new_v4().to_string();
+    let app = detect_app(req_headers);
+    let dedupe_key = dedupe_key_from_headers(req_headers, route_prefix.as_deref());
+    let client_transport = req_headers
+        .get("x-vibe-client-transport")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let request_headers =
+        sanitized_headers_json(req_headers, state.config.log.redact_sensitive_headers);
+    let codex_client_kind = crate::codex_summary::detect_client(req_headers);
+    let claude_client_kind =
+        crate::claude_summary::detect_client(req_headers, route_prefix.as_deref());
+    let requested_model = request_model_for_body(wire, upstream_path, &body);
+    let mut claude_selection_model = requested_model.clone();
+    let mut claude_route_model: Option<String> = None;
+    let mut claude_scenario = ClaudeRouteScenario::Default;
+    if wire == Wire::Anthropic {
+        let claude_cfg = state.claude_config();
+        let prepared = crate::claude_control::prepare_request(
+            body,
+            requested_model.clone(),
+            &claude_cfg.routing,
+            &claude_cfg.request,
+        );
+        body = prepared.body;
+        claude_selection_model = prepared.requested_model;
+        claude_route_model = prepared.route_model;
+        claude_scenario = prepared.scenario;
+    }
+
+    let request_snapshot = if state.config.log.bodies {
+        lossy_optional_body(&body)
+    } else {
+        None
+    };
+
+    let providers_list = state
+        .db
+        .provider_list()
+        .map_err(|e| PreparedForwardError::Db(format!("db error: {e}")))?;
+    let routes = state.db.route_list().unwrap_or_default();
+
+    let creds_by_provider: HashMap<String, Vec<Credential>> = {
+        let creds = state.db.credential_list_all().unwrap_or_default();
+        let mut map: HashMap<String, Vec<Credential>> = HashMap::new();
+        for c in creds {
+            if c.enabled {
+                map.entry(c.provider_id.clone()).or_default().push(c);
+            }
+        }
+        map
+    };
+
+    let counter = state.lb_counter.fetch_add(1, Ordering::Relaxed);
+    let (_route, routed_candidates) = if wire == Wire::Anthropic {
+        let claude_cfg = state.claude_config();
+        crate::claude_control::candidates_for_request(
+            &providers_list,
+            &routes,
+            wire,
+            &claude_selection_model,
+            claude_route_model.as_deref(),
+            claude_scenario,
+            &claude_cfg.fallback,
+        )
+    } else {
+        router::candidates_with_routes(&providers_list, &routes, wire, &requested_model)
+    };
+    let candidates = rotate_candidates(routed_candidates, counter, &state.cb);
+    let empty_log_ctx = LogCtx {
+        wire,
+        route_prefix: route_prefix.clone(),
+        credential_id: None,
+        cb_key: None,
+        dedupe_key: dedupe_key.clone(),
+        client_transport: client_transport.clone(),
+        request_headers: request_headers.clone(),
+        codex_client_kind,
+        claude_client_kind,
+    };
+    if candidates.is_empty() {
+        return Err(PreparedForwardError::NoCandidates {
+            log_id,
+            started_at,
+            started_instant,
+            app,
+            requested_model,
+            log_ctx: empty_log_ctx,
+            request_snapshot,
+        });
+    }
+
+    let mut codex_plan_cred_ids: Vec<String> = Vec::new();
+    for pick in &candidates {
+        if !router::provider_is_chatgpt_codex_official(&pick.provider) {
+            continue;
+        }
+        if let Some(creds) = creds_by_provider.get(&pick.provider.id) {
+            for c in creds {
+                codex_plan_cred_ids.push(c.id.clone());
+            }
+        }
+    }
+    codex_plan_cred_ids.sort();
+    codex_plan_cred_ids.dedup();
+
+    let plan_by_cred: HashMap<String, CredentialPlanSnapshot> = if codex_plan_cred_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let db = state.db.clone();
+        let ids = codex_plan_cred_ids.clone();
+        match tokio::task::spawn_blocking(move || db.plan_snapshot_latest_map(&ids)).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(e)) => {
+                tracing::warn!(?e, "batch load credential_plan_snapshots failed");
+                HashMap::new()
+            }
+            Err(e) => {
+                tracing::warn!(?e, "batch load credential_plan_snapshots join error");
+                HashMap::new()
+            }
+        }
+    };
+
+    let expanded_picks = expand_picks(candidates, &creds_by_provider, &plan_by_cred, counter);
+    let mut last_error = String::from("all providers unavailable or circuit open");
+    let mut cb_skipped_total: usize = 0;
+    let mut cb_skipped_provider_ids: Vec<String> = Vec::new();
+    let mut attempted_after_cb: usize = 0;
+
+    for mut epick in expanded_picks {
+        let provider = epick.provider;
+        let upstream_model = epick.upstream_model;
+        let cb_key = epick.cb_key.clone();
+        let log_ctx = LogCtx {
+            wire,
+            route_prefix: route_prefix.clone(),
+            credential_id: epick.credential_id.clone(),
+            cb_key: Some(cb_key.clone()),
+            dedupe_key: dedupe_key.clone(),
+            client_transport: client_transport.clone(),
+            request_headers: request_headers.clone(),
+            codex_client_kind,
+            claude_client_kind,
+        };
+
+        if !state.cb.allow(&cb_key) {
+            tracing::debug!(cb_key = %cb_key, "circuit open, skipping");
+            cb_skipped_total += 1;
+            if !cb_skipped_provider_ids
+                .iter()
+                .any(|pid| pid == &provider.id)
+            {
+                cb_skipped_provider_ids.push(provider.id.clone());
+            }
+            continue;
+        }
+        attempted_after_cb += 1;
+
+        let secret = if let Some(oauth) = epick.oauth.take() {
+            match resolve_oauth_token(state, epick.credential_id.as_deref(), oauth).await {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    state.cb.record_failure(&cb_key);
+                    if let Some(cid) = &epick.credential_id {
+                        fire_credential_failure(
+                            state,
+                            cid.clone(),
+                            Some(format!("oauth refresh failed: {e}")),
+                        );
+                    }
+                    fire_health(
+                        state,
+                        &provider.id,
+                        false,
+                        started_instant.elapsed().as_millis() as i64,
+                        Some("oauth refresh failed".into()),
+                    );
+                    last_error = format!("oauth error for {}: {e}", provider.id);
+                    continue;
+                }
+            }
+        } else {
+            match epick.auth_ref.as_deref() {
+                Some("passthrough") => {
+                    if let Some(key) = req_headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+                        Some(key.to_string())
+                    } else if let Some(auth) = req_headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                    {
+                        Some(auth.strip_prefix("Bearer ").unwrap_or(auth).to_string())
+                    } else {
+                        None
+                    }
+                }
+                Some(r) => match secrets::resolve(r) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        state.cb.record_failure(&cb_key);
+                        if let Some(cid) = &epick.credential_id {
+                            fire_credential_failure(
+                                state,
+                                cid.clone(),
+                                Some(format!("auth resolve failed: {e}")),
+                            );
+                        }
+                        fire_health(
+                            state,
+                            &provider.id,
+                            false,
+                            started_instant.elapsed().as_millis() as i64,
+                            Some("auth resolve failed".into()),
+                        );
+                        last_error = format!("auth error for {}: {e}", provider.id);
+                        continue;
+                    }
+                },
+                None => None,
+            }
+        };
+
+        let effective_body: Bytes =
+            if provider.kind == ProviderKind::Anthropic && state.config.failover.inject_cache {
+                cache::inject(&body)
+            } else {
+                body.clone()
+            };
+
+        let effective_body =
+            inject_chatgpt_codex_instructions_if_missing(&provider, wire, effective_body);
+
+        let adapter = providers::select(&provider);
+        let body_up = if preserve_ws_envelope && wire == Wire::OpenaiResponses {
+            match transforms::rewrite_responses_model(&effective_body, &upstream_model) {
+                Ok(b) => b,
+                Err(e) => {
+                    last_error = format!("body rewrite: {e}");
+                    continue;
+                }
+            }
+        } else {
+            match adapter.rewrite_body_model(&effective_body, &upstream_model) {
+                Ok(b) => b,
+                Err(e) => {
+                    last_error = format!("body rewrite: {e}");
+                    continue;
+                }
+            }
+        };
+
+        let visual = codex_visual_context(
+            &provider,
+            epick.credential.as_ref(),
+            epick.credential_id.as_deref(),
+            &plan_by_cred,
+            &requested_model,
+            &upstream_model,
+        );
+
+        return Ok(PreparedForward {
+            log_id,
+            started_at,
+            started_instant,
+            app,
+            log_ctx,
+            request_snapshot,
+            provider,
+            upstream_model,
+            requested_model,
+            credential_id: epick.credential_id,
+            secret,
+            body_up,
+            visual,
+        });
+    }
+
+    let final_error = if attempted_after_cb == 0 && cb_skipped_total > 0 {
+        let preview = if cb_skipped_provider_ids.is_empty() {
+            String::new()
+        } else {
+            let ids = cb_skipped_provider_ids
+                .iter()
+                .take(6)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(", providers=[{ids}]")
+        };
+        format!(
+            "all providers blocked by circuit breaker ({cb_skipped_total} skipped{preview}). reset via POST /_vp/providers/:id/circuit/reset or Providers UI"
+        )
+    } else {
+        last_error
+    };
+
+    Err(PreparedForwardError::Exhausted {
+        log_id,
+        started_at,
+        started_instant,
+        app,
+        requested_model,
+        log_ctx: empty_log_ctx,
+        request_snapshot,
+        message: final_error,
+    })
+}
+
 fn dedupe_key_from_headers(headers: &HeaderMap, route_prefix: Option<&str>) -> Option<String> {
     let rid = headers
         .get("x-request-id")
@@ -110,6 +559,40 @@ fn dedupe_key_from_headers(headers: &HeaderMap, route_prefix: Option<&str>) -> O
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
     Some(format!("{}|{}", route_prefix.unwrap_or(""), rid))
+}
+
+fn sanitized_headers_json(headers: &HeaderMap, redact_sensitive: bool) -> Option<String> {
+    if headers.is_empty() {
+        return None;
+    }
+    let mut entries = serde_json::Map::new();
+    for (name, value) in headers {
+        let name = name.as_str().to_ascii_lowercase();
+        if name.starts_with("x-vibe-") {
+            continue;
+        }
+        let value = if redact_sensitive && is_sensitive_header(&name) {
+            "<redacted>".to_string()
+        } else {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|_| "<non-utf8>".to_string())
+        };
+        entries.insert(name, serde_json::Value::String(value));
+    }
+    (!entries.is_empty()).then(|| serde_json::Value::Object(entries).to_string())
+}
+
+fn is_sensitive_header(name: &str) -> bool {
+    name == "authorization"
+        || name == "proxy-authorization"
+        || name == "cookie"
+        || name == "set-cookie"
+        || name == "x-api-key"
+        || name.ends_with("-api-key")
+        || name.contains("token")
+        || name.contains("secret")
 }
 
 fn maybe_record_codex_plan(
@@ -171,6 +654,7 @@ struct ExpandedPick {
     oauth: Option<CredOAuth>,
     /// Set when auth comes from a credential row (for post-request RL update).
     credential_id: Option<String>,
+    credential: Option<Credential>,
 }
 
 /// Expand provider-level picks into credential-level picks.
@@ -201,10 +685,13 @@ fn expand_picks(
                 for i in 0..n {
                     let c = &creds[(start + i) % n];
                     let (auth_ref, oauth) = if c.oauth_access_token.is_some() {
-                        (None, Some(CredOAuth {
-                            access_token: c.oauth_access_token.clone().unwrap(),
-                            expires_at: c.oauth_expires_at,
-                        }))
+                        (
+                            None,
+                            Some(CredOAuth {
+                                access_token: c.oauth_access_token.clone().unwrap(),
+                                expires_at: c.oauth_expires_at,
+                            }),
+                        )
                     } else {
                         (c.auth_ref.clone(), None)
                     };
@@ -215,6 +702,7 @@ fn expand_picks(
                         auth_ref,
                         oauth,
                         credential_id: Some(c.id.clone()),
+                        credential: Some(c.clone()),
                     };
                     // Proactively defer credentials whose remaining quota is zero and
                     // whose reset time hasn't arrived yet, or Codex plan snapshot at 100%.
@@ -244,6 +732,7 @@ fn expand_picks(
                     provider: pick.provider,
                     upstream_model: pick.upstream_model,
                     credential_id: None,
+                    credential: None,
                 });
             }
         }
@@ -259,8 +748,8 @@ fn expand_picks(
 fn cred_is_rate_limited(c: &Credential, now_secs: i64) -> bool {
     let req_exhausted = c.rl_requests_remaining == Some(0)
         && c.rl_requests_reset_at.map_or(false, |r| r > now_secs);
-    let tok_exhausted = c.rl_tokens_remaining == Some(0)
-        && c.rl_tokens_reset_at.map_or(false, |r| r > now_secs);
+    let tok_exhausted =
+        c.rl_tokens_remaining == Some(0) && c.rl_tokens_reset_at.map_or(false, |r| r > now_secs);
     req_exhausted || tok_exhausted
 }
 
@@ -318,7 +807,9 @@ fn extract_rl_headers(headers: &reqwest::header::HeaderMap) -> RlHeaders {
     fn parse_reset(h: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
         let v = h.get(name)?.to_str().ok()?;
         // Integer epoch
-        if let Ok(n) = v.parse::<i64>() { return Some(n); }
+        if let Ok(n) = v.parse::<i64>() {
+            return Some(n);
+        }
         // RFC 3339 / ISO 8601
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(v) {
             return Some(dt.timestamp());
@@ -373,8 +864,12 @@ fn fire_credential_success(state: &AppState, credential_id: String, rl: RlHeader
         if !rl.is_empty() {
             let _ = db.credential_update_rate_limit(
                 &credential_id,
-                rl.requests_limit, rl.requests_remaining, rl.requests_reset_at,
-                rl.tokens_limit, rl.tokens_remaining, rl.tokens_reset_at,
+                rl.requests_limit,
+                rl.requests_remaining,
+                rl.requests_reset_at,
+                rl.tokens_limit,
+                rl.tokens_remaining,
+                rl.tokens_reset_at,
             );
         }
     });
@@ -421,18 +916,30 @@ pub async fn forward(
     // Codex CLI/Desktop may POST `{"type":"response.create",...}` to `/v1/responses`
     // (not only `/codex/v1/responses`). Normalize here so routing + upstream body agree.
     let body = if wire == Wire::OpenaiResponses {
-        transforms::strip_ws_envelope(&body)
+        let stripped = transforms::strip_ws_envelope(&body);
+        if route_prefix.as_deref() == Some("codex-v1") {
+            transforms::strip_vibe_codex_status_messages(&stripped)
+        } else {
+            stripped
+        }
     } else {
         body
     };
-
-    let request_snapshot = lossy_optional_body(&body);
 
     let started_at = chrono::Utc::now().timestamp();
     let started_instant = Instant::now();
     let log_id = uuid::Uuid::new_v4().to_string();
     let app = detect_app(&req_headers);
     let dedupe_key = dedupe_key_from_headers(&req_headers, route_prefix.as_deref());
+    let client_transport = req_headers
+        .get("x-vibe-client-transport")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let request_headers =
+        sanitized_headers_json(&req_headers, state.config.log.redact_sensitive_headers);
+    let codex_client_kind = crate::codex_summary::detect_client(&req_headers);
+    let claude_client_kind =
+        crate::claude_summary::detect_client(&req_headers, route_prefix.as_deref());
     // For GeminiNative the model is in the URL path, not the body.
     let requested_model = if wire == Wire::GeminiNative {
         upstream_path
@@ -444,11 +951,35 @@ pub async fn forward(
     } else {
         extract_model(&body).unwrap_or_default()
     };
+    let mut body = body;
+    let mut claude_selection_model = requested_model.clone();
+    let mut claude_route_model: Option<String> = None;
+    let mut claude_scenario = ClaudeRouteScenario::Default;
+    if wire == Wire::Anthropic {
+        let claude_cfg = state.claude_config();
+        let prepared = crate::claude_control::prepare_request(
+            body,
+            requested_model.clone(),
+            &claude_cfg.routing,
+            &claude_cfg.request,
+        );
+        body = prepared.body;
+        claude_selection_model = prepared.requested_model;
+        claude_route_model = prepared.route_model;
+        claude_scenario = prepared.scenario;
+    }
+
+    let request_snapshot = if state.config.log.bodies {
+        lossy_optional_body(&body)
+    } else {
+        None
+    };
 
     let providers_list = match state.db.provider_list() {
         Ok(v) => v,
         Err(e) => return internal_error(format!("db error: {e}")),
     };
+    let routes = state.db.route_list().unwrap_or_default();
 
     // Load credentials grouped by provider_id for key-pool rotation.
     let creds_by_provider: HashMap<String, Vec<Credential>> = {
@@ -463,11 +994,21 @@ pub async fn forward(
     };
 
     let counter = state.lb_counter.fetch_add(1, Ordering::Relaxed);
-    let candidates = rotate_candidates(
-        router::candidates(&providers_list, wire, &requested_model),
-        counter,
-        &state.cb,
-    );
+    let (_route, routed_candidates) = if wire == Wire::Anthropic {
+        let claude_cfg = state.claude_config();
+        crate::claude_control::candidates_for_request(
+            &providers_list,
+            &routes,
+            wire,
+            &claude_selection_model,
+            claude_route_model.as_deref(),
+            claude_scenario,
+            &claude_cfg.fallback,
+        )
+    } else {
+        router::candidates_with_routes(&providers_list, &routes, wire, &requested_model)
+    };
+    let candidates = rotate_candidates(routed_candidates, counter, &state.cb);
     if candidates.is_empty() {
         let log_ctx = LogCtx {
             wire,
@@ -475,6 +1016,10 @@ pub async fn forward(
             credential_id: None,
             cb_key: None,
             dedupe_key: dedupe_key.clone(),
+            client_transport: client_transport.clone(),
+            request_headers: request_headers.clone(),
+            codex_client_kind,
+            claude_client_kind,
         };
         let log = build_log(
             &log_ctx,
@@ -494,7 +1039,10 @@ pub async fn forward(
             None,
         );
         persist_log(&state, log);
-        return (StatusCode::SERVICE_UNAVAILABLE, "no provider matches request shape")
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no provider matches request shape",
+        )
             .into_response();
     }
 
@@ -546,13 +1094,20 @@ pub async fn forward(
             credential_id: epick.credential_id.clone(),
             cb_key: Some(cb_key.clone()),
             dedupe_key: dedupe_key.clone(),
+            client_transport: client_transport.clone(),
+            request_headers: request_headers.clone(),
+            codex_client_kind,
+            claude_client_kind,
         };
 
         // ── circuit breaker ──────────────────────────────────────────────
         if !state.cb.allow(&cb_key) {
             tracing::debug!(cb_key = %cb_key, "circuit open, skipping");
             cb_skipped_total += 1;
-            if !cb_skipped_provider_ids.iter().any(|pid| pid == &provider.id) {
+            if !cb_skipped_provider_ids
+                .iter()
+                .any(|pid| pid == &provider.id)
+            {
                 cb_skipped_provider_ids.push(provider.id.clone());
             }
             continue;
@@ -567,7 +1122,11 @@ pub async fn forward(
                 Err(e) => {
                     state.cb.record_failure(&cb_key);
                     if let Some(cid) = &epick.credential_id {
-                        fire_credential_failure(&state, cid.clone(), Some(format!("oauth refresh failed: {e}")));
+                        fire_credential_failure(
+                            &state,
+                            cid.clone(),
+                            Some(format!("oauth refresh failed: {e}")),
+                        );
                     }
                     fire_health(
                         &state,
@@ -586,7 +1145,10 @@ pub async fn forward(
                 Some("passthrough") => {
                     if let Some(key) = req_headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
                         Some(key.to_string())
-                    } else if let Some(auth) = req_headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                    } else if let Some(auth) = req_headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                    {
                         Some(auth.strip_prefix("Bearer ").unwrap_or(auth).to_string())
                     } else {
                         None
@@ -597,7 +1159,11 @@ pub async fn forward(
                     Err(e) => {
                         state.cb.record_failure(&cb_key);
                         if let Some(cid) = &epick.credential_id {
-                            fire_credential_failure(&state, cid.clone(), Some(format!("auth resolve failed: {e}")));
+                            fire_credential_failure(
+                                &state,
+                                cid.clone(),
+                                Some(format!("auth resolve failed: {e}")),
+                            );
                         }
                         fire_health(
                             &state,
@@ -615,13 +1181,12 @@ pub async fn forward(
         };
 
         // ── cache injection (Anthropic only) ─────────────────────────────
-        let effective_body: Bytes = if provider.kind == ProviderKind::Anthropic
-            && state.config.failover.inject_cache
-        {
-            cache::inject(&body)
-        } else {
-            body.clone()
-        };
+        let effective_body: Bytes =
+            if provider.kind == ProviderKind::Anthropic && state.config.failover.inject_cache {
+                cache::inject(&body)
+            } else {
+                body.clone()
+            };
 
         let effective_body =
             inject_chatgpt_codex_instructions_if_missing(&provider, wire, effective_body);
@@ -637,12 +1202,25 @@ pub async fn forward(
         };
 
         // ── build request ─────────────────────────────────────────────────
-        let req = match adapter.build(&provider, secret.as_deref(), &state.http, wire, &body_up, upstream_path.as_deref()) {
+        let req = match adapter.build(
+            &provider,
+            secret.as_deref(),
+            &state.http,
+            wire,
+            &body_up,
+            upstream_path.as_deref(),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 last_error = e.to_string();
                 continue;
             }
+        };
+        let req = if wire == Wire::Anthropic {
+            let timeout_ms = state.claude_config().request.api_timeout_ms.max(1);
+            req.timeout(std::time::Duration::from_millis(timeout_ms))
+        } else {
+            req
         };
 
         // ── send ──────────────────────────────────────────────────────────
@@ -652,8 +1230,13 @@ pub async fn forward(
                 let msg = e.to_string();
                 tracing::warn!(provider_id = %provider.id, cb_key = %cb_key, error = %msg, "upstream connection error");
                 state.cb.record_failure(&cb_key);
-                fire_health(&state, &provider.id, false,
-                    started_instant.elapsed().as_millis() as i64, Some(msg.clone()));
+                fire_health(
+                    &state,
+                    &provider.id,
+                    false,
+                    started_instant.elapsed().as_millis() as i64,
+                    Some(msg.clone()),
+                );
                 if let Some(cid) = &epick.credential_id {
                     fire_credential_failure(&state, cid.clone(), Some(msg.clone()));
                 }
@@ -709,8 +1292,13 @@ pub async fn forward(
                 "retryable upstream error, trying next provider"
             );
             state.cb.record_failure(&cb_key);
-            fire_health(&state, &provider.id, false,
-                started_instant.elapsed().as_millis() as i64, Some(format!("HTTP {status}")));
+            fire_health(
+                &state,
+                &provider.id,
+                false,
+                started_instant.elapsed().as_millis() as i64,
+                Some(format!("HTTP {status}")),
+            );
             if let Some(cid) = &epick.credential_id {
                 fire_credential_failure(&state, cid.clone(), Some(format!("HTTP {status}")));
             }
@@ -725,15 +1313,23 @@ pub async fn forward(
         // would otherwise open the breaker and cause unrelated requests to see 503 when every
         // pick is CB-skipped.
         if status.is_client_error() {
-            fire_health(&state, &provider.id, false,
+            fire_health(
+                &state,
+                &provider.id,
+                false,
                 started_instant.elapsed().as_millis() as i64,
-                Some(format!("client error {status}")));
+                Some(format!("client error {status}")),
+            );
             if let Some(cid) = &epick.credential_id {
                 fire_credential_failure(&state, cid.clone(), Some(format!("HTTP {status}")));
             }
             let resp_headers = copy_response_headers(upstream.headers());
             let buf = upstream.bytes().await.unwrap_or_default();
-            let err_stored = lossy_optional_body(&buf);
+            let err_stored = if state.config.log.bodies {
+                lossy_optional_body(&buf)
+            } else {
+                None
+            };
             tracing::warn!(
                 provider_id = %provider.id,
                 status = %status,
@@ -756,7 +1352,11 @@ pub async fn forward(
                 Some(format!("client error {status}")),
                 Usage::default(),
                 request_snapshot.clone(),
-                lossy_optional_body(&buf),
+                if state.config.log.bodies {
+                    lossy_optional_body(&buf)
+                } else {
+                    None
+                },
             );
             persist_log(&state, log);
             return (status, resp_headers, buf).into_response();
@@ -764,8 +1364,13 @@ pub async fn forward(
 
         // ── 2xx success ───────────────────────────────────────────────────
         state.cb.record_success(&cb_key);
-        fire_health(&state, &provider.id, true,
-            started_instant.elapsed().as_millis() as i64, None);
+        fire_health(
+            &state,
+            &provider.id,
+            true,
+            started_instant.elapsed().as_millis() as i64,
+            None,
+        );
 
         // Extract rate-limit headers before consuming the response.
         let rl = extract_rl_headers(upstream.headers());
@@ -781,6 +1386,14 @@ pub async fn forward(
         );
 
         let resp_headers = copy_response_headers(upstream.headers());
+        let visual = codex_visual_context(
+            &provider,
+            epick.credential.as_ref(),
+            epick.credential_id.as_deref(),
+            &plan_by_cred,
+            &requested_model,
+            &upstream_model,
+        );
 
         if body_wants_stream(&body) {
             return stream_response(
@@ -799,6 +1412,7 @@ pub async fn forward(
                 upstream_model,
                 log_ctx,
                 request_snapshot,
+                visual,
             );
         }
 
@@ -830,6 +1444,22 @@ pub async fn forward(
         let usage = adapter.parse_usage_body(wire, &buf);
         let sc = status.as_u16() as i32;
         let do_c2r = needs_chat_to_responses_bridge(wire, provider.kind);
+        let mut client_body = buf.clone();
+        if wire == Wire::Anthropic {
+            let metrics = crate::codex_summary::SummaryMetrics::from_usage(
+                usage,
+                Some(started_instant.elapsed().as_millis() as i64),
+                None,
+            );
+            if let Some(with_summary) = crate::claude_summary::append_summary_to_message_body(
+                &client_body,
+                &state.claude_summary_config(),
+                log_ctx.claude_client_kind,
+                metrics,
+            ) {
+                client_body = Bytes::from(with_summary);
+            }
+        }
         let mut log = build_log(
             &log_ctx,
             &log_id,
@@ -845,19 +1475,50 @@ pub async fn forward(
             None,
             usage,
             request_snapshot.clone(),
-            lossy_optional_body(&buf),
+            if state.config.log.bodies {
+                lossy_optional_body(&buf)
+            } else {
+                None
+            },
         );
         let client_body = if do_c2r {
             let session_id = format!("resp-{}", uuid::Uuid::new_v4().simple());
             let item_id = format!("msg-{}", uuid::Uuid::new_v4().simple());
-            let converted = transforms::chat_body_to_responses(&buf, &session_id, &item_id);
-            log.client_response_body = lossy_optional_body(&converted);
+            let converted = transforms::chat_body_to_responses(&client_body, &session_id, &item_id);
+            if state.config.log.bodies {
+                log.client_response_body = lossy_optional_body(&converted);
+            }
             converted
         } else {
-            buf.clone()
+            if state.config.log.bodies && client_body != buf {
+                log.client_response_body = lossy_optional_body(&client_body);
+            }
+            client_body
+        };
+        let client_body = if route_prefix.as_deref() == Some("codex-v1")
+            && wire == Wire::OpenaiResponses
+            && transforms::responses_input_ends_with_user_message(&body)
+        {
+            let status = codex_visual::status_message_text(
+                &visual,
+                started_instant.elapsed().as_millis() as i64,
+            );
+            let item_id = format!("vibe_route_{}", uuid::Uuid::new_v4().simple());
+            let with_status = transforms::prepend_response_message(&client_body, &item_id, &status);
+            if state.config.log.bodies {
+                log.client_response_body = lossy_optional_body(&with_status);
+            }
+            with_status
+        } else {
+            client_body
         };
         persist_log(&state, log);
-        return (status, resp_headers, client_body).into_response();
+        let mut response = (status, resp_headers, client_body).into_response();
+        response.extensions_mut().insert(VibeCodexVisual(visual));
+        response
+            .extensions_mut()
+            .insert(VibeCodexClientKind(log_ctx.codex_client_kind));
+        return response;
     }
 
     // All candidates exhausted
@@ -867,6 +1528,10 @@ pub async fn forward(
         credential_id: None,
         cb_key: None,
         dedupe_key: dedupe_key.clone(),
+        client_transport,
+        request_headers,
+        codex_client_kind,
+        claude_client_kind,
     };
     let log = build_log(
         &log_ctx,
@@ -928,48 +1593,144 @@ fn stream_response(
     upstream_model: String,
     log_ctx: LogCtx,
     request_body: Option<String>,
+    visual: CodexVisualContext,
 ) -> Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     let state_for_task = state.clone();
     let log_id_clone = log_id.clone();
+    let codex_client_kind = log_ctx.codex_client_kind;
+    let claude_summary_request_id = log_ctx.dedupe_key.clone().or_else(|| Some(log_id.clone()));
 
     tokio::spawn(async move {
         let mut byte_stream = upstream.bytes_stream();
         let mut acc = Usage::default();
         let mut first_token_ms: Option<i64> = None;
         let mut buf = String::new();
+        let mut sse_buf: Vec<u8> = Vec::new();
         let mut raw_accum: Vec<u8> = Vec::new();
+        let mut trace = StreamTraceStats::new("sse", "passthrough");
+        let mut downstream_closed = false;
+        let mut claude_summary_injection = (wire == Wire::Anthropic).then(|| {
+            crate::claude_summary::ClaudeSummaryAccumulator::new_for_request(
+                state_for_task.claude_summary_config(),
+                log_ctx.claude_client_kind,
+                Some(state_for_task.clone()),
+                claude_summary_request_id,
+            )
+        });
 
         while let Some(chunk) = byte_stream.next().await {
             match chunk {
                 Ok(bytes) => {
+                    trace.record_upstream_chunk(&started_instant, bytes.len());
                     raw_accum.extend_from_slice(&bytes);
                     if first_token_ms.is_none() {
                         first_token_ms = Some(started_instant.elapsed().as_millis() as i64);
                     }
-                    if let Ok(s) = std::str::from_utf8(&bytes) {
-                        buf.push_str(s);
-                        while let Some(pos) = buf.find("\n\n") {
-                            let event = buf[..pos].to_string();
-                            buf.drain(..pos + 2);
-                            for line in event.lines() {
-                                adapter.parse_usage_stream_event(wire, line, &mut acc);
+                    if let Some(summary_injection) = claude_summary_injection.as_mut() {
+                        sse_buf.extend_from_slice(&bytes);
+                        while let Some((pos, delimiter_len)) = find_sse_delimiter(&sse_buf) {
+                            let event = sse_buf[..pos].to_vec();
+                            let frame = sse_buf[..pos + delimiter_len].to_vec();
+                            sse_buf.drain(..pos + delimiter_len);
+                            let event_text = String::from_utf8_lossy(&event).into_owned();
+                            trace.record_sse_block(&started_instant, &event_text);
+                            parse_sse_block_usage(adapter.as_ref(), wire, &event_text, &mut acc);
+                            if let Some(summary) = summary_injection.before_forwarding_sse_block(
+                                &event_text,
+                                started_instant.elapsed().as_millis() as i64,
+                            ) {
+                                let summary_len = summary.len();
+                                if tx.send(Ok(Bytes::from(summary))).await.is_err() {
+                                    trace.finish("downstream_closed");
+                                    downstream_closed = true;
+                                    break;
+                                } else {
+                                    trace.record_client_chunk(&started_instant, summary_len);
+                                }
+                            }
+                            let frame_len = frame.len();
+                            if tx.send(Ok(Bytes::from(frame))).await.is_err() {
+                                trace.finish("downstream_closed");
+                                downstream_closed = true;
+                                break;
+                            } else {
+                                trace.record_client_chunk(&started_instant, frame_len);
                             }
                         }
-                    }
-                    if tx.send(Ok(bytes)).await.is_err() {
-                        break;
+                        if downstream_closed {
+                            break;
+                        }
+                    } else {
+                        if let Ok(s) = std::str::from_utf8(&bytes) {
+                            buf.push_str(s);
+                            while let Some(pos) = buf.find("\n\n") {
+                                let event = buf[..pos].to_string();
+                                buf.drain(..pos + 2);
+                                trace.record_sse_block(&started_instant, &event);
+                                parse_sse_block_usage(adapter.as_ref(), wire, &event, &mut acc);
+                            }
+                        }
+                        let byte_len = bytes.len();
+                        if tx.send(Ok(bytes)).await.is_err() {
+                            trace.finish("downstream_closed");
+                            break;
+                        } else {
+                            trace.record_client_chunk(&started_instant, byte_len);
+                        }
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    let detail = e.to_string();
+                    trace.finish_error("upstream_read_error", detail.clone());
+                    let _ = tx.send(Err(std::io::Error::other(detail))).await;
                     break;
                 }
             }
+            if downstream_closed {
+                break;
+            }
+        }
+        if let Some(summary_injection) = claude_summary_injection.as_mut() {
+            if !sse_buf.is_empty() {
+                let event_text = String::from_utf8_lossy(&sse_buf).into_owned();
+                if !event_text.trim().is_empty() {
+                    trace.record_sse_block(&started_instant, &event_text);
+                    parse_sse_block_usage(adapter.as_ref(), wire, &event_text, &mut acc);
+                    if let Some(summary) = summary_injection.before_forwarding_sse_block(
+                        &event_text,
+                        started_instant.elapsed().as_millis() as i64,
+                    ) {
+                        let summary_len = summary.len();
+                        if tx.send(Ok(Bytes::from(summary))).await.is_ok() {
+                            trace.record_client_chunk(&started_instant, summary_len);
+                        }
+                    }
+                }
+                let leftover_len = sse_buf.len();
+                if tx
+                    .send(Ok(Bytes::from(std::mem::take(&mut sse_buf))))
+                    .await
+                    .is_ok()
+                {
+                    trace.record_client_chunk(&started_instant, leftover_len);
+                }
+            }
+        } else if !buf.trim().is_empty() {
+            trace.record_sse_block(&started_instant, &buf);
+        }
+        if trace.terminal_seen() {
+            trace.finish("completed");
+        } else if trace.end_reason().is_none() {
+            trace.finish("upstream_eof");
         }
 
         let sc = status.as_u16() as i32;
-        let response_body = lossy_optional_body(&raw_accum);
+        let response_body = if state_for_task.config.log.bodies {
+            lossy_optional_body(&raw_accum)
+        } else {
+            None
+        };
         let mut log = build_log(
             &log_ctx,
             &log_id,
@@ -988,6 +1749,7 @@ fn stream_response(
             response_body,
         );
         log.first_token_ms = first_token_ms;
+        trace.apply_to_log(&mut log);
         finalize_stream_request_log(state_for_task, log).await;
         drop(tx);
     });
@@ -997,6 +1759,9 @@ fn stream_response(
     *res.status_mut() = status;
     *res.headers_mut() = resp_headers;
     res.extensions_mut().insert(VibeLogId(log_id_clone));
+    res.extensions_mut().insert(VibeCodexVisual(visual));
+    res.extensions_mut()
+        .insert(VibeCodexClientKind(codex_client_kind));
     res
 }
 
@@ -1023,8 +1788,7 @@ fn rotate_candidates(
     while group_start < candidates.len() {
         let priority = candidates[group_start].provider.priority;
         let group_end = group_start
-            + candidates[group_start..]
-                .partition_point(|p| p.provider.priority == priority);
+            + candidates[group_start..].partition_point(|p| p.provider.priority == priority);
 
         let has_available = candidates[group_start..group_end]
             .iter()
@@ -1044,11 +1808,56 @@ fn rotate_candidates(
     candidates
 }
 
+fn codex_visual_context(
+    provider: &vibe_protocol::Provider,
+    credential: Option<&Credential>,
+    credential_id: Option<&str>,
+    plan_by_cred: &HashMap<String, CredentialPlanSnapshot>,
+    requested_model: &str,
+    upstream_model: &str,
+) -> CodexVisualContext {
+    let coding_plan_snapshot = credential_id.and_then(|id| plan_by_cred.get(id).cloned());
+    CodexVisualContext {
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        credential_id: credential_id.map(str::to_string),
+        credential_label: credential.map(|c| c.label.clone()),
+        credential_plan_type: credential.and_then(|c| c.plan_type.clone()),
+        credential_chatgpt_plan_slug: credential.and_then(|c| c.oauth_chatgpt_plan_slug.clone()),
+        requested_model: requested_model.to_string(),
+        upstream_model: upstream_model.to_string(),
+        coding_plan_snapshot,
+        token_plan: credential.and_then(codex_visual::token_plan_from_credential),
+    }
+}
+
 fn body_wants_stream(body: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("stream")?.as_bool())
         .unwrap_or(false)
+}
+
+fn find_sse_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
+    buf.windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|pos| (pos, 2))
+        .or_else(|| {
+            buf.windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|pos| (pos, 4))
+        })
+}
+
+fn parse_sse_block_usage(
+    adapter: &(dyn Adapter + Send + Sync),
+    wire: Wire,
+    event: &str,
+    acc: &mut Usage,
+) {
+    for line in event.lines() {
+        adapter.parse_usage_stream_event(wire, line, acc);
+    }
 }
 
 fn extract_model(body: &[u8]) -> Option<String> {
@@ -1119,7 +1928,7 @@ fn build_log(
     request_body: Option<String>,
     response_body: Option<String>,
 ) -> RequestLog {
-    RequestLog {
+    let mut log = RequestLog {
         id: id.to_string(),
         started_at,
         app: app.clone(),
@@ -1142,10 +1951,42 @@ fn build_log(
         upstream_http_status,
         upstream_error_preview,
         dedupe_key: ctx.dedupe_key.clone(),
+        client_transport: ctx.client_transport.clone(),
+        request_headers: ctx.request_headers.clone(),
         request_body,
         response_body,
         client_response_body: None,
-    }
+        stream_kind: None,
+        stream_terminal_seen: None,
+        stream_end_reason: None,
+        stream_error_detail: None,
+        upstream_first_byte_ms: None,
+        client_first_write_ms: None,
+        last_upstream_event_ms: None,
+        last_client_write_ms: None,
+        upstream_chunk_count: 0,
+        upstream_bytes: 0,
+        client_chunk_count: 0,
+        client_bytes: 0,
+        sse_event_count: 0,
+        sse_data_count: 0,
+        sse_comment_count: 0,
+        sse_keepalive_count: 0,
+        sse_done_count: 0,
+        parse_error_count: 0,
+        first_keepalive_ms: None,
+        last_keepalive_ms: None,
+        max_gap_between_upstream_events_ms: None,
+        max_gap_between_data_events_ms: None,
+        keepalive_after_last_data_count: 0,
+        last_data_event_ms: None,
+        bridge_mode: None,
+        status_injected: false,
+        terminal_injected: false,
+        upstream_terminal_type: None,
+    };
+    empty_stream_fields(&mut log);
+    log
 }
 
 fn persist_log(state: &AppState, log: RequestLog) {
@@ -1156,6 +1997,7 @@ fn persist_log(state: &AppState, log: RequestLog) {
             tracing::warn!(?e, "failed to insert request log");
         }
         let mut thin = log;
+        thin.request_headers = None;
         thin.request_body = None;
         thin.response_body = None;
         thin.client_response_body = None;
@@ -1174,6 +2016,7 @@ async fn finalize_stream_request_log(state: AppState, log: RequestLog) {
         Err(join_err) => tracing::warn!(%join_err, "stream log insert task panicked"),
     }
     let mut thin = log;
+    thin.request_headers = None;
     thin.request_body = None;
     thin.response_body = None;
     thin.client_response_body = None;
@@ -1226,8 +2069,7 @@ pub(crate) async fn resolve_oauth_token(
         let refresh_opt = if let Some(cid) = credential_id {
             let cid = cid.to_string();
             let db = state.db.clone();
-            tokio::task::spawn_blocking(move || db.credential_get_refresh_token(&cid))
-                .await??
+            tokio::task::spawn_blocking(move || db.credential_get_refresh_token(&cid)).await??
         } else {
             None
         };
@@ -1239,7 +2081,11 @@ pub(crate) async fn resolve_oauth_token(
                     if let Some(cid) = credential_id {
                         let db = state.db.clone();
                         let cid = cid.to_string();
-                        let (at, rt, exp) = (fresh.access_token.clone(), fresh.refresh_token.clone(), fresh.expires_at);
+                        let (at, rt, exp) = (
+                            fresh.access_token.clone(),
+                            fresh.refresh_token.clone(),
+                            fresh.expires_at,
+                        );
                         tokio::task::spawn_blocking(move || {
                             if let Err(e) = db.credential_update_oauth_tokens(&cid, &at, &rt, exp) {
                                 tracing::warn!(?e, cred_id = %cid, "failed to persist refreshed OAuth tokens");
@@ -1266,7 +2112,10 @@ struct FreshTokens {
 }
 
 /// POST to `auth.openai.com/oauth/token` with `grant_type=refresh_token`.
-async fn do_oauth_refresh(client: &reqwest::Client, refresh_token: &str) -> anyhow::Result<FreshTokens> {
+async fn do_oauth_refresh(
+    client: &reqwest::Client,
+    refresh_token: &str,
+) -> anyhow::Result<FreshTokens> {
     let resp: serde_json::Value = client
         .post("https://auth.openai.com/oauth/token")
         .header("content-type", "application/json")
@@ -1298,7 +2147,11 @@ async fn do_oauth_refresh(client: &reqwest::Client, refresh_token: &str) -> anyh
         .and_then(|e| e.as_u64())
         .map(|secs| chrono::Utc::now().timestamp() + secs as i64);
 
-    Ok(FreshTokens { access_token, refresh_token: new_refresh, expires_at })
+    Ok(FreshTokens {
+        access_token,
+        refresh_token: new_refresh,
+        expires_at,
+    })
 }
 
 #[cfg(test)]
@@ -1336,7 +2189,15 @@ mod plan_pct_tests {
 
     #[test]
     fn exhausted_when_display_hundred() {
-        assert!(credential_plan_display_exhausted(&snap(None, Some(100.0), None)));
-        assert!(!credential_plan_display_exhausted(&snap(None, Some(99.0), None)));
+        assert!(credential_plan_display_exhausted(&snap(
+            None,
+            Some(100.0),
+            None
+        )));
+        assert!(!credential_plan_display_exhausted(&snap(
+            None,
+            Some(99.0),
+            None
+        )));
     }
 }

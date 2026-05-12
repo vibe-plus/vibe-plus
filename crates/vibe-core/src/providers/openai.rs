@@ -33,7 +33,10 @@ impl Adapter for OpenaiAdapter {
         let (path, effective_body): (&str, std::borrow::Cow<[u8]>) =
             if wire == Wire::OpenaiResponses && provider.kind == ProviderKind::OpenaiChat {
                 let converted = transforms::responses_to_chat(body);
-                ("/v1/chat/completions", std::borrow::Cow::Owned(converted.to_vec()))
+                (
+                    "/v1/chat/completions",
+                    std::borrow::Cow::Owned(converted.to_vec()),
+                )
             } else {
                 let p = match wire {
                     Wire::OpenaiChat => "/v1/chat/completions",
@@ -67,15 +70,7 @@ impl Adapter for OpenaiAdapter {
         let v: Result<serde_json::Value, _> = serde_json::from_slice(body);
         if let Ok(v) = v {
             if let Some(usage) = v.get("usage") {
-                u.input_tokens = usage.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                u.output_tokens = usage
-                    .get("completion_tokens")
-                    .and_then(|x| x.as_i64())
-                    .unwrap_or(0);
-                u.cache_read_tokens = usage
-                    .pointer("/prompt_tokens_details/cached_tokens")
-                    .and_then(|x| x.as_i64())
-                    .unwrap_or(0);
+                apply_openai_usage(usage, &mut u);
             }
         }
         u
@@ -91,19 +86,77 @@ impl Adapter for OpenaiAdapter {
             Ok(v) => v,
             Err(_) => return,
         };
-        if let Some(usage) = v.get("usage") {
-            if let Some(n) = usage.get("prompt_tokens").and_then(|x| x.as_i64()) {
-                acc.input_tokens = n;
-            }
-            if let Some(n) = usage.get("completion_tokens").and_then(|x| x.as_i64()) {
-                acc.output_tokens = n;
-            }
-            if let Some(n) = usage
-                .pointer("/prompt_tokens_details/cached_tokens")
-                .and_then(|x| x.as_i64())
-            {
-                acc.cache_read_tokens = n;
-            }
+        if let Some(usage) = v.get("usage").or_else(|| v.pointer("/response/usage")) {
+            apply_openai_usage(usage, acc);
         }
+    }
+}
+
+fn apply_openai_usage(usage: &serde_json::Value, acc: &mut Usage) {
+    if let Some(n) = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|x| x.as_i64())
+    {
+        acc.input_tokens = n;
+    }
+    if let Some(n) = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|x| x.as_i64())
+    {
+        acc.output_tokens = n;
+    }
+    if let Some(n) = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
+        .or_else(|| usage.get("cached_input_tokens"))
+        .and_then(|x| x.as_i64())
+    {
+        acc.cache_read_tokens = n;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::Adapter;
+
+    #[test]
+    fn parses_chat_completion_usage_body() {
+        let usage = OpenaiAdapter.parse_usage_body(
+            Wire::OpenaiChat,
+            br#"{"usage":{"prompt_tokens":11,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":3}}}"#,
+        );
+
+        assert_eq!(usage.input_tokens, 11);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_tokens, 3);
+    }
+
+    #[test]
+    fn parses_responses_usage_body() {
+        let usage = OpenaiAdapter.parse_usage_body(
+            Wire::OpenaiResponses,
+            br#"{"usage":{"input_tokens":42,"input_tokens_details":{"cached_tokens":12},"output_tokens":5,"total_tokens":47}}"#,
+        );
+
+        assert_eq!(usage.input_tokens, 42);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_read_tokens, 12);
+    }
+
+    #[test]
+    fn parses_responses_completed_stream_usage() {
+        let mut usage = Usage::default();
+        OpenaiAdapter.parse_usage_stream_event(
+            Wire::OpenaiResponses,
+            r#"data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":9,"input_tokens_details":{"cached_tokens":4},"output_tokens":6,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":15}}}"#,
+            &mut usage,
+        );
+
+        assert_eq!(usage.input_tokens, 9);
+        assert_eq!(usage.output_tokens, 6);
+        assert_eq!(usage.cache_read_tokens, 4);
     }
 }

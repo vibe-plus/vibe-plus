@@ -42,8 +42,14 @@ impl Adapter for GeminiAdapter {
         let v: Result<serde_json::Value, _> = serde_json::from_slice(body);
         if let Ok(v) = v {
             if let Some(meta) = v.get("usageMetadata") {
-                u.input_tokens = meta.get("promptTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
-                u.output_tokens = meta.get("candidatesTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
+                u.input_tokens = meta
+                    .get("promptTokenCount")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0);
+                u.output_tokens = meta
+                    .get("candidatesTokenCount")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0);
             }
         }
         u

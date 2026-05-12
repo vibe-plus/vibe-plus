@@ -57,7 +57,10 @@ pub fn detect_kind_from_model(model: &str) -> Option<ProviderKind> {
         || lower.starts_with("tts-")
     {
         Some(ProviderKind::OpenaiChat)
-    } else if lower.starts_with("gemini-") || lower.starts_with("palm-") || lower.starts_with("bison") {
+    } else if lower.starts_with("gemini-")
+        || lower.starts_with("palm-")
+        || lower.starts_with("bison")
+    {
         Some(ProviderKind::GeminiNative)
     } else if lower.starts_with("deepseek-")
         || lower.starts_with("qwen")
@@ -88,45 +91,48 @@ pub fn detect_kind_from_model(model: &str) -> Option<ProviderKind> {
 pub fn default_aliases(kind: ProviderKind) -> Vec<ModelAlias> {
     match kind {
         ProviderKind::Anthropic => vec![
-            ma("claude-opus-4-7",        "claude-opus-4-7-20251101"),
-            ma("claude-sonnet-4-6",       "claude-sonnet-4-6"),
-            ma("claude-sonnet-4-5",       "claude-sonnet-4-5-20251001"),
-            ma("claude-haiku-4-5",        "claude-haiku-4-5-20251001"),
-            ma("claude-3-7-sonnet",       "claude-3-7-sonnet-20250219"),
-            ma("claude-3-5-sonnet",       "claude-3-5-sonnet-20241022"),
-            ma("claude-3-5-haiku",        "claude-3-5-haiku-20241022"),
-            ma("claude-3-opus",           "claude-3-opus-20240229"),
+            ma("claude-opus-4-7", "claude-opus-4-7-20251101"),
+            ma("claude-sonnet-4-6", "claude-sonnet-4-6"),
+            ma("claude-sonnet-4-5", "claude-sonnet-4-5-20251001"),
+            ma("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+            ma("claude-3-7-sonnet", "claude-3-7-sonnet-20250219"),
+            ma("claude-3-5-sonnet", "claude-3-5-sonnet-20241022"),
+            ma("claude-3-5-haiku", "claude-3-5-haiku-20241022"),
+            ma("claude-3-opus", "claude-3-opus-20240229"),
         ],
         ProviderKind::OpenaiChat => vec![
-            ma("gpt-4o",                  "gpt-4o"),
-            ma("gpt-4o-mini",             "gpt-4o-mini"),
-            ma("gpt-4-turbo",             "gpt-4-turbo"),
-            ma("o1",                      "o1"),
-            ma("o1-mini",                 "o1-mini"),
-            ma("o3",                      "o3"),
-            ma("o3-mini",                 "o3-mini"),
-            ma("o4-mini",                 "o4-mini"),
+            ma("gpt-4o", "gpt-4o"),
+            ma("gpt-4o-mini", "gpt-4o-mini"),
+            ma("gpt-4-turbo", "gpt-4-turbo"),
+            ma("o1", "o1"),
+            ma("o1-mini", "o1-mini"),
+            ma("o3", "o3"),
+            ma("o3-mini", "o3-mini"),
+            ma("o4-mini", "o4-mini"),
         ],
         // Codex Responses：官方模型列表来自各 provider 的 `/models`（ChatGPT：`…/codex/models`）。
         // 此处仅提供与当前 codex-rs 一致的常见 slug，导入时可再由用户删减。
         ProviderKind::OpenaiResponses => vec![
-            ma("gpt-5.3-codex",           "gpt-5.3-codex"),
-            ma("gpt-5.4",                 "gpt-5.4"),
-            ma("gpt-5.1-codex-max",       "gpt-5.1-codex-max"),
-            ma("gpt-5.1-codex-mini",      "gpt-5.1-codex-mini"),
+            ma("gpt-5.3-codex", "gpt-5.3-codex"),
+            ma("gpt-5.4", "gpt-5.4"),
+            ma("gpt-5.1-codex-max", "gpt-5.1-codex-max"),
+            ma("gpt-5.1-codex-mini", "gpt-5.1-codex-mini"),
         ],
         ProviderKind::GeminiNative => vec![
-            ma("gemini-2.5-pro",          "gemini-2.5-pro-preview-05-06"),
-            ma("gemini-2.5-flash",        "gemini-2.5-flash-preview-04-17"),
-            ma("gemini-2.0-flash",        "gemini-2.0-flash"),
-            ma("gemini-1.5-pro",          "gemini-1.5-pro-latest"),
-            ma("gemini-1.5-flash",        "gemini-1.5-flash-latest"),
+            ma("gemini-2.5-pro", "gemini-2.5-pro-preview-05-06"),
+            ma("gemini-2.5-flash", "gemini-2.5-flash-preview-04-17"),
+            ma("gemini-2.0-flash", "gemini-2.0-flash"),
+            ma("gemini-1.5-pro", "gemini-1.5-pro-latest"),
+            ma("gemini-1.5-flash", "gemini-1.5-flash-latest"),
         ],
     }
 }
 
 fn ma(alias: &str, upstream: &str) -> ModelAlias {
-    ModelAlias { alias: alias.to_string(), upstream_model: upstream.to_string() }
+    ModelAlias {
+        alias: alias.to_string(),
+        upstream_model: upstream.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -168,27 +174,42 @@ mod tests {
 
     #[test]
     fn model_claude() {
-        assert_eq!(detect_kind_from_model("claude-sonnet-4-5"), Some(ProviderKind::Anthropic));
+        assert_eq!(
+            detect_kind_from_model("claude-sonnet-4-5"),
+            Some(ProviderKind::Anthropic)
+        );
     }
 
     #[test]
     fn model_gpt() {
-        assert_eq!(detect_kind_from_model("gpt-4o-mini"), Some(ProviderKind::OpenaiChat));
+        assert_eq!(
+            detect_kind_from_model("gpt-4o-mini"),
+            Some(ProviderKind::OpenaiChat)
+        );
     }
 
     #[test]
     fn model_gemini() {
-        assert_eq!(detect_kind_from_model("gemini-2.5-pro"), Some(ProviderKind::GeminiNative));
+        assert_eq!(
+            detect_kind_from_model("gemini-2.5-pro"),
+            Some(ProviderKind::GeminiNative)
+        );
     }
 
     #[test]
     fn model_deepseek() {
-        assert_eq!(detect_kind_from_model("deepseek-chat"), Some(ProviderKind::OpenaiChat));
+        assert_eq!(
+            detect_kind_from_model("deepseek-chat"),
+            Some(ProviderKind::OpenaiChat)
+        );
     }
 
     #[test]
     fn model_qwen() {
-        assert_eq!(detect_kind_from_model("qwen2.5-72b-instruct"), Some(ProviderKind::OpenaiChat));
+        assert_eq!(
+            detect_kind_from_model("qwen2.5-72b-instruct"),
+            Some(ProviderKind::OpenaiChat)
+        );
     }
 
     #[test]

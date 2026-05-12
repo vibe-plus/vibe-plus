@@ -40,10 +40,7 @@ pub async fn fetch_wham_plan_snapshot(
     let mut req = http
         .get(WHAM_USAGE_URL)
         .timeout(std::time::Duration::from_secs(15))
-        .header(
-            "Authorization",
-            format!("Bearer {access_token}"),
-        )
+        .header("Authorization", format!("Bearer {access_token}"))
         .header("User-Agent", "codex-cli")
         .header("Accept", "application/json");
     if let Some(id) = chatgpt_account_id {
@@ -56,12 +53,19 @@ pub async fn fetch_wham_plan_snapshot(
         let preview: String = text.chars().take(280).collect();
         anyhow::bail!("wham/usage HTTP {status}: {preview}");
     }
-    let body: CodexUsageBody = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("wham/usage JSON: {e}: {}", text.chars().take(200).collect::<String>()))?;
+    let body: CodexUsageBody = serde_json::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "wham/usage JSON: {e}: {}",
+            text.chars().take(200).collect::<String>()
+        )
+    })?;
     Ok(plan_snapshot_from_wham_body(credential_id, &body))
 }
 
-fn plan_snapshot_from_wham_body(credential_id: &str, body: &CodexUsageBody) -> CredentialPlanSnapshot {
+fn plan_snapshot_from_wham_body(
+    credential_id: &str,
+    body: &CodexUsageBody,
+) -> CredentialPlanSnapshot {
     let now = chrono::Utc::now().timestamp();
     let mut p_pct: Option<f64> = None;
     let mut s_pct: Option<f64> = None;

@@ -3,7 +3,16 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+fn vibe_home_override() -> Option<PathBuf> {
+    std::env::var_os("VIBE_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
 pub fn home_dir() -> Result<PathBuf> {
+    if let Some(p) = vibe_home_override() {
+        return Ok(p);
+    }
     let dirs = directories::UserDirs::new().context("no home directory")?;
     Ok(dirs.home_dir().to_path_buf())
 }

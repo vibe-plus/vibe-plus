@@ -37,8 +37,14 @@ impl Adapter for AnthropicAdapter {
         let mut u = Usage::default();
         if let Ok(v) = v {
             if let Some(usage) = v.get("usage") {
-                u.input_tokens = usage.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                u.output_tokens = usage.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                u.input_tokens = usage
+                    .get("input_tokens")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0);
+                u.output_tokens = usage
+                    .get("output_tokens")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0);
                 u.cache_read_tokens = usage
                     .get("cache_read_input_tokens")
                     .and_then(|x| x.as_i64())
@@ -70,10 +76,16 @@ impl Adapter for AnthropicAdapter {
                         if let Some(n) = usage.get("input_tokens").and_then(|x| x.as_i64()) {
                             acc.input_tokens = n;
                         }
-                        if let Some(n) = usage.get("cache_read_input_tokens").and_then(|x| x.as_i64()) {
+                        if let Some(n) = usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|x| x.as_i64())
+                        {
                             acc.cache_read_tokens = n;
                         }
-                        if let Some(n) = usage.get("cache_creation_input_tokens").and_then(|x| x.as_i64()) {
+                        if let Some(n) = usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(|x| x.as_i64())
+                        {
                             acc.cache_creation_tokens = n;
                         }
                     }

@@ -23,6 +23,7 @@
 //!   - `usage.prompt_tokens`        → `usage.input_tokens`
 
 use bytes::Bytes;
+use serde_json::Map;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 
@@ -47,7 +48,11 @@ pub fn strip_ws_envelope(body: &[u8]) -> Bytes {
         return Bytes::copy_from_slice(body);
     };
     if let Some(obj) = v.as_object_mut() {
-        let t = obj.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let t = obj
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if t == "response.create" {
             // v0.129+ nested format: {"type":"response.create","response":{...}}
             if let Some(inner) = obj.remove("response") {
@@ -63,7 +68,220 @@ pub fn strip_ws_envelope(body: &[u8]) -> Bytes {
             obj.remove("type");
         }
     }
-    serde_json::to_vec(&v).map(Bytes::from).unwrap_or_else(|_| Bytes::copy_from_slice(body))
+    serde_json::to_vec(&v)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| Bytes::copy_from_slice(body))
+}
+
+/// Remove locally injected Vibe+ Codex status messages before forwarding a
+/// request upstream. Codex clients persist normal assistant messages in their
+/// transcript, so our client-visible route banner can otherwise be replayed as
+/// model input on later turns.
+pub fn strip_vibe_codex_status_messages(body: &[u8]) -> Bytes {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Bytes::copy_from_slice(body);
+    };
+    strip_vibe_codex_status_messages_from_value(&mut v);
+    serde_json::to_vec(&v)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| Bytes::copy_from_slice(body))
+}
+
+pub fn responses_input_ends_with_user_message(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    response_payload_value(&v)
+        .map(response_value_input_ends_with_user_message)
+        .unwrap_or(false)
+}
+
+pub fn rewrite_responses_model(body: &[u8], upstream_model: &str) -> anyhow::Result<Bytes> {
+    let mut v: serde_json::Value = serde_json::from_slice(body)?;
+    let Some(obj) = response_payload_object_mut(&mut v) else {
+        anyhow::bail!("responses body is not an object");
+    };
+    obj.insert(
+        "model".into(),
+        serde_json::Value::String(upstream_model.to_string()),
+    );
+    Ok(Bytes::from(serde_json::to_vec(&v)?))
+}
+
+pub fn ensure_responses_instructions_if_missing(body: &[u8], fallback: &str) -> Bytes {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(obj) = response_payload_object_mut(&mut v) else {
+        return Bytes::copy_from_slice(body);
+    };
+    let empty = match obj.get("instructions") {
+        None => true,
+        Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(s)) => s.trim().is_empty(),
+        Some(_) => false,
+    };
+    if empty {
+        obj.insert(
+            "instructions".into(),
+            serde_json::Value::String(fallback.to_string()),
+        );
+    }
+    serde_json::to_vec(&v)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| Bytes::copy_from_slice(body))
+}
+
+pub fn force_responses_stream_true(body: &[u8]) -> Bytes {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(obj) = response_payload_object_mut(&mut v) else {
+        return Bytes::copy_from_slice(body);
+    };
+    obj.insert("stream".into(), serde_json::Value::Bool(true));
+    serde_json::to_vec(&v)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| Bytes::copy_from_slice(body))
+}
+
+fn response_value_input_ends_with_user_message(v: &serde_json::Value) -> bool {
+    let Some(input) = v.get("input").and_then(|input| input.as_array()) else {
+        return false;
+    };
+    input
+        .iter()
+        .rev()
+        .find(|item| !is_vibe_codex_status_message(item))
+        .map(response_input_item_is_user_message)
+        .unwrap_or(false)
+}
+
+fn response_input_item_is_user_message(item: &serde_json::Value) -> bool {
+    let item_type = item.get("type").and_then(|t| t.as_str());
+    let role = item.get("role").and_then(|role| role.as_str());
+    matches!(item_type, None | Some("message")) && role == Some("user")
+}
+
+fn strip_vibe_codex_status_messages_from_value(v: &mut serde_json::Value) {
+    let Some(payload) = response_payload_value_mut(v) else {
+        return;
+    };
+    if let Some(input) = payload
+        .get_mut("input")
+        .and_then(|input| input.as_array_mut())
+    {
+        input.retain(|item| !is_vibe_codex_status_message(item));
+    }
+}
+
+fn response_payload_value(v: &serde_json::Value) -> Option<&serde_json::Value> {
+    if v.get("type").and_then(|t| t.as_str()) == Some("response.create") {
+        if let Some(response) = v.get("response").filter(|response| response.is_object()) {
+            return Some(response);
+        }
+    }
+    Some(v)
+}
+
+fn response_payload_value_mut(v: &mut serde_json::Value) -> Option<&mut serde_json::Value> {
+    if v.get("type").and_then(|t| t.as_str()) == Some("response.create")
+        && v.get("response")
+            .is_some_and(|response| response.is_object())
+    {
+        return v.get_mut("response");
+    }
+    Some(v)
+}
+
+fn response_payload_object_mut(
+    v: &mut serde_json::Value,
+) -> Option<&mut Map<String, serde_json::Value>> {
+    response_payload_value_mut(v)?.as_object_mut()
+}
+
+fn is_vibe_codex_status_message(item: &serde_json::Value) -> bool {
+    if item.get("type").and_then(|t| t.as_str()) != Some("message") {
+        return false;
+    }
+    if item.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+        return false;
+    }
+    if item
+        .get("id")
+        .and_then(|id| id.as_str())
+        .map(|id| id.starts_with("vibe_route_") || id.starts_with("vibe_summary_"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    item.get("content")
+        .and_then(|content| content.as_array())
+        .map(|parts| {
+            parts.iter().any(|part| {
+                matches!(
+                    part.get("type").and_then(|t| t.as_str()),
+                    Some("output_text" | "text")
+                ) && part
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .map(is_vibe_codex_status_text)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn is_vibe_codex_status_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    let light = trimmed.trim_matches('_').trim();
+    is_vibe_codex_formula_status_text(trimmed)
+        || is_vibe_codex_summary_plain_text(light)
+        || is_vibe_codex_summary_chips_text(light)
+        || is_vibe_codex_summary_chinese_text(light)
+}
+
+fn is_vibe_codex_formula_status_text(text: &str) -> bool {
+    let has_vibe_marker = text.contains("\\textsf{Vibe+}");
+    let has_summary_color = text.contains("\\color{#64748b}");
+    let has_metric = text.contains("\\textsf{TTFS}")
+        || text.contains("\\textsf{speed}")
+        || text.contains("\\mathrm{speed}")
+        || text.contains("\\textsf{in}")
+        || text.contains("\\mathrm{in}")
+        || text.contains("\\textsf{out}")
+        || text.contains("\\mathrm{out}")
+        || text.contains("\\textsf{cache}")
+        || text.contains("\\mathrm{cache}")
+        || text.contains("\\textsf{lat}")
+        || text.contains("\\mathrm{lat}");
+    (has_vibe_marker || has_summary_color) && has_metric
+}
+
+fn is_vibe_codex_summary_plain_text(text: &str) -> bool {
+    let body = text.strip_prefix('↯').map(str::trim).unwrap_or(text);
+    let keys = ["speed", "in", "out", "cache", "lat"];
+    keys.iter().any(|key| {
+        body.strip_prefix(key)
+            .and_then(|rest| rest.chars().next())
+            .map(|ch| ch.is_whitespace())
+            .unwrap_or(false)
+    }) && keys.iter().any(|key| body.contains(&format!("{key} ")))
+        && (body.contains(" · ") || body.contains(" | ") || body.contains("/s"))
+}
+
+fn is_vibe_codex_summary_chips_text(text: &str) -> bool {
+    let body = text.strip_prefix('↯').map(str::trim).unwrap_or(text);
+    ["speed", "in", "out", "cache", "lat"]
+        .iter()
+        .any(|key| body.contains(&format!("`{key} ")) || body.contains(&format!("{key} `")))
+}
+
+fn is_vibe_codex_summary_chinese_text(text: &str) -> bool {
+    text.starts_with("本轮：")
+        && ["速度 ", "输入 ", "输出 ", "缓存 ", "耗时 "]
+            .iter()
+            .any(|label| text.contains(label))
 }
 
 // ---------------------------------------------------------------------------
@@ -107,8 +325,13 @@ pub fn responses_to_chat(body: &[u8]) -> Bytes {
             if let Some(item_obj) = item.as_object() {
                 let is_function_call =
                     item_obj.get("type").and_then(|t| t.as_str()) == Some("function_call");
-                if is_function_call {
-                    let call_id = item_obj.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                let is_custom_tool_call =
+                    item_obj.get("type").and_then(|t| t.as_str()) == Some("custom_tool_call");
+                if is_function_call || is_custom_tool_call {
+                    let call_id = item_obj
+                        .get("call_id")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
                     if !call_id.is_empty() {
                         declared_tool_calls.insert(call_id.to_string());
                     }
@@ -120,35 +343,11 @@ pub fn responses_to_chat(body: &[u8]) -> Bytes {
             if let Some(item_obj) = item.as_object() {
                 match item_obj.get("type").and_then(|t| t.as_str()) {
                     Some("function_call") => {
-                        let call_id = item_obj
-                            .get("call_id")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = item_obj
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("unknown_tool")
-                            .to_string();
-                        let arguments = item_obj
-                            .get("arguments")
-                            .and_then(|a| a.as_str())
-                            .unwrap_or("{}")
-                            .to_string();
-                        if !call_id.is_empty() {
-                            messages.push(serde_json::json!({
-                                "role": "assistant",
-                                "content": "",
-                                "tool_calls": [{
-                                    "id": call_id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": name,
-                                        "arguments": arguments
-                                    }
-                                }]
-                            }));
-                        }
+                        push_assistant_tool_call_message(item_obj, &mut messages, None);
+                        continue;
+                    }
+                    Some("custom_tool_call") => {
+                        push_assistant_tool_call_message(item_obj, &mut messages, Some("input"));
                         continue;
                     }
                     Some("function_call_output") => {
@@ -186,10 +385,13 @@ pub fn responses_to_chat(body: &[u8]) -> Bytes {
                     _ => {}
                 }
 
-            // Each item is `{"role":"user"|"assistant"|"developer", "content":"..."}`.
-            // Responses API can also have structured content arrays; flatten those.
-            // "developer" is a newer OpenAI system-like role — map to "system" for compatibility.
-                let raw_role = item_obj.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+                // Each item is `{"role":"user"|"assistant"|"developer", "content":"..."}`.
+                // Responses API can also have structured content arrays; flatten those.
+                // "developer" is a newer OpenAI system-like role — map to "system" for compatibility.
+                let raw_role = item_obj
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("user");
                 let role = match raw_role {
                     "developer" => "system",
                     other => other,
@@ -235,8 +437,17 @@ pub fn responses_to_chat(body: &[u8]) -> Bytes {
 
     // Pass-through scalar fields
     for key in &[
-        "temperature", "top_p", "stream", "stop", "n", "presence_penalty",
-        "frequency_penalty", "logit_bias", "user", "seed", "response_format",
+        "temperature",
+        "top_p",
+        "stream",
+        "stop",
+        "n",
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "user",
+        "seed",
+        "response_format",
     ] {
         if let Some(v) = obj.get(*key) {
             chat.insert(key.to_string(), v.clone());
@@ -274,6 +485,27 @@ pub fn responses_to_chat(body: &[u8]) -> Bytes {
                             }))
                         }
                     }
+                    "custom" => {
+                        let name = t_obj.get("name").and_then(|v| v.as_str())?;
+                        if name != "apply_patch" {
+                            return None;
+                        }
+                        Some(serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": "apply_patch",
+                                "description": t_obj.get("description").cloned().unwrap_or_else(|| serde_json::Value::String("Apply a patch to files.".into())),
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "patch": { "type": "string" }
+                                    },
+                                    "required": ["patch"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        }))
+                    }
                     _ => None,
                 }
             })
@@ -308,6 +540,61 @@ fn wire_function_output_as_tool_content(output: Option<&serde_json::Value>) -> S
     }
 }
 
+fn custom_tool_input_from_arguments(arguments: &str) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(arguments).ok();
+    if let Some(text) = parsed
+        .as_ref()
+        .and_then(|v| v.get("patch"))
+        .and_then(|v| v.as_str())
+    {
+        return text.to_string();
+    }
+    arguments.to_string()
+}
+
+fn push_assistant_tool_call_message(
+    item_obj: &serde_json::Map<String, serde_json::Value>,
+    messages: &mut Vec<serde_json::Value>,
+    custom_input_field: Option<&str>,
+) {
+    let call_id = item_obj
+        .get("call_id")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name = item_obj
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("unknown_tool")
+        .to_string();
+    let arguments = match custom_input_field {
+        Some(field) => item_obj
+            .get(field)
+            .and_then(|a| a.as_str())
+            .map(|s| serde_json::json!({ "patch": s }).to_string())
+            .unwrap_or_else(|| "{}".to_string()),
+        None => item_obj
+            .get("arguments")
+            .and_then(|a| a.as_str())
+            .unwrap_or("{}")
+            .to_string(),
+    };
+    if !call_id.is_empty() {
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments
+                }
+            }]
+        }));
+    }
+}
+
 #[derive(Default, Clone)]
 struct StreamingToolFragment {
     id: Option<String>,
@@ -320,9 +607,14 @@ struct StreamingToolFragment {
 pub struct ChatCompletionsC2rAccumulator {
     pub text: String,
     tool_calls_by_index: BTreeMap<u32, StreamingToolFragment>,
+    response_created: bool,
+    message_started: bool,
 }
 
-fn merge_tool_call_json_objects(into: &mut BTreeMap<u32, StreamingToolFragment>, parts: &[serde_json::Value]) {
+fn merge_tool_call_json_objects(
+    into: &mut BTreeMap<u32, StreamingToolFragment>,
+    parts: &[serde_json::Value],
+) {
     for part in parts {
         let index = part
             .get("index")
@@ -349,6 +641,55 @@ fn merge_tool_call_json_objects(into: &mut BTreeMap<u32, StreamingToolFragment>,
 }
 
 impl ChatCompletionsC2rAccumulator {
+    fn ensure_response_created(&mut self, out: &mut Vec<String>, session_id: &str) {
+        if self.response_created {
+            return;
+        }
+        if let Ok(s) = serde_json::to_string(&serde_json::json!({
+            "type": "response.created",
+            "response": {
+                "id": session_id,
+                "object": "response",
+                "status": "in_progress",
+                "output": []
+            }
+        })) {
+            out.push(s);
+            self.response_created = true;
+        }
+    }
+
+    fn ensure_message_started(&mut self, out: &mut Vec<String>, session_id: &str, item_id: &str) {
+        if self.message_started {
+            return;
+        }
+        self.ensure_response_created(out, session_id);
+        if let Ok(s) = serde_json::to_string(&serde_json::json!({
+            "type": "response.output_item.added",
+            "response_id": session_id,
+            "output_index": 0,
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": []
+            }
+        })) {
+            out.push(s);
+        }
+        if let Ok(s) = serde_json::to_string(&serde_json::json!({
+            "type": "response.content_part.added",
+            "response_id": session_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""}
+        })) {
+            out.push(s);
+        }
+        self.message_started = true;
+    }
+
     fn merge_delta_tool_calls(&mut self, v: &serde_json::Value) {
         if let Some(arr) = v
             .pointer("/choices/0/delta/tool_calls")
@@ -397,16 +738,26 @@ impl ChatCompletionsC2rAccumulator {
             } else {
                 frag.arguments.clone()
             };
-            if let Ok(s) = serde_json::to_string(&serde_json::json!({
-                "type": "response.output_item.done",
-                "response_id": session_id,
-                "output_index": output_index,
-                "item": {
+            let item = if name == "apply_patch" {
+                serde_json::json!({
+                    "type": "custom_tool_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "input": custom_tool_input_from_arguments(&arguments),
+                })
+            } else {
+                serde_json::json!({
                     "type": "function_call",
                     "call_id": call_id,
                     "name": name,
                     "arguments": arguments,
-                },
+                })
+            };
+            if let Ok(s) = serde_json::to_string(&serde_json::json!({
+                "type": "response.output_item.done",
+                "response_id": session_id,
+                "output_index": output_index,
+                "item": item,
             })) {
                 out.push(s);
                 output_index = output_index.saturating_add(1);
@@ -447,49 +798,12 @@ pub fn chat_event_to_responses_events(
 
     let mut out = Vec::new();
 
-    // Role delta (first chunk from assistant) → emit lifecycle events
-    if let Some(role) = v
-        .pointer("/choices/0/delta/role")
-        .and_then(|v| v.as_str())
-    {
+    // Role delta (first chunk from assistant) → only mark response as created.
+    // We intentionally delay the empty assistant message shell until we see
+    // actual text, otherwise pure tool-call turns render as blank blocks.
+    if let Some(role) = v.pointer("/choices/0/delta/role").and_then(|v| v.as_str()) {
         if role == "assistant" {
-            // response.created
-            if let Ok(s) = serde_json::to_string(&serde_json::json!({
-                "type": "response.created",
-                "response": {
-                    "id": session_id,
-                    "object": "response",
-                    "status": "in_progress",
-                    "output": []
-                }
-            })) {
-                out.push(s);
-            }
-            // response.output_item.added
-            if let Ok(s) = serde_json::to_string(&serde_json::json!({
-                "type": "response.output_item.added",
-                "response_id": session_id,
-                "output_index": 0,
-                "item": {
-                    "id": item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": []
-                }
-            })) {
-                out.push(s);
-            }
-            // response.content_part.added
-            if let Ok(s) = serde_json::to_string(&serde_json::json!({
-                "type": "response.content_part.added",
-                "response_id": session_id,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": ""}
-            })) {
-                out.push(s);
-            }
+            accumulator.ensure_response_created(&mut out, session_id);
         }
     }
 
@@ -499,6 +813,7 @@ pub fn chat_event_to_responses_events(
         .and_then(|v| v.as_str())
     {
         if !content.is_empty() {
+            accumulator.ensure_message_started(&mut out, session_id, item_id);
             accumulator.text.push_str(content);
             if let Ok(s) = serde_json::to_string(&serde_json::json!({
                 "type": "response.output_text.delta",
@@ -527,11 +842,13 @@ pub fn chat_event_to_responses_events(
                 _ => "incomplete",
             };
 
+            accumulator.ensure_response_created(&mut out, session_id);
             let full_text = accumulator.text.clone();
             let has_assistant_text = !full_text.trim().is_empty();
             let emit_assistant_message = reason != "tool_calls" || has_assistant_text;
 
             if emit_assistant_message {
+                accumulator.ensure_message_started(&mut out, session_id, item_id);
                 // response.output_text.done — finalize the streamed text
                 if let Ok(s) = serde_json::to_string(&serde_json::json!({
                     "type": "response.output_text.done",
@@ -670,10 +987,7 @@ pub fn chat_completion_non_stream_to_ws_events(
 
     let role_json = serde_json::json!({"choices":[{"delta":{"role":"assistant"}}]}).to_string();
     out.extend(chat_event_to_responses_events(
-        &role_json,
-        session_id,
-        item_id,
-        &mut accum,
+        &role_json, session_id, item_id, &mut accum,
     ));
 
     let content = assistant_message_content_from_completion(&v);
@@ -777,12 +1091,21 @@ pub fn chat_body_to_responses(body: &[u8], session_id: &str, item_id: &str) -> B
         } else {
             frag.arguments.clone()
         };
-        output.push(serde_json::json!({
-            "type": "function_call",
-            "call_id": call_id,
-            "name": name,
-            "arguments": arguments,
-        }));
+        if name == "apply_patch" {
+            output.push(serde_json::json!({
+                "type": "custom_tool_call",
+                "call_id": call_id,
+                "name": name,
+                "input": custom_tool_input_from_arguments(&arguments),
+            }));
+        } else {
+            output.push(serde_json::json!({
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
+            }));
+        }
     }
 
     let usage = v.get("usage");
@@ -821,6 +1144,34 @@ pub fn chat_body_to_responses(body: &[u8], session_id: &str, item_id: &str) -> B
         .unwrap_or_else(|_| Bytes::copy_from_slice(body))
 }
 
+/// Prepend a completed assistant message to a non-streaming Responses JSON body.
+pub fn prepend_response_message(body: &[u8], item_id: &str, text: &str) -> Bytes {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(output) = obj.get_mut("output").and_then(|x| x.as_array_mut()) else {
+        return Bytes::copy_from_slice(body);
+    };
+    output.insert(
+        0,
+        serde_json::json!({
+            "id": item_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": text
+            }]
+        }),
+    );
+    serde_json::to_vec(&v)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| Bytes::copy_from_slice(body))
+}
+
 // ---------------------------------------------------------------------------
 // Codex WebSocket: terminal error frames
 // ---------------------------------------------------------------------------
@@ -835,7 +1186,10 @@ pub fn upstream_sse_data_is_terminal(data: &str) -> bool {
         Some(t) if t == "response.completed" || t == "response.done" => return true,
         _ => {}
     }
-    if let Some(fr) = v.pointer("/choices/0/finish_reason").and_then(|x| x.as_str()) {
+    if let Some(fr) = v
+        .pointer("/choices/0/finish_reason")
+        .and_then(|x| x.as_str())
+    {
         return !fr.is_empty() && fr != "null";
     }
     false
@@ -910,7 +1264,11 @@ pub fn codex_response_failed_event(response_id: &str, http_status: u16, body: &s
 /// **不要**把这类错误映射成 `server_is_overloaded`：`codex-rs` 会把它显示为
 /// 「Selected model is at capacity」，与真实含义不符。应使用未被 `is_server_overloaded_error`
 /// 识别的 `code`，让客户端走 `Retryable` 分支并展示 `message`。
-pub fn codex_response_proxy_fault_event(response_id: &str, wire_code: &str, message: &str) -> String {
+pub fn codex_response_proxy_fault_event(
+    response_id: &str,
+    wire_code: &str,
+    message: &str,
+) -> String {
     serde_json::json!({
         "type": "response.failed",
         "response": {
@@ -951,6 +1309,189 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["model"], "gpt-4o");
         assert!(v.get("type").is_none());
+    }
+
+    #[test]
+    fn strip_vibe_codex_status_messages_removes_only_local_banner() {
+        let input = serde_json::json!({
+            "model": "gpt-5.5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "$$\\n\\scriptsize\\n\\color{#38bdf8}{\\textsf{Vibe+}\\,\\mid\\,\\textsf{TTFS}=10\\textsf{ms}}\\n$$"
+                    }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "real assistant output"}]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}]
+                }
+            ]
+        });
+        let out = strip_vibe_codex_status_messages(&serde_json::to_vec(&input).unwrap());
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let items = v["input"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["content"][0]["text"], "real assistant output");
+        assert_eq!(items[1]["role"], "user");
+    }
+
+    #[test]
+    fn responses_input_ends_with_user_message_only_for_user_tail() {
+        let user_tail = serde_json::json!({
+            "input": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "old"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}]}
+            ]
+        });
+        assert!(responses_input_ends_with_user_message(
+            &serde_json::to_vec(&user_tail).unwrap()
+        ));
+
+        let tool_tail = serde_json::json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "run"}]},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+            ]
+        });
+        assert!(!responses_input_ends_with_user_message(
+            &serde_json::to_vec(&tool_tail).unwrap()
+        ));
+
+        let status_then_tool_tail = serde_json::json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "run"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "$$\\n\\color{#38bdf8}{\\textsf{Vibe+}\\,\\textsf{TTFS}=1\\textsf{ms}}\\n$$"}]},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+            ]
+        });
+        assert!(!responses_input_ends_with_user_message(
+            &serde_json::to_vec(&status_then_tool_tail).unwrap()
+        ));
+    }
+
+    #[test]
+    fn responses_input_tail_under_ws_envelope_suppresses_tool_continuation_status() {
+        let input = serde_json::json!({
+            "type": "response.create",
+            "previous_response_id": "resp_1",
+            "input": [
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+            ]
+        });
+        assert!(!responses_input_ends_with_user_message(
+            &serde_json::to_vec(&input).unwrap()
+        ));
+    }
+
+    #[test]
+    fn rewrites_model_inside_ws_response_create_without_stripping_envelope() {
+        let input = serde_json::json!({
+            "type": "response.create",
+            "previous_response_id": "resp_1",
+            "model": "gpt-5.5",
+            "input": []
+        });
+        let out = rewrite_responses_model(&serde_json::to_vec(&input).unwrap(), "upstream-model")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["type"], "response.create");
+        assert_eq!(v["previous_response_id"], "resp_1");
+        assert_eq!(v["model"], "upstream-model");
+    }
+
+    #[test]
+    fn strips_vibe_status_inside_nested_ws_response_object() {
+        let input = serde_json::json!({
+            "type": "response.create",
+            "response": {
+                "model": "gpt-5.5",
+                "input": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "$$\\n\\color{#38bdf8}{\\textsf{Vibe+}\\,\\textsf{TTFS}=1\\textsf{ms}}\\n$$"}]},
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}]}
+                ]
+            }
+        });
+        let out = strip_vibe_codex_status_messages(&serde_json::to_vec(&input).unwrap());
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let items = v["response"]["input"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["role"], "user");
+    }
+
+    #[test]
+    fn strip_vibe_codex_status_messages_removes_summary_tail() {
+        let input = serde_json::json!({
+            "model": "gpt-5.5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "↯ speed 31.8/s · in 42.1k"}]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "real output"}]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "next"}]
+                }
+            ]
+        });
+        let out = strip_vibe_codex_status_messages(&serde_json::to_vec(&input).unwrap());
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let items = v["input"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["content"][0]["text"], "real output");
+        assert_eq!(items[1]["role"], "user");
+    }
+
+    #[test]
+    fn strip_vibe_codex_status_messages_removes_all_summary_presets_without_id() {
+        let summary_texts = [
+            "$$\n\\scriptsize\n\\color{#64748b}{\\textsf{Vibe+}\\,\\mid\\,\\textsf{speed}=\\textsf{31.8/s}}\n$$",
+            "$$\n\\small\n\\color{#64748b}{\\mathrm{speed}=\\textsf{31.8/s}\\quad\\mathrm{in}=\\textsf{42.1k}}\n$$",
+            "↯ speed 31.8/s · in 42.1k",
+            "_↯ speed `31.8/s` · in `42.1k`_",
+            "`speed 31.8/s` · `in 42.1k`",
+            "_speed 31.8/s · in 42.1k_",
+            "_本轮：速度 31.8/s · 输入 42.1k_",
+            "speed 31.8/s | in 42.1k",
+        ];
+
+        for text in summary_texts {
+            let input = serde_json::json!({
+                "model": "gpt-5.5",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}]
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "next"}]
+                    }
+                ]
+            });
+            let out = strip_vibe_codex_status_messages(&serde_json::to_vec(&input).unwrap());
+            let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            let items = v["input"].as_array().unwrap();
+            assert_eq!(items.len(), 1, "failed to strip {text:?}");
+            assert_eq!(items[0]["role"], "user");
+        }
     }
 
     #[test]
@@ -995,18 +1536,21 @@ mod tests {
         let event = r#"{"id":"c1","choices":[{"delta":{"content":"hello"},"index":0,"finish_reason":null}]}"#;
         let mut acc = ChatCompletionsC2rAccumulator::default();
         let events = chat_event_to_responses_events(event, "resp-1", "msg-1", &mut acc);
-        assert_eq!(events.len(), 1);
-        let v: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+        let delta_evt = events
+            .iter()
+            .find(|e| e.contains("\"type\":\"response.output_text.delta\""))
+            .expect("delta event");
+        let v: serde_json::Value = serde_json::from_str(delta_evt).unwrap();
         assert_eq!(v["type"], "response.output_text.delta");
         assert_eq!(v["delta"], "hello");
     }
 
     #[test]
     fn chat_event_to_responses_role() {
-        let event = r#"{"id":"c1","choices":[{"delta":{"role":"assistant","content":""},"index":0}]}"#;
+        let event =
+            r#"{"id":"c1","choices":[{"delta":{"role":"assistant","content":""},"index":0}]}"#;
         let mut acc = ChatCompletionsC2rAccumulator::default();
         let events = chat_event_to_responses_events(event, "resp-1", "msg-1", &mut acc);
-        assert!(events.len() >= 2);
         let types: Vec<String> = events
             .iter()
             .filter_map(|e| {
@@ -1016,7 +1560,16 @@ mod tests {
             })
             .collect();
         let type_set: std::collections::HashSet<_> = types.iter().map(|s| s.as_str()).collect();
-        assert!(type_set.contains("response.created"), "missing response.created, got {:?}", types);
+        assert!(
+            type_set.contains("response.created"),
+            "missing response.created, got {:?}",
+            types
+        );
+        assert!(
+            !type_set.contains("response.output_item.added"),
+            "unexpected empty message shell: {:?}",
+            types
+        );
     }
 
     #[test]
@@ -1025,7 +1578,10 @@ mod tests {
         let mut acc = ChatCompletionsC2rAccumulator::default();
         let events = chat_event_to_responses_events(event, "resp-1", "msg-1", &mut acc);
         assert!(!events.is_empty());
-        let done = events.iter().find(|e| e.contains("response.completed")).unwrap();
+        let done = events
+            .iter()
+            .find(|e| e.contains("response.completed"))
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(done).unwrap();
         assert_eq!(v["type"], "response.completed");
         assert_eq!(v["response"]["id"], "resp-1");
@@ -1044,14 +1600,42 @@ mod tests {
         let _ = chat_event_to_responses_events(tool_delta, "resp-9", "msg-9", &mut acc);
         let events = chat_event_to_responses_events(end, "resp-9", "msg-9", &mut acc);
 
-        let fn_evt = events.iter().find(|e| e.contains("\"type\":\"function_call\"")).expect("function_call");
+        let fn_evt = events
+            .iter()
+            .find(|e| e.contains("\"type\":\"function_call\""))
+            .expect("function_call");
         let v: serde_json::Value = serde_json::from_str(fn_evt).unwrap();
         assert_eq!(v["item"]["name"], "read_file");
         assert_eq!(v["item"]["call_id"], "call_1");
 
-        let done = events.iter().find(|e| e.contains("response.completed")).expect("completed");
+        let done = events
+            .iter()
+            .find(|e| e.contains("response.completed"))
+            .expect("completed");
         let d: serde_json::Value = serde_json::from_str(done).unwrap();
         assert_eq!(d["response"]["end_turn"], false);
+    }
+
+    #[test]
+    fn chat_event_finish_apply_patch_emits_custom_tool_call_without_empty_message() {
+        let start = r#"{"choices":[{"delta":{"role":"assistant","content":""},"index":0}]}"#;
+        let tool_delta = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":"{\"patch\":\"*** Begin Patch\\n*** End Patch\"}"}}]},"index":0}]}"#;
+        let end = r#"{"choices":[{"finish_reason":"tool_calls","delta":{}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}"#;
+        let mut acc = ChatCompletionsC2rAccumulator::default();
+        let _ = chat_event_to_responses_events(start, "resp-patch", "msg-patch", &mut acc);
+        let _ = chat_event_to_responses_events(tool_delta, "resp-patch", "msg-patch", &mut acc);
+        let events = chat_event_to_responses_events(end, "resp-patch", "msg-patch", &mut acc);
+
+        assert!(!events
+            .iter()
+            .any(|e| e.contains("\"response.output_item.added\"")));
+        let tool_evt = events
+            .iter()
+            .find(|e| e.contains("\"type\":\"custom_tool_call\""))
+            .expect("custom_tool_call");
+        let v: serde_json::Value = serde_json::from_str(tool_evt).unwrap();
+        assert_eq!(v["item"]["name"], "apply_patch");
+        assert_eq!(v["item"]["input"], "*** Begin Patch\n*** End Patch");
     }
 
     #[test]
@@ -1089,6 +1673,64 @@ mod tests {
     }
 
     #[test]
+    fn responses_to_chat_maps_custom_apply_patch_to_function_tool_and_call() {
+        let input = serde_json::json!({
+            "model": "m",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply patch"
+                }
+            ],
+            "input": [
+                {"type": "custom_tool_call", "call_id": "c_patch", "name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"},
+                {"type": "custom_tool_call_output", "call_id": "c_patch", "output": "ok"}
+            ]
+        });
+        let out = responses_to_chat(&serde_json::to_vec(&input).unwrap());
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "apply_patch");
+        let msgs = v["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["tool_calls"][0]["function"]["name"], "apply_patch");
+        assert_eq!(
+            msgs[0]["tool_calls"][0]["function"]["arguments"],
+            "{\"patch\":\"*** Begin Patch\\n*** End Patch\"}"
+        );
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "c_patch");
+    }
+
+    #[test]
+    fn chat_body_to_responses_maps_apply_patch_to_custom_tool_call() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_patch",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": "{\"patch\":\"*** Begin Patch\\n*** End Patch\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 2}
+        });
+        let out = chat_body_to_responses(&serde_json::to_vec(&body).unwrap(), "resp-1", "msg-1");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["output"][0]["type"], "custom_tool_call");
+        assert_eq!(v["output"][0]["name"], "apply_patch");
+        assert_eq!(v["output"][0]["input"], "*** Begin Patch\n*** End Patch");
+    }
+
+    #[test]
     fn chat_body_to_responses_basic() {
         let body = serde_json::json!({
             "id": "chatcmpl-1",
@@ -1104,15 +1746,45 @@ mod tests {
     }
 
     #[test]
+    fn prepend_response_message_inserts_status_first() {
+        let body = serde_json::json!({
+            "id": "resp-1",
+            "object": "response",
+            "output": [{
+                "id": "msg-1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "real"}]
+            }]
+        });
+        let out = prepend_response_message(
+            &serde_json::to_vec(&body).unwrap(),
+            "vibe-route",
+            "$$\\small Vibe+$$",
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let output = v["output"].as_array().unwrap();
+        assert_eq!(output[0]["id"], "vibe-route");
+        assert_eq!(output[0]["content"][0]["text"], "$$\\small Vibe+$$");
+        assert_eq!(output[1]["id"], "msg-1");
+    }
+
+    #[test]
     fn chat_completion_non_stream_to_ws_events_emits_completed() {
         let body = serde_json::json!({
             "choices": [{"message": {"role": "assistant", "content": "Hi!"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 8, "completion_tokens": 2}
         });
-        let frames =
-            chat_completion_non_stream_to_ws_events(&serde_json::to_vec(&body).unwrap(), "resp-1", "msg-1")
-                .unwrap();
-        let completed = frames.iter().find(|e| e.contains("response.completed")).expect("completed");
+        let frames = chat_completion_non_stream_to_ws_events(
+            &serde_json::to_vec(&body).unwrap(),
+            "resp-1",
+            "msg-1",
+        )
+        .unwrap();
+        let completed = frames
+            .iter()
+            .find(|e| e.contains("response.completed"))
+            .expect("completed");
         let v: serde_json::Value = serde_json::from_str(completed).unwrap();
         assert_eq!(v["type"], "response.completed");
         assert_eq!(v["response"]["id"], "resp-1");
@@ -1132,18 +1804,19 @@ mod tests {
         assert_eq!(v["type"], "response.failed");
         assert_eq!(v["response"]["id"], "rid-1");
         assert_eq!(v["response"]["error"]["code"], "server_is_overloaded");
-        assert!(
-            v["response"]["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("HTTP 503")
-        );
+        assert!(v["response"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("HTTP 503"));
     }
 
     #[test]
     fn codex_response_proxy_fault_avoids_overloaded_code() {
-        let s =
-            codex_response_proxy_fault_event("rid-x", "upstream_stream_truncated", "SSE ended early");
+        let s = codex_response_proxy_fault_event(
+            "rid-x",
+            "upstream_stream_truncated",
+            "SSE ended early",
+        );
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["response"]["error"]["code"], "upstream_stream_truncated");
         assert_eq!(v["response"]["error"]["message"], "SSE ended early");
