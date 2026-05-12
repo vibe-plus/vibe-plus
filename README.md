@@ -217,3 +217,5 @@ the platform binary packages under `@vibe-plus/*`, then publishes the
 
 Before the first npm release, make sure the npm account behind `NPM_TOKEN` can
 publish public packages under the `@vibe-plus` scope.
+
+See [docs/release.md](docs/release.md) for the full release and update runbook.
