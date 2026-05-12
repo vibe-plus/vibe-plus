@@ -45,6 +45,14 @@ export type RequestLog = {
    */
   dedupe_key: string | null;
   /**
+   * Client-facing transport used by Vibe: `ws`, `http-sse`, `http`, etc.
+   */
+  client_transport: string | null;
+  /**
+   * Sanitized inbound request headers from the client.
+   */
+  request_headers: string | null;
+  /**
    * Inbound HTTP body（网关视角，UTF-8 有损全量）。
    */
   request_body: string | null;
@@ -56,4 +64,32 @@ export type RequestLog = {
    * Chat→Responses 侧：发给客户端的帧（如 Codex WS），与 `response_body` 里上游原始 Chat SSE 对照。
    */
   client_response_body: string | null;
+  stream_kind: string | null;
+  stream_terminal_seen: boolean | null;
+  stream_end_reason: string | null;
+  stream_error_detail: string | null;
+  upstream_first_byte_ms: bigint | null;
+  client_first_write_ms: bigint | null;
+  last_upstream_event_ms: bigint | null;
+  last_client_write_ms: bigint | null;
+  upstream_chunk_count: bigint;
+  upstream_bytes: bigint;
+  client_chunk_count: bigint;
+  client_bytes: bigint;
+  sse_event_count: bigint;
+  sse_data_count: bigint;
+  sse_comment_count: bigint;
+  sse_keepalive_count: bigint;
+  sse_done_count: bigint;
+  parse_error_count: bigint;
+  first_keepalive_ms: bigint | null;
+  last_keepalive_ms: bigint | null;
+  max_gap_between_upstream_events_ms: bigint | null;
+  max_gap_between_data_events_ms: bigint | null;
+  keepalive_after_last_data_count: bigint;
+  last_data_event_ms: bigint | null;
+  bridge_mode: string | null;
+  status_injected: boolean;
+  terminal_injected: boolean;
+  upstream_terminal_type: string | null;
 };

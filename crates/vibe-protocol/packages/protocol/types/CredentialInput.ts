@@ -19,4 +19,10 @@ export type CredentialInput = {
    */
   oauth_refresh_token: string | null;
   oauth_expires_at: bigint | null;
+  /**
+   * From Codex `id_token` at import; persisted and merged into Credential `oauth_account_*` for UI.
+   */
+  oauth_cached_email: string | null;
+  oauth_cached_subject: string | null;
+  oauth_cached_plan_slug: string | null;
 };

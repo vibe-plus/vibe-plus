@@ -7,4 +7,9 @@ export type Status = {
   providers_total: number;
   providers_enabled: number;
   requests_last_hour: bigint;
+  codex_ws_active: number;
+  codex_ws_total: number;
+  codex_ws_requests_total: number;
+  codex_http_responses_total: number;
+  codex_last_transport: string | null;
 };

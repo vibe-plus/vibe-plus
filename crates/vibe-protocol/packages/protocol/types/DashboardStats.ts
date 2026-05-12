@@ -21,6 +21,14 @@ export type DashboardStats = {
   success_rate_in_window: number;
   input_tokens_in_window: bigint;
   output_tokens_in_window: bigint;
+  /**
+   * End-to-end output speed: sum(output_tokens) / sum(latency_ms) for 2xx with latency_ms > 0.
+   */
+  output_tokens_per_sec_in_window: number;
+  /**
+   * Decode-phase speed: sum(output_tokens) / sum(latency_ms − first_token_ms) for 2xx rows with valid decode window.
+   */
+  decode_output_tokens_per_sec_in_window: number;
   requests_last_hour: bigint;
   requests_last_24h: bigint;
   success_rate_last_hour: number;

@@ -70,6 +70,17 @@ pub struct Route {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/RouteInput.ts")]
+pub struct RouteInput {
+    pub name: String,
+    pub match_model: String,
+    pub target_provider_id: Option<String>,
+    pub target_model: Option<String>,
+    pub tier: RouteTier,
+    pub priority: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/RequestLog.ts")]
 pub struct RequestLog {
     pub id: String,
@@ -108,6 +119,12 @@ pub struct RequestLog {
     /// Optional dedupe key (`x-request-id` + route).
     #[serde(default)]
     pub dedupe_key: Option<String>,
+    /// Client-facing transport used by Vibe: `ws`, `http-sse`, `http`, etc.
+    #[serde(default)]
+    pub client_transport: Option<String>,
+    /// Sanitized inbound request headers from the client.
+    #[serde(default)]
+    pub request_headers: Option<String>,
     /// Inbound HTTP body（网关视角，UTF-8 有损全量）。
     #[serde(default)]
     pub request_body: Option<String>,
@@ -117,6 +134,62 @@ pub struct RequestLog {
     /// Chat→Responses 侧：发给客户端的帧（如 Codex WS），与 `response_body` 里上游原始 Chat SSE 对照。
     #[serde(default)]
     pub client_response_body: Option<String>,
+    #[serde(default)]
+    pub stream_kind: Option<String>,
+    #[serde(default)]
+    pub stream_terminal_seen: Option<bool>,
+    #[serde(default)]
+    pub stream_end_reason: Option<String>,
+    #[serde(default)]
+    pub stream_error_detail: Option<String>,
+    #[serde(default)]
+    pub upstream_first_byte_ms: Option<i64>,
+    #[serde(default)]
+    pub client_first_write_ms: Option<i64>,
+    #[serde(default)]
+    pub last_upstream_event_ms: Option<i64>,
+    #[serde(default)]
+    pub last_client_write_ms: Option<i64>,
+    #[serde(default)]
+    pub upstream_chunk_count: i64,
+    #[serde(default)]
+    pub upstream_bytes: i64,
+    #[serde(default)]
+    pub client_chunk_count: i64,
+    #[serde(default)]
+    pub client_bytes: i64,
+    #[serde(default)]
+    pub sse_event_count: i64,
+    #[serde(default)]
+    pub sse_data_count: i64,
+    #[serde(default)]
+    pub sse_comment_count: i64,
+    #[serde(default)]
+    pub sse_keepalive_count: i64,
+    #[serde(default)]
+    pub sse_done_count: i64,
+    #[serde(default)]
+    pub parse_error_count: i64,
+    #[serde(default)]
+    pub first_keepalive_ms: Option<i64>,
+    #[serde(default)]
+    pub last_keepalive_ms: Option<i64>,
+    #[serde(default)]
+    pub max_gap_between_upstream_events_ms: Option<i64>,
+    #[serde(default)]
+    pub max_gap_between_data_events_ms: Option<i64>,
+    #[serde(default)]
+    pub keepalive_after_last_data_count: i64,
+    #[serde(default)]
+    pub last_data_event_ms: Option<i64>,
+    #[serde(default)]
+    pub bridge_mode: Option<String>,
+    #[serde(default)]
+    pub status_injected: bool,
+    #[serde(default)]
+    pub terminal_injected: bool,
+    #[serde(default)]
+    pub upstream_terminal_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -138,6 +211,16 @@ pub struct Status {
     pub providers_total: usize,
     pub providers_enabled: usize,
     pub requests_last_hour: i64,
+    #[serde(default)]
+    pub codex_ws_active: usize,
+    #[serde(default)]
+    pub codex_ws_total: usize,
+    #[serde(default)]
+    pub codex_ws_requests_total: usize,
+    #[serde(default)]
+    pub codex_http_responses_total: usize,
+    #[serde(default)]
+    pub codex_last_transport: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -220,7 +303,10 @@ pub struct HealthSummary {
 
 /// Rolling-window gateway stats + cumulative circuit/health for one provider.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/ProviderHealthSummary.ts")]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/ProviderHealthSummary.ts"
+)]
 pub struct ProviderHealthSummary {
     pub cumulative: ProviderHealth,
     pub rolling_hours: i64,
@@ -229,7 +315,10 @@ pub struct ProviderHealthSummary {
 
 /// Runtime auth/key-pool status for one credential in a provider pool.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/CredentialPoolStatus.ts")]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CredentialPoolStatus.ts"
+)]
 pub struct CredentialPoolStatus {
     pub credential_id: String,
     pub label: String,
@@ -256,7 +345,10 @@ pub struct CredentialPoolStatus {
 
 /// Unified auth/key-pool observability view for one provider.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/ProviderAuthPoolSummary.ts")]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/ProviderAuthPoolSummary.ts"
+)]
 pub struct ProviderAuthPoolSummary {
     pub provider_id: String,
     pub provider_name: String,
@@ -275,7 +367,10 @@ pub struct ProviderAuthPoolSummary {
 
 /// Latest Codex ChatGPT Plan snapshot parsed from `x-codex-*` response headers.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/CredentialPlanSnapshot.ts")]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CredentialPlanSnapshot.ts"
+)]
 pub struct CredentialPlanSnapshot {
     pub id: String,
     pub credential_id: String,
@@ -292,7 +387,10 @@ pub struct CredentialPlanSnapshot {
 
 /// Latest plan snapshot per credential on a ChatGPT Codex provider (`GET /_vp/providers/:id/codex-plan`).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/ProviderCodexPlanItem.ts")]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/ProviderCodexPlanItem.ts"
+)]
 pub struct ProviderCodexPlanItem {
     pub credential_id: String,
     pub label: String,
@@ -301,11 +399,52 @@ pub struct ProviderCodexPlanItem {
 
 /// Result of `POST /_vp/providers/:id/codex-plan/refresh` or single-credential refresh.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/CodexPlanRefreshResult.ts")]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CodexPlanRefreshResult.ts"
+)]
 pub struct CodexPlanRefreshResult {
     pub attempted: usize,
     pub ok: usize,
     pub errors: Vec<String>,
+}
+
+/// Input for previewing or applying Codex App history provider unification.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CodexHistoryUnifyInput.ts"
+)]
+pub struct CodexHistoryUnifyInput {
+    pub provider: String,
+    #[serde(default)]
+    pub from_providers: Vec<String>,
+    #[serde(default)]
+    pub apply: bool,
+    #[serde(default)]
+    pub no_backup: bool,
+    #[serde(default)]
+    pub codex_home: Option<String>,
+}
+
+/// Summary returned by Codex App history preview/apply endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CodexHistorySummary.ts"
+)]
+pub struct CodexHistorySummary {
+    pub codex_home: String,
+    pub provider: String,
+    pub from_providers: Vec<String>,
+    pub applied: bool,
+    pub sqlite_files_seen: usize,
+    pub sqlite_files_changed: usize,
+    pub sqlite_rows_changed: usize,
+    pub rollout_files_seen: usize,
+    pub rollout_files_changed: usize,
+    pub rollout_fields_changed: usize,
+    pub backups_created: usize,
 }
 
 /// Enhanced stats for the dashboard.
@@ -321,6 +460,10 @@ pub struct DashboardStats {
     pub success_rate_in_window: f64,
     pub input_tokens_in_window: i64,
     pub output_tokens_in_window: i64,
+    /// End-to-end output speed: sum(output_tokens) / sum(latency_ms) for 2xx with latency_ms > 0.
+    pub output_tokens_per_sec_in_window: f64,
+    /// Decode-phase speed: sum(output_tokens) / sum(latency_ms − first_token_ms) for 2xx rows with valid decode window.
+    pub decode_output_tokens_per_sec_in_window: f64,
 
     pub requests_last_hour: i64,
     pub requests_last_24h: i64,
@@ -355,6 +498,10 @@ pub struct ProviderStat {
     pub avg_latency_ms: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// End-to-end: sum(output_tokens) / sum(latency_ms) for 2xx with latency_ms > 0 in this window.
+    pub output_tokens_per_sec: f64,
+    /// Decode: sum(output_tokens) / sum(latency_ms − first_token_ms) for 2xx with first_token_ms set and latency_ms > first_token_ms.
+    pub decode_output_tokens_per_sec: f64,
     /// HTTP status breakdown within the same window as other fields.
     pub err_429: i64,
     pub err_503: i64,

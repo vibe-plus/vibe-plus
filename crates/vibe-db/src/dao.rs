@@ -82,9 +82,7 @@ impl Db {
                         model_aliases_json, created_at, updated_at
                  FROM providers WHERE id = ?1",
             )?;
-            let r = stmt
-                .query_row(params![id], row_to_provider)
-                .optional()?;
+            let r = stmt.query_row(params![id], row_to_provider).optional()?;
             Ok(r)
         })
     }
@@ -215,6 +213,58 @@ impl Db {
         })
     }
 
+    pub fn route_get(&self, id: &str) -> Result<Option<Route>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, name, match_model, target_provider_id, target_model, tier, priority
+                 FROM routes WHERE id = ?1",
+            )?;
+            let r = stmt.query_row(params![id], row_to_route).optional()?;
+            Ok(r)
+        })
+    }
+
+    pub fn route_insert(&self, input: RouteInput) -> Result<Route> {
+        let route = Route {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: input.name,
+            match_model: input.match_model,
+            target_provider_id: input.target_provider_id,
+            target_model: input.target_model,
+            tier: input.tier,
+            priority: input.priority,
+        };
+        self.route_upsert(route.clone())?;
+        Ok(route)
+    }
+
+    pub fn route_update(&self, id: &str, input: RouteInput) -> Result<Route> {
+        if self.route_get(id)?.is_none() {
+            anyhow::bail!("route {id} not found");
+        }
+        let route = Route {
+            id: id.to_string(),
+            name: input.name,
+            match_model: input.match_model,
+            target_provider_id: input.target_provider_id,
+            target_model: input.target_model,
+            tier: input.tier,
+            priority: input.priority,
+        };
+        self.route_upsert(route.clone())?;
+        Ok(route)
+    }
+
+    pub fn route_delete(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            let n = c.execute("DELETE FROM routes WHERE id = ?1", params![id])?;
+            if n == 0 {
+                anyhow::bail!("route {id} not found");
+            }
+            Ok(())
+        })
+    }
+
     // --- request logs -------------------------------------------------------
 
     pub fn log_insert(&self, log: &RequestLog) -> Result<()> {
@@ -227,9 +277,23 @@ impl Db {
                     estimated_cost_usd,
                     wire, route_prefix, credential_id, cb_key, upstream_http_status,
                     upstream_error_preview, dedupe_key,
-                    request_body, response_body, client_response_body
+                    client_transport, request_headers,
+                    request_body, response_body, client_response_body,
+                    stream_kind, stream_terminal_seen, stream_end_reason, stream_error_detail,
+                    upstream_first_byte_ms, client_first_write_ms,
+                    last_upstream_event_ms, last_client_write_ms,
+                    upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
+                    sse_event_count, sse_data_count, sse_comment_count, sse_keepalive_count,
+                    sse_done_count, parse_error_count,
+                    first_keepalive_ms, last_keepalive_ms,
+                    max_gap_between_upstream_events_ms, max_gap_between_data_events_ms,
+                    keepalive_after_last_data_count, last_data_event_ms,
+                    bridge_mode, status_injected, terminal_injected, upstream_terminal_type
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                           ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                           ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
+                           ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39,
+                           ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51,
+                           ?52, ?53, ?54, ?55)",
                 params![
                     log.id,
                     log.started_at,
@@ -253,9 +317,39 @@ impl Db {
                     log.upstream_http_status,
                     log.upstream_error_preview,
                     log.dedupe_key,
+                    log.client_transport,
+                    log.request_headers,
                     log.request_body,
                     log.response_body,
                     log.client_response_body,
+                    log.stream_kind,
+                    log.stream_terminal_seen.map(i32::from),
+                    log.stream_end_reason,
+                    log.stream_error_detail,
+                    log.upstream_first_byte_ms,
+                    log.client_first_write_ms,
+                    log.last_upstream_event_ms,
+                    log.last_client_write_ms,
+                    log.upstream_chunk_count,
+                    log.upstream_bytes,
+                    log.client_chunk_count,
+                    log.client_bytes,
+                    log.sse_event_count,
+                    log.sse_data_count,
+                    log.sse_comment_count,
+                    log.sse_keepalive_count,
+                    log.sse_done_count,
+                    log.parse_error_count,
+                    log.first_keepalive_ms,
+                    log.last_keepalive_ms,
+                    log.max_gap_between_upstream_events_ms,
+                    log.max_gap_between_data_events_ms,
+                    log.keepalive_after_last_data_count,
+                    log.last_data_event_ms,
+                    log.bridge_mode,
+                    i32::from(log.status_injected),
+                    i32::from(log.terminal_injected),
+                    log.upstream_terminal_type,
                 ],
             )?;
             Ok(())
@@ -276,15 +370,87 @@ impl Db {
         })
     }
 
+    pub fn log_update_client_trace_and_stream_fields(&self, log: &RequestLog) -> Result<()> {
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE request_logs SET
+                    client_response_body = ?1,
+                    stream_kind = ?2,
+                    stream_terminal_seen = ?3,
+                    stream_end_reason = ?4,
+                    stream_error_detail = ?5,
+                    upstream_first_byte_ms = COALESCE(upstream_first_byte_ms, ?6),
+                    client_first_write_ms = ?7,
+                    last_upstream_event_ms = COALESCE(last_upstream_event_ms, ?8),
+                    last_client_write_ms = ?9,
+                    upstream_chunk_count = CASE WHEN upstream_chunk_count > 0 THEN upstream_chunk_count ELSE ?10 END,
+                    upstream_bytes = CASE WHEN upstream_bytes > 0 THEN upstream_bytes ELSE ?11 END,
+                    client_chunk_count = ?12,
+                    client_bytes = ?13,
+                    sse_event_count = CASE WHEN sse_event_count > 0 THEN sse_event_count ELSE ?14 END,
+                    sse_data_count = CASE WHEN sse_data_count > 0 THEN sse_data_count ELSE ?15 END,
+                    sse_comment_count = CASE WHEN sse_comment_count > 0 THEN sse_comment_count ELSE ?16 END,
+                    sse_keepalive_count = CASE WHEN sse_keepalive_count > 0 THEN sse_keepalive_count ELSE ?17 END,
+                    sse_done_count = CASE WHEN sse_done_count > 0 THEN sse_done_count ELSE ?18 END,
+                    parse_error_count = CASE WHEN parse_error_count > 0 THEN parse_error_count ELSE ?19 END,
+                    first_keepalive_ms = COALESCE(first_keepalive_ms, ?20),
+                    last_keepalive_ms = COALESCE(last_keepalive_ms, ?21),
+                    max_gap_between_upstream_events_ms = COALESCE(max_gap_between_upstream_events_ms, ?22),
+                    max_gap_between_data_events_ms = COALESCE(max_gap_between_data_events_ms, ?23),
+                    keepalive_after_last_data_count = CASE WHEN keepalive_after_last_data_count > 0 THEN keepalive_after_last_data_count ELSE ?24 END,
+                    last_data_event_ms = COALESCE(last_data_event_ms, ?25),
+                    bridge_mode = ?26,
+                    status_injected = ?27,
+                    terminal_injected = ?28,
+                    upstream_terminal_type = COALESCE(upstream_terminal_type, ?29)
+                 WHERE id = ?30",
+                params![
+                    log.client_response_body,
+                    log.stream_kind,
+                    log.stream_terminal_seen.map(i32::from),
+                    log.stream_end_reason,
+                    log.stream_error_detail,
+                    log.upstream_first_byte_ms,
+                    log.client_first_write_ms,
+                    log.last_upstream_event_ms,
+                    log.last_client_write_ms,
+                    log.upstream_chunk_count,
+                    log.upstream_bytes,
+                    log.client_chunk_count,
+                    log.client_bytes,
+                    log.sse_event_count,
+                    log.sse_data_count,
+                    log.sse_comment_count,
+                    log.sse_keepalive_count,
+                    log.sse_done_count,
+                    log.parse_error_count,
+                    log.first_keepalive_ms,
+                    log.last_keepalive_ms,
+                    log.max_gap_between_upstream_events_ms,
+                    log.max_gap_between_data_events_ms,
+                    log.keepalive_after_last_data_count,
+                    log.last_data_event_ms,
+                    log.bridge_mode,
+                    i32::from(log.status_injected),
+                    i32::from(log.terminal_injected),
+                    log.upstream_terminal_type,
+                    log.id,
+                ],
+            )?;
+            if n == 0 {
+                anyhow::bail!("request_logs update: no row for id {}", log.id);
+            }
+            Ok(())
+        })
+    }
+
     pub fn log_list(&self, limit: i64, offset: i64) -> Result<LogPage> {
         self.with(|c| {
             let total: i64 = c.query_row("SELECT count(*) FROM request_logs", [], |r| r.get(0))?;
-            let mut stmt = c.prepare(
-                &format!(
-                    "SELECT {} FROM request_logs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2",
-                    Self::LOG_COLS_LIST
-                ),
-            )?;
+            let mut stmt = c.prepare(&format!(
+                "SELECT {} FROM request_logs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2",
+                Self::LOG_COLS_LIST
+            ))?;
             let rows = stmt.query_map(params![limit, offset], row_to_log_list)?;
             let mut items = Vec::new();
             for r in rows {
@@ -366,11 +532,18 @@ impl Db {
         self.with(|c| {
             // Build dynamic WHERE
             let mut conditions = Vec::<String>::new();
-            if let Some(ts) = since { conditions.push(format!("started_at >= {ts}")); }
-            if let Some(pid) = provider_id { conditions.push(format!("provider_id = '{pid}'")); }
+            if let Some(ts) = since {
+                conditions.push(format!("started_at >= {ts}"));
+            }
+            if let Some(pid) = provider_id {
+                conditions.push(format!("provider_id = '{pid}'"));
+            }
             if let Some(ok) = status_ok {
-                if ok { conditions.push("status_code >= 200 AND status_code < 300".into()); }
-                else  { conditions.push("(status_code IS NULL OR status_code >= 400)".into()); }
+                if ok {
+                    conditions.push("status_code >= 200 AND status_code < 300".into());
+                } else {
+                    conditions.push("(status_code IS NULL OR status_code >= 400)".into());
+                }
             }
             let where_clause = if conditions.is_empty() {
                 String::new()
@@ -389,8 +562,15 @@ impl Db {
             ))?;
             let rows = stmt.query_map([], row_to_log_list)?;
             let mut items = Vec::new();
-            for r in rows { items.push(r?); }
-            Ok(LogPage { items, total, limit, offset })
+            for r in rows {
+                items.push(r?);
+            }
+            Ok(LogPage {
+                items,
+                total,
+                limit,
+                offset,
+            })
         })
     }
 
@@ -427,7 +607,9 @@ impl Db {
                 })
             })?;
             let mut out = Vec::new();
-            for r in rows { out.push(r?); }
+            for r in rows {
+                out.push(r?);
+            }
             Ok(out)
         })
     }
@@ -445,6 +627,9 @@ impl Db {
                         COALESCE(avg(l.latency_ms), 0) as avg_lat,
                         COALESCE(sum(l.input_tokens), 0),
                         COALESCE(sum(l.output_tokens), 0),
+                        COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms > 0 THEN l.latency_ms ELSE 0 END), 0) as ok_sum_latency_ms,
+                        COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms IS NOT NULL AND l.first_token_ms IS NOT NULL AND l.latency_ms > l.first_token_ms THEN l.output_tokens ELSE 0 END), 0) as ok_decode_out_tokens,
+                        COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms IS NOT NULL AND l.first_token_ms IS NOT NULL AND l.latency_ms > l.first_token_ms THEN (l.latency_ms - l.first_token_ms) ELSE 0 END), 0) as ok_sum_decode_ms,
                         sum(CASE WHEN l.status_code = 429 THEN 1 ELSE 0 END),
                         sum(CASE WHEN l.status_code = 503 THEN 1 ELSE 0 END),
                         sum(CASE WHEN l.status_code BETWEEN 400 AND 499 AND l.status_code != 429 THEN 1 ELSE 0 END),
@@ -459,6 +644,10 @@ impl Db {
                 let ok: i64 = r.get(3)?;
                 let err: i64 = r.get(4)?;
                 let avg_lat: f64 = r.get(5)?;
+                let ok_sum_latency_ms: i64 = r.get(8)?;
+                let ok_decode_out_tokens: i64 = r.get(9)?;
+                let ok_sum_decode_ms: i64 = r.get(10)?;
+                let output_tokens: i64 = r.get(7)?;
                 Ok(vibe_protocol::ProviderStat {
                     provider_id: r.get(0)?,
                     provider_name: r.get(1)?,
@@ -468,11 +657,21 @@ impl Db {
                     success_rate: if total > 0 { ok as f64 / total as f64 } else { 1.0 },
                     avg_latency_ms: avg_lat as i64,
                     input_tokens: r.get(6)?,
-                    output_tokens: r.get(7)?,
-                    err_429: r.get(8)?,
-                    err_503: r.get(9)?,
-                    err_4xx_other: r.get(10)?,
-                    err_5xx_other: r.get(11)?,
+                    output_tokens,
+                    output_tokens_per_sec: if ok_sum_latency_ms > 0 {
+                        output_tokens as f64 * 1000.0 / ok_sum_latency_ms as f64
+                    } else {
+                        0.0
+                    },
+                    decode_output_tokens_per_sec: if ok_sum_decode_ms > 0 {
+                        ok_decode_out_tokens as f64 * 1000.0 / ok_sum_decode_ms as f64
+                    } else {
+                        0.0
+                    },
+                    err_429: r.get(11)?,
+                    err_503: r.get(12)?,
+                    err_4xx_other: r.get(13)?,
+                    err_5xx_other: r.get(14)?,
                 })
             })?;
             let mut out = Vec::new();
@@ -482,7 +681,11 @@ impl Db {
     }
 
     /// Rolling-window stats for a single provider (gateway `request_logs`, not upstream Plan quota).
-    pub fn provider_stat_single(&self, provider_id: &str, hours: i64) -> Result<Option<vibe_protocol::ProviderStat>> {
+    pub fn provider_stat_single(
+        &self,
+        provider_id: &str,
+        hours: i64,
+    ) -> Result<Option<vibe_protocol::ProviderStat>> {
         let since = now_secs() - hours * 3600;
         self.with(|c| {
             let mut stmt = c.prepare(
@@ -494,6 +697,9 @@ impl Db {
                         COALESCE(avg(l.latency_ms), 0) as avg_lat,
                         COALESCE(sum(l.input_tokens), 0),
                         COALESCE(sum(l.output_tokens), 0),
+                        COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms > 0 THEN l.latency_ms ELSE 0 END), 0) as ok_sum_latency_ms,
+                        COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms IS NOT NULL AND l.first_token_ms IS NOT NULL AND l.latency_ms > l.first_token_ms THEN l.output_tokens ELSE 0 END), 0) as ok_decode_out_tokens,
+                        COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms IS NOT NULL AND l.first_token_ms IS NOT NULL AND l.latency_ms > l.first_token_ms THEN (l.latency_ms - l.first_token_ms) ELSE 0 END), 0) as ok_sum_decode_ms,
                         sum(CASE WHEN l.status_code = 429 THEN 1 ELSE 0 END),
                         sum(CASE WHEN l.status_code = 503 THEN 1 ELSE 0 END),
                         sum(CASE WHEN l.status_code BETWEEN 400 AND 499 AND l.status_code != 429 THEN 1 ELSE 0 END),
@@ -508,6 +714,10 @@ impl Db {
                 let ok: i64 = r.get(3)?;
                 let err: i64 = r.get(4)?;
                 let avg_lat: f64 = r.get(5)?;
+                let ok_sum_latency_ms: i64 = r.get(8)?;
+                let ok_decode_out_tokens: i64 = r.get(9)?;
+                let ok_sum_decode_ms: i64 = r.get(10)?;
+                let output_tokens: i64 = r.get(7)?;
                 Ok(vibe_protocol::ProviderStat {
                     provider_id: r.get(0)?,
                     provider_name: r.get(1)?,
@@ -517,14 +727,65 @@ impl Db {
                     success_rate: if total > 0 { ok as f64 / total as f64 } else { 1.0 },
                     avg_latency_ms: avg_lat as i64,
                     input_tokens: r.get(6)?,
-                    output_tokens: r.get(7)?,
-                    err_429: r.get(8)?,
-                    err_503: r.get(9)?,
-                    err_4xx_other: r.get(10)?,
-                    err_5xx_other: r.get(11)?,
+                    output_tokens,
+                    output_tokens_per_sec: if ok_sum_latency_ms > 0 {
+                        output_tokens as f64 * 1000.0 / ok_sum_latency_ms as f64
+                    } else {
+                        0.0
+                    },
+                    decode_output_tokens_per_sec: if ok_sum_decode_ms > 0 {
+                        ok_decode_out_tokens as f64 * 1000.0 / ok_sum_decode_ms as f64
+                    } else {
+                        0.0
+                    },
+                    err_429: r.get(11)?,
+                    err_503: r.get(12)?,
+                    err_4xx_other: r.get(13)?,
+                    err_5xx_other: r.get(14)?,
                 })
             })?;
             Ok(rows.next().transpose()?)
+        })
+    }
+
+    /// Rolling-window output speed (tokens/sec) across successful requests with latency.
+    pub fn output_tokens_per_sec(&self, hours: i64) -> Result<f64> {
+        let since = now_secs() - hours * 3600;
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT
+                    COALESCE(sum(output_tokens), 0) as out_tokens,
+                    COALESCE(sum(CASE WHEN latency_ms > 0 THEN latency_ms ELSE 0 END), 0) as sum_latency_ms
+                 FROM request_logs
+                 WHERE started_at >= ?1
+                   AND status_code >= 200 AND status_code < 300",
+            )?;
+            let (out_tokens, sum_latency_ms): (i64, i64) =
+                stmt.query_row(params![since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if sum_latency_ms <= 0 {
+                return Ok(0.0);
+            }
+            Ok(out_tokens as f64 * 1000.0 / sum_latency_ms as f64)
+        })
+    }
+
+    /// Rolling-window decode-phase output speed: tokens per wall second after first token.
+    pub fn decode_output_tokens_per_sec(&self, hours: i64) -> Result<f64> {
+        let since = now_secs() - hours * 3600;
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT
+                    COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms IS NOT NULL AND first_token_ms IS NOT NULL AND latency_ms > first_token_ms THEN output_tokens ELSE 0 END), 0) as out_tokens,
+                    COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms IS NOT NULL AND first_token_ms IS NOT NULL AND latency_ms > first_token_ms THEN (latency_ms - first_token_ms) ELSE 0 END), 0) as sum_decode_ms
+                 FROM request_logs
+                 WHERE started_at >= ?1",
+            )?;
+            let (out_tokens, sum_decode_ms): (i64, i64) =
+                stmt.query_row(params![since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if sum_decode_ms <= 0 {
+                return Ok(0.0);
+            }
+            Ok(out_tokens as f64 * 1000.0 / sum_decode_ms as f64)
         })
     }
 
@@ -594,7 +855,10 @@ impl Db {
         })
     }
 
-    pub fn plan_snapshot_latest(&self, credential_id: &str) -> Result<Option<vibe_protocol::CredentialPlanSnapshot>> {
+    pub fn plan_snapshot_latest(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<vibe_protocol::CredentialPlanSnapshot>> {
         self.with(|c| {
             let snap = c
                 .query_row(
@@ -615,7 +879,10 @@ impl Db {
     }
 
     /// Latest plan snapshot per credential id (batch). Missing ids are omitted from the map.
-    pub fn plan_snapshot_latest_map(&self, credential_ids: &[String]) -> Result<HashMap<String, vibe_protocol::CredentialPlanSnapshot>> {
+    pub fn plan_snapshot_latest_map(
+        &self,
+        credential_ids: &[String],
+    ) -> Result<HashMap<String, vibe_protocol::CredentialPlanSnapshot>> {
         if credential_ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -775,14 +1042,16 @@ impl Db {
 
     pub fn health_get(&self, provider_id: &str) -> Result<Option<DbHealth>> {
         self.with(|c| {
-            let r = c.query_row(
-                "SELECT provider_id, is_healthy, consecutive_failures,
+            let r = c
+                .query_row(
+                    "SELECT provider_id, is_healthy, consecutive_failures,
                         total_requests, total_successes, total_failures,
                         last_success_at, last_failure_at, last_error, avg_latency_ms, updated_at
                  FROM provider_health WHERE provider_id = ?1",
-                params![provider_id],
-                row_to_health,
-            ).optional()?;
+                    params![provider_id],
+                    row_to_health,
+                )
+                .optional()?;
             Ok(r)
         })
     }
@@ -797,15 +1066,16 @@ impl Db {
             )?;
             let rows = stmt.query_map([], row_to_health)?;
             let mut out = Vec::new();
-            for r in rows { out.push(r?); }
+            for r in rows {
+                out.push(r?);
+            }
             Ok(out)
         })
     }
 
     // --- credentials --------------------------------------------------------
 
-    const CRED_COLS: &'static str =
-        "id, provider_id, label, auth_ref, plan_type, notes,
+    const CRED_COLS: &'static str = "id, provider_id, label, auth_ref, plan_type, notes,
          enabled, priority,
          rl_requests_limit, rl_requests_remaining, rl_requests_reset_at,
          rl_tokens_limit, rl_tokens_remaining, rl_tokens_reset_at,
@@ -819,7 +1089,18 @@ impl Db {
          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
          estimated_cost_usd,
          wire, route_prefix, credential_id, cb_key, upstream_http_status,
-         upstream_error_preview, dedupe_key";
+         upstream_error_preview, dedupe_key,
+         client_transport, request_headers,
+         stream_kind, stream_terminal_seen, stream_end_reason, stream_error_detail,
+         upstream_first_byte_ms, client_first_write_ms,
+         last_upstream_event_ms, last_client_write_ms,
+         upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
+         sse_event_count, sse_data_count, sse_comment_count, sse_keepalive_count,
+         sse_done_count, parse_error_count,
+         first_keepalive_ms, last_keepalive_ms,
+         max_gap_between_upstream_events_ms, max_gap_between_data_events_ms,
+         keepalive_after_last_data_count, last_data_event_ms,
+         bridge_mode, status_injected, terminal_injected, upstream_terminal_type";
 
     const LOG_COLS_FULL: &'static str =
         "id, started_at, app, provider_id, requested_model, upstream_model,
@@ -828,9 +1109,23 @@ impl Db {
          estimated_cost_usd,
          wire, route_prefix, credential_id, cb_key, upstream_http_status,
          upstream_error_preview, dedupe_key,
-         request_body, response_body, client_response_body";
+         client_transport, request_headers,
+         request_body, response_body, client_response_body,
+         stream_kind, stream_terminal_seen, stream_end_reason, stream_error_detail,
+         upstream_first_byte_ms, client_first_write_ms,
+         last_upstream_event_ms, last_client_write_ms,
+         upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
+         sse_event_count, sse_data_count, sse_comment_count, sse_keepalive_count,
+         sse_done_count, parse_error_count,
+         first_keepalive_ms, last_keepalive_ms,
+         max_gap_between_upstream_events_ms, max_gap_between_data_events_ms,
+         keepalive_after_last_data_count, last_data_event_ms,
+         bridge_mode, status_injected, terminal_injected, upstream_terminal_type";
 
-    pub fn credential_list_for_provider(&self, provider_id: &str) -> Result<Vec<vibe_protocol::Credential>> {
+    pub fn credential_list_for_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<vibe_protocol::Credential>> {
         self.with(|c| {
             let mut stmt = c.prepare(&format!(
                 "SELECT {} FROM credentials WHERE provider_id = ?1 ORDER BY priority ASC, created_at ASC",
@@ -851,18 +1146,22 @@ impl Db {
             ))?;
             let rows = stmt.query_map([], row_to_credential)?;
             let mut out = Vec::new();
-            for r in rows { out.push(r?); }
+            for r in rows {
+                out.push(r?);
+            }
             Ok(out)
         })
     }
 
     pub fn credential_get(&self, id: &str) -> Result<Option<vibe_protocol::Credential>> {
         self.with(|c| {
-            let r = c.query_row(
-                &format!("SELECT {} FROM credentials WHERE id = ?1", Self::CRED_COLS),
-                params![id],
-                row_to_credential,
-            ).optional()?;
+            let r = c
+                .query_row(
+                    &format!("SELECT {} FROM credentials WHERE id = ?1", Self::CRED_COLS),
+                    params![id],
+                    row_to_credential,
+                )
+                .optional()?;
             Ok(r)
         })
     }
@@ -906,7 +1205,8 @@ impl Db {
             )?;
             Ok(())
         })?;
-        self.credential_get(&id)?.context("inserted credential missing on read-back")
+        self.credential_get(&id)?
+            .context("inserted credential missing on read-back")
     }
 
     pub fn credential_update(
@@ -953,17 +1253,20 @@ impl Db {
         if n == 0 {
             anyhow::bail!("credential {id} not found");
         }
-        self.credential_get(id)?.context("updated credential missing on read-back")
+        self.credential_get(id)?
+            .context("updated credential missing on read-back")
     }
 
     /// Fetch only the refresh_token for a credential (write-only field, not in Credential).
     pub fn credential_get_refresh_token(&self, id: &str) -> Result<Option<String>> {
         self.with(|c| {
-            let v = c.query_row(
-                "SELECT oauth_refresh_token FROM credentials WHERE id = ?1",
-                params![id],
-                |r| r.get::<_, Option<String>>(0),
-            ).optional()?;
+            let v = c
+                .query_row(
+                    "SELECT oauth_refresh_token FROM credentials WHERE id = ?1",
+                    params![id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?;
             Ok(v.flatten())
         })
     }
@@ -992,9 +1295,31 @@ impl Db {
     pub fn credential_delete(&self, id: &str) -> Result<()> {
         self.with(|c| {
             let n = c.execute("DELETE FROM credentials WHERE id=?1", params![id])?;
-            if n == 0 { anyhow::bail!("credential {id} not found"); }
+            if n == 0 {
+                anyhow::bail!("credential {id} not found");
+            }
             Ok(())
         })
+    }
+
+    pub fn credential_set_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<vibe_protocol::Credential> {
+        let now = now_secs();
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE credentials SET enabled=?2, updated_at=?3 WHERE id=?1",
+                params![id, enabled as i32, now],
+            )?;
+            if n == 0 {
+                anyhow::bail!("credential {id} not found");
+            }
+            Ok(())
+        })?;
+        self.credential_get(id)?
+            .context("updated credential missing on read-back")
     }
 
     /// Update rate-limit counters extracted from upstream response headers.
@@ -1020,8 +1345,16 @@ impl Db {
                      rl_tokens_reset_at     = COALESCE(?7, rl_tokens_reset_at),
                      updated_at             = ?8
                  WHERE id = ?1",
-                params![id, rl_requests_limit, rl_requests_remaining, rl_requests_reset_at,
-                         rl_tokens_limit, rl_tokens_remaining, rl_tokens_reset_at, now],
+                params![
+                    id,
+                    rl_requests_limit,
+                    rl_requests_remaining,
+                    rl_requests_reset_at,
+                    rl_tokens_limit,
+                    rl_tokens_remaining,
+                    rl_tokens_reset_at,
+                    now
+                ],
             )?;
             Ok(())
         })
@@ -1078,8 +1411,9 @@ fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
     Ok(Provider {
         id: r.get(0)?,
         name: r.get(1)?,
-        kind: provider_kind_from_str(&kind_s)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into()))?,
+        kind: provider_kind_from_str(&kind_s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into())
+        })?,
         base_url: r.get(3)?,
         auth_ref: r.get(4)?,
         enabled: r.get::<_, i64>(5)? != 0,
@@ -1098,8 +1432,9 @@ fn row_to_route(r: &rusqlite::Row) -> rusqlite::Result<Route> {
         match_model: r.get(2)?,
         target_provider_id: r.get(3)?,
         target_model: r.get(4)?,
-        tier: _route_tier_from_str(&tier_s)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, e.into()))?,
+        tier: _route_tier_from_str(&tier_s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, e.into())
+        })?,
         priority: r.get(6)?,
     })
 }
@@ -1204,9 +1539,39 @@ fn row_to_log_list(r: &rusqlite::Row) -> rusqlite::Result<RequestLog> {
         upstream_http_status: r.get(19)?,
         upstream_error_preview: r.get(20)?,
         dedupe_key: r.get(21)?,
+        client_transport: r.get(22)?,
+        request_headers: None,
         request_body: None,
         response_body: None,
         client_response_body: None,
+        stream_kind: r.get(24)?,
+        stream_terminal_seen: opt_bool(r.get::<_, Option<i32>>(25)?),
+        stream_end_reason: r.get(26)?,
+        stream_error_detail: r.get(27)?,
+        upstream_first_byte_ms: r.get(28)?,
+        client_first_write_ms: r.get(29)?,
+        last_upstream_event_ms: r.get(30)?,
+        last_client_write_ms: r.get(31)?,
+        upstream_chunk_count: r.get(32)?,
+        upstream_bytes: r.get(33)?,
+        client_chunk_count: r.get(34)?,
+        client_bytes: r.get(35)?,
+        sse_event_count: r.get(36)?,
+        sse_data_count: r.get(37)?,
+        sse_comment_count: r.get(38)?,
+        sse_keepalive_count: r.get(39)?,
+        sse_done_count: r.get(40)?,
+        parse_error_count: r.get(41)?,
+        first_keepalive_ms: r.get(42)?,
+        last_keepalive_ms: r.get(43)?,
+        max_gap_between_upstream_events_ms: r.get(44)?,
+        max_gap_between_data_events_ms: r.get(45)?,
+        keepalive_after_last_data_count: r.get(46)?,
+        last_data_event_ms: r.get(47)?,
+        bridge_mode: r.get(48)?,
+        status_injected: r.get::<_, i32>(49)? != 0,
+        terminal_injected: r.get::<_, i32>(50)? != 0,
+        upstream_terminal_type: r.get(51)?,
     })
 }
 
@@ -1234,10 +1599,44 @@ fn row_to_log_detail(r: &rusqlite::Row) -> rusqlite::Result<RequestLog> {
         upstream_http_status: r.get(19)?,
         upstream_error_preview: r.get(20)?,
         dedupe_key: r.get(21)?,
-        request_body: r.get(22)?,
-        response_body: r.get(23)?,
-        client_response_body: r.get(24)?,
+        client_transport: r.get(22)?,
+        request_headers: r.get(23)?,
+        request_body: r.get(24)?,
+        response_body: r.get(25)?,
+        client_response_body: r.get(26)?,
+        stream_kind: r.get(27)?,
+        stream_terminal_seen: opt_bool(r.get::<_, Option<i32>>(28)?),
+        stream_end_reason: r.get(29)?,
+        stream_error_detail: r.get(30)?,
+        upstream_first_byte_ms: r.get(31)?,
+        client_first_write_ms: r.get(32)?,
+        last_upstream_event_ms: r.get(33)?,
+        last_client_write_ms: r.get(34)?,
+        upstream_chunk_count: r.get(35)?,
+        upstream_bytes: r.get(36)?,
+        client_chunk_count: r.get(37)?,
+        client_bytes: r.get(38)?,
+        sse_event_count: r.get(39)?,
+        sse_data_count: r.get(40)?,
+        sse_comment_count: r.get(41)?,
+        sse_keepalive_count: r.get(42)?,
+        sse_done_count: r.get(43)?,
+        parse_error_count: r.get(44)?,
+        first_keepalive_ms: r.get(45)?,
+        last_keepalive_ms: r.get(46)?,
+        max_gap_between_upstream_events_ms: r.get(47)?,
+        max_gap_between_data_events_ms: r.get(48)?,
+        keepalive_after_last_data_count: r.get(49)?,
+        last_data_event_ms: r.get(50)?,
+        bridge_mode: r.get(51)?,
+        status_injected: r.get::<_, i32>(52)? != 0,
+        terminal_injected: r.get::<_, i32>(53)? != 0,
+        upstream_terminal_type: r.get(54)?,
     })
+}
+
+fn opt_bool(v: Option<i32>) -> Option<bool> {
+    v.map(|x| x != 0)
 }
 
 #[cfg(test)]
@@ -1303,9 +1702,39 @@ mod tests {
             upstream_http_status: None,
             upstream_error_preview: None,
             dedupe_key: None,
+            client_transport: None,
+            request_headers: None,
             request_body: None,
             response_body: None,
             client_response_body: None,
+            stream_kind: Some("none".into()),
+            stream_terminal_seen: None,
+            stream_end_reason: None,
+            stream_error_detail: None,
+            upstream_first_byte_ms: None,
+            client_first_write_ms: None,
+            last_upstream_event_ms: None,
+            last_client_write_ms: None,
+            upstream_chunk_count: 0,
+            upstream_bytes: 0,
+            client_chunk_count: 0,
+            client_bytes: 0,
+            sse_event_count: 0,
+            sse_data_count: 0,
+            sse_comment_count: 0,
+            sse_keepalive_count: 0,
+            sse_done_count: 0,
+            parse_error_count: 0,
+            first_keepalive_ms: None,
+            last_keepalive_ms: None,
+            max_gap_between_upstream_events_ms: None,
+            max_gap_between_data_events_ms: None,
+            keepalive_after_last_data_count: 0,
+            last_data_event_ms: None,
+            bridge_mode: Some("none".into()),
+            status_injected: false,
+            terminal_injected: false,
+            upstream_terminal_type: None,
         })
         .unwrap();
 

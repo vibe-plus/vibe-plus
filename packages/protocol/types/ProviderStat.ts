@@ -11,6 +11,14 @@ export type ProviderStat = {
   input_tokens: bigint;
   output_tokens: bigint;
   /**
+   * End-to-end: sum(output_tokens) / sum(latency_ms) for 2xx with latency_ms > 0 in this window.
+   */
+  output_tokens_per_sec: number;
+  /**
+   * Decode: sum(output_tokens) / sum(latency_ms − first_token_ms) for 2xx with first_token_ms set and latency_ms > first_token_ms.
+   */
+  decode_output_tokens_per_sec: number;
+  /**
    * HTTP status breakdown within the same window as other fields.
    */
   err_429: bigint;
