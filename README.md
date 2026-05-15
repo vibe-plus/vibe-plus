@@ -10,7 +10,7 @@ The product is intentionally CLI-first:
 - `crates/vibe` is the durable product interface. It can configure providers,
   start the gateway, patch client tools, inspect logs, and run subprocesses with
   proxy environment variables.
-- `apps/website` is an optional local console. It must stay disposable: if it is
+- `apps/web` is an optional local console. It must stay disposable: if it is
   deleted, the gateway and CLI should still work.
 - Future desktop or hosted apps should call the same local HTTP API and/or shell
   out to the CLI. They should not own provider credentials, routing policy, log
@@ -114,7 +114,7 @@ The MCP surface is intentionally small: it returns logs-page/API URLs and lightw
 
 ## Optional Web Console
 
-The website is useful during development, but it is not the product kernel.
+The web console is useful during development, but it is not the product kernel.
 It runs on port `15876` in development to avoid common Vite ports.
 
 ```bash
@@ -180,7 +180,7 @@ Do not embed a second UI implementation inside the App shell. The shell can own
 window chrome, tray/menu actions, clipboard observation, drag/drop, and startup
 entry points, but all product state mutations still go through `vibe` or the
 local gateway API. In production, the same shell can load the built
-`apps/website/dist` assets.
+`apps/web/dist` assets.
 
 ## Configuration
 
@@ -212,11 +212,8 @@ vp run -r test
 vp run -r build
 ```
 
-Run black-box gateway tests against a running gateway:
-
-```bash
-python3 tests/e2e_blackbox_gateway.py --gateway http://127.0.0.1:15917
-```
+In-repo Python black-box scripts under `tests/` were removed; against a running
+gateway use `vibe doctor`, `vibe status`, and the `/_vp/*` HTTP APIs for manual checks.
 
 ## Release
 

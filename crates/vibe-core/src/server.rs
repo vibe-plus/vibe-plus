@@ -291,8 +291,8 @@ async fn root_discovery() -> Json<Value> {
         "status": "/status",
         "websocket": "/_vp/ws",
         "control_api": "/_vp/",
-        "website_dev": "http://127.0.0.1:15876",
-        "note": "The gateway does not host the Web UI; during development run apps/website separately outside this port (see vite.config port).",
+        "web_dev": "http://127.0.0.1:15876",
+        "note": "The gateway does not host the Web UI; during development run apps/web separately outside this port (see vite.config port).",
     }))
 }
 
