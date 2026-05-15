@@ -9,8 +9,8 @@ const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 async function probeMs(origin: string): Promise<number> {
   const t = Date.now();
-  // no-cors: opaque response is fine — we only care about timing
-  await fetch(`${origin}/favicon.svg`, { mode: "no-cors", cache: "no-cache" });
+  const res = await fetch(`${origin}/version.json`, { cache: "no-cache" });
+  if (!res.ok) throw new Error(`probe failed: ${res.status}`);
   return Date.now() - t;
 }
 
@@ -37,7 +37,9 @@ export async function pickFastestOrigin(): Promise<string> {
 }
 
 /** Redirect to the fastest CDN origin if we're not already there. No-op in local dev. */
-export async function redirectToFastestCDN(path = ""): Promise<void> {
+export async function redirectToFastestCDN(
+  path = `${window.location.pathname}${window.location.search}${window.location.hash}`,
+): Promise<void> {
   const { hostname } = window.location;
   const isGhPages = hostname === "vibe-plus.github.io";
   const isCheezTech = hostname === "vibe-plus.cheez.tech";

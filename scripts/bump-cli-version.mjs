@@ -9,6 +9,7 @@ if (!version || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
 }
 
 const jsonFiles = [
+  "apps/web/package.json",
   "packages/cli-npm/package.json",
   "packages/cli-npm/platform/darwin-arm64/package.json",
   "packages/cli-npm/platform/win32-x64/package.json",
@@ -42,7 +43,7 @@ execFileSync("bun", ["install", "--lockfile-only"], { stdio: "inherit" });
 console.log(`Bumped CLI/Gateway release files to ${version}.`);
 console.log("Next:");
 console.log(
-  `  git add Cargo.toml Cargo.lock bun.lock packages/cli-npm/package.json packages/cli-npm/platform/*/package.json`,
+  `  git add Cargo.toml Cargo.lock bun.lock apps/web/package.json packages/cli-npm/package.json packages/cli-npm/platform/*/package.json`,
 );
 console.log(`  git commit -m "chore: release cli ${version}"`);
 console.log(`  git tag v${version}`);

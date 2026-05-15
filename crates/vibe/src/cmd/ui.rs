@@ -36,14 +36,22 @@ async fn pick_dashboard_url() -> &'static str {
 
     let mut best = CDN_BASES[0].2;
     let mut best_ms = u128::MAX;
+    let mut any_ok = false;
     for h in handles {
         if let Ok((label, dashboard, ms, true)) = h.await {
+            any_ok = true;
             if ms < best_ms {
                 best_ms = ms;
                 best = dashboard;
             }
             tracing::debug!("CDN probe {label}: {ms}ms");
         }
+    }
+    if !any_ok {
+        eprintln!(
+            "warning: no CDN responded; opening default {}",
+            CDN_BASES[0].2
+        );
     }
     best
 }
