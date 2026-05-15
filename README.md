@@ -62,7 +62,19 @@ Build the CLI:
 cargo build -p vibe
 ```
 
-Start the gateway:
+Start the gateway and open the dashboard (default when you run `vibe` with no subcommand):
+
+```bash
+vibe
+```
+
+Start the gateway only (background on macOS/Linux and Windows):
+
+```bash
+cargo run -p vibe -- start
+```
+
+Run in the foreground (for debugging):
 
 ```bash
 cargo run -p vibe -- start --foreground

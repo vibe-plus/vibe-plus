@@ -7,11 +7,12 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "vibe",
     version,
-    about = "The Unified Toolchain for the Vibe — local AI API gateway"
+    about = "The Unified Toolchain for the Vibe — local AI API gateway",
+    arg_required_else_help = false
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -62,23 +63,24 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing();
     match cli.command {
-        Command::Start(a) => cmd::start::run(a).await,
-        Command::Stop => cmd::stop::run(),
-        Command::Status => cmd::status::run().await,
-        Command::Statusline => cmd::statusline::run(),
-        Command::Doctor => cmd::doctor::run().await,
-        Command::Provider(c) => cmd::provider::run(c).await,
-        Command::Route(c) => cmd::route::run(c).await,
-        Command::Autostart(c) => cmd::autostart::run(c),
-        Command::Takeover(a) => cmd::takeover::run(a).await,
-        Command::CodexHistory(a) => cmd::codex_history::run(a),
-        Command::Client(c) => cmd::client::run(c).await,
-        Command::Logs(a) => cmd::logs::run(a).await,
-        Command::Config(a) => cmd::config::run(a),
-        Command::Update => cmd::update::run(),
-        Command::Ui => cmd::ui::run().await,
-        Command::Pair(a) => cmd::pair::run(a),
-        Command::Mcp(a) => cmd::mcp::run(a).await,
+        None => cmd::up::run().await,
+        Some(Command::Start(a)) => cmd::start::run(a).await,
+        Some(Command::Stop) => cmd::stop::run(),
+        Some(Command::Status) => cmd::status::run().await,
+        Some(Command::Statusline) => cmd::statusline::run(),
+        Some(Command::Doctor) => cmd::doctor::run().await,
+        Some(Command::Provider(c)) => cmd::provider::run(c).await,
+        Some(Command::Route(c)) => cmd::route::run(c).await,
+        Some(Command::Autostart(c)) => cmd::autostart::run(c),
+        Some(Command::Takeover(a)) => cmd::takeover::run(a).await,
+        Some(Command::CodexHistory(a)) => cmd::codex_history::run(a),
+        Some(Command::Client(c)) => cmd::client::run(c).await,
+        Some(Command::Logs(a)) => cmd::logs::run(a).await,
+        Some(Command::Config(a)) => cmd::config::run(a),
+        Some(Command::Update) => cmd::update::run(),
+        Some(Command::Ui) => cmd::ui::run().await,
+        Some(Command::Pair(a)) => cmd::pair::run(a),
+        Some(Command::Mcp(a)) => cmd::mcp::run(a).await,
     }
 }
 

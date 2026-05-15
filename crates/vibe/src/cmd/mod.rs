@@ -1,4 +1,6 @@
 pub mod autostart;
+pub mod gateway;
+pub mod up;
 pub mod ui;
 pub mod client;
 pub mod codex_history;

@@ -21,10 +21,20 @@ pub fn run() -> Result<()> {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        println!("kill not implemented on this platform (pid {pid}).");
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
         let _ = std::fs::remove_file(&pid_path);
+        match status {
+            Ok(s) if s.success() => println!("vibe stopped (pid {pid})."),
+            _ => println!("vibe stopped (cleared pid file; process {pid} may already be gone)."),
+        }
     }
     Ok(())
 }

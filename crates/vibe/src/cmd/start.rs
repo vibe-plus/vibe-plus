@@ -1,14 +1,17 @@
 use anyhow::Result;
-use clap::Args;
 use std::net::SocketAddr;
+use std::process::Stdio;
+use std::time::Duration;
 use vibe_core::{config::Config, paths, state::AppState};
 use vibe_db::Db;
+
+use super::gateway;
 
 fn default_port() -> u16 {
     super::configured_port()
 }
 
-#[derive(Args)]
+#[derive(clap::Args)]
 pub struct StartArgs {
     /// Port to listen on.
     #[arg(long, default_value_t = default_port())]
@@ -20,23 +23,53 @@ pub struct StartArgs {
 }
 
 pub async fn run(args: StartArgs) -> Result<()> {
+    let base_url = gateway::local_base_url(args.port);
+    if gateway::is_responsive(&base_url).await {
+        println!("vibe is already running.");
+        println!("  endpoint: {base_url}");
+        return Ok(());
+    }
+
     let pid_path = paths::pid_path()?;
     if pid_path.exists() {
-        let pid_s = std::fs::read_to_string(&pid_path).unwrap_or_default();
-        let pid: u32 = pid_s.trim().parse().unwrap_or(0);
-        if pid > 0 && is_alive(pid) {
-            println!("vibe is already running (pid {pid}).");
-            println!("  endpoint: http://127.0.0.1:{}", args.port);
-            return Ok(());
-        }
         let _ = std::fs::remove_file(&pid_path);
     }
 
     if !args.foreground {
-        return start_background_or_foreground(args.port).await;
+        spawn_background(args.port)?;
+        gateway::wait_until_ready(&base_url, Duration::from_secs(30)).await?;
+        return Ok(());
     }
 
     start_server(args.port).await
+}
+
+/// Spawn `vibe start --foreground` detached from this terminal.
+pub fn spawn_background(port: u16) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("start")
+        .arg("--foreground")
+        .arg("--port")
+        .arg(port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    cmd.spawn()?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn()?;
+    }
+
+    println!("vibe started in background.");
+    println!("  endpoint: {}", gateway::local_base_url(port));
+    Ok(())
 }
 
 pub async fn start_server(port: u16) -> Result<()> {
@@ -58,40 +91,4 @@ fn write_pid() -> Result<()> {
     let path = paths::pid_path()?;
     std::fs::write(path, pid.to_string())?;
     Ok(())
-}
-
-fn is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
-#[cfg(unix)]
-async fn start_background_or_foreground(port: u16) -> Result<()> {
-    let exe = std::env::current_exe()?;
-    std::process::Command::new(exe)
-        .arg("start")
-        .arg("--foreground")
-        .arg("--port")
-        .arg(port.to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-    println!("vibe started in background.");
-    println!("  endpoint: http://127.0.0.1:{port}");
-    Ok(())
-}
-
-#[cfg(not(unix))]
-async fn start_background_or_foreground(port: u16) -> Result<()> {
-    // On Windows, run foreground for now; proper service wrapper is Phase 2.
-    println!("Background mode not yet supported on Windows — running in foreground.");
-    start_server(port).await
 }

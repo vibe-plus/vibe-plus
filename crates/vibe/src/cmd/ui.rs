@@ -56,20 +56,29 @@ async fn pick_dashboard_url() -> &'static str {
     best
 }
 
-fn open_url(url: &str) -> Result<()> {
+pub fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     std::process::Command::new("open").arg(url).spawn()?;
     #[cfg(target_os = "windows")]
-    std::process::Command::new("cmd").args(["/c", "start", url]).spawn()?;
+    std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .spawn()?;
     #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open").arg(url).spawn()?;
     Ok(())
 }
 
-pub async fn run() -> Result<()> {
+/// Open the hosted dashboard in the default browser.
+pub async fn open_dashboard() -> Result<()> {
     println!("Probing CDN speed…");
     let url = pick_dashboard_url().await;
     println!("Opening {url}");
-    open_url(url)?;
-    Ok(())
+    open_url(url)
+}
+
+pub async fn run() -> Result<()> {
+    let port = super::configured_port();
+    let base_url = super::gateway::ensure_running(port).await?;
+    println!("vibe is ready at {base_url}");
+    open_dashboard().await
 }
