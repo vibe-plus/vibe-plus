@@ -1,7 +1,11 @@
 use anyhow::Context as _;
-use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::path::Path;
 use tokio::process::Command;
 
+#[cfg(target_os = "macos")]
 use crate::npm_registry;
 
 const CODEX_DMG_URL_ARM64: &str = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg";
@@ -294,10 +298,9 @@ async fn install_windows() -> anyhow::Result<()> {
     }
 
     println!("未检测到 Codex Desktop，正在打开官方安装程序…");
-    open_url(CODEX_WINDOWS_INSTALLER_URL)
-        .await
-        .or_else(|_| open_url(CODEX_MICROSOFT_STORE_WEB_URL))
-        .await?;
+    if open_url(CODEX_WINDOWS_INSTALLER_URL).await.is_err() {
+        open_url(CODEX_MICROSOFT_STORE_WEB_URL).await?;
+    }
     println!("请在安装向导完成后运行 `vibe i app` 验证。");
     Ok(())
 }

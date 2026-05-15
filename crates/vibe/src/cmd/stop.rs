@@ -53,11 +53,12 @@ pub async fn run() -> Result<()> {
 }
 
 fn stop_pid(pid: u32) {
-    match std::env::consts::OS {
-        "windows" => stop_pid_windows(pid),
-        _ if cfg!(unix) => stop_pid_unix(pid),
-        other => eprintln!("vibe stop: unsupported OS ({other}) for pid {pid}"),
-    }
+    #[cfg(windows)]
+    stop_pid_windows(pid);
+    #[cfg(unix)]
+    stop_pid_unix(pid);
+    #[cfg(not(any(windows, unix)))]
+    eprintln!("vibe stop: unsupported OS for pid {pid}");
 }
 
 #[cfg(unix)]
@@ -87,11 +88,10 @@ fn stop_pid_windows(pid: u32) {
 }
 
 fn stop_listener_on_port(port: u16) {
-    if std::env::consts::OS == "windows" {
-        stop_listener_on_port_windows(port);
-    } else if cfg!(unix) {
-        stop_listener_on_port_unix(port);
-    }
+    #[cfg(windows)]
+    stop_listener_on_port_windows(port);
+    #[cfg(unix)]
+    stop_listener_on_port_unix(port);
 }
 
 #[cfg(unix)]
