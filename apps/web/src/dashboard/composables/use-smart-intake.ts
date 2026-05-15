@@ -893,7 +893,7 @@ export function useSmartIntake(options: UseSmartIntakeOptions = {}) {
       }
       message.value = "Profile imported";
       items.value = items.value.filter((x) => x.id !== item.id);
-      void router.push({ path: "/providers", query: { ...route.query } });
+      void router.push({ path: "/ui/providers", query: { ...route.query } });
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
     } finally {

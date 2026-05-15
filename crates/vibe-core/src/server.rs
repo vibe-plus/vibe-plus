@@ -229,6 +229,14 @@ pub fn router(state: AppState) -> Router {
             "/_vp/credentials/:id/circuit/reset",
             post(credential_circuit_reset),
         )
+        .route(
+            "/_vp/credentials/:id/models/refresh",
+            post(refresh_credential_models),
+        )
+        .route(
+            "/_vp/credentials/:id/balance/refresh",
+            post(refresh_credential_balance),
+        )
         // health overview
         .route("/_vp/health/providers", get(health_all_providers))
         // logs + usage + stats
@@ -2069,41 +2077,70 @@ pub(crate) async fn refresh_remote_models_for_provider_if_supported(
     }
 }
 
+fn pick_active_secret_for_provider(
+    state: &AppState,
+    provider_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let creds = state.db.credential_list_for_provider(provider_id)?;
+    let cred = creds
+        .into_iter()
+        .filter(|c| c.enabled)
+        .min_by_key(|c| c.priority)
+        .or_else(|| {
+            state
+                .db
+                .credential_list_for_provider(provider_id)
+                .ok()
+                .and_then(|list| list.into_iter().next())
+        });
+    let Some(cred) = cred else {
+        return Ok(None);
+    };
+    if let Some(ref auth_ref) = cred.auth_ref {
+        return Ok(Some(crate::secrets::resolve(auth_ref)?));
+    }
+    if let Some(ref access) = cred.oauth_access_token {
+        return Ok(Some(access.clone()));
+    }
+    Ok(None)
+}
+
+async fn fetch_model_ids_for_protocol(
+    http: &reqwest::Client,
+    proto: &vibe_protocol::ProviderProtocol,
+    secret: &str,
+) -> anyhow::Result<Vec<String>> {
+    let names =
+        crate::intake::fetch_upstream_model_ids(http, proto.kind, &proto.base_url, secret).await;
+    if names.is_empty() && proto.kind != vibe_protocol::ProviderKind::GeminiNative {
+        anyhow::bail!("model list refresh returned no models");
+    }
+    Ok(names)
+}
+
 async fn refresh_remote_models_for_provider(
     state: &AppState,
     provider: &Provider,
 ) -> anyhow::Result<Provider> {
     let secret = if let Some(auth_ref) = provider.auth_ref.as_deref() {
-        Some(crate::secrets::resolve(auth_ref)?)
+        crate::secrets::resolve(auth_ref).ok()
     } else {
         None
     };
-    let base = provider.base_url.trim_end_matches('/');
-    let url = match provider.kind {
-        vibe_protocol::ProviderKind::OpenaiChat | vibe_protocol::ProviderKind::OpenaiResponses => {
-            format!("{base}/v1/models")
-        }
-        vibe_protocol::ProviderKind::Anthropic => format!("{base}/v1/models"),
-        vibe_protocol::ProviderKind::GeminiNative => {
-            anyhow::bail!("gemini-native model list refresh not supported yet")
-        }
+    let secret = match secret {
+        Some(s) if !s.is_empty() => Some(s),
+        _ => pick_active_secret_for_provider(state, &provider.id)?,
     };
-    let mut req = state.http.get(url);
-    if let Some(secret) = secret.as_deref() {
-        req = req.bearer_auth(secret);
-    }
-    let resp = req.send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("model list refresh failed: HTTP {}", resp.status());
-    }
-    let v: serde_json::Value = resp.json().await?;
+    let Some(secret) = secret else {
+        anyhow::bail!("no credential secret available for model list refresh");
+    };
+
     let mut names = Vec::<String>::new();
-    if let Some(arr) = v.get("data").and_then(|x| x.as_array()) {
-        for item in arr {
-            if let Some(id) = item.get("id").and_then(|x| x.as_str()) {
-                let s = id.trim();
-                if !s.is_empty() {
-                    names.push(s.to_string());
+    for proto in provider.effective_protocols() {
+        if let Ok(mut batch) = fetch_model_ids_for_protocol(&state.http, &proto, &secret).await {
+            for id in batch.drain(..) {
+                if !names.contains(&id) {
+                    names.push(id);
                 }
             }
         }
@@ -2117,6 +2154,100 @@ async fn refresh_remote_models_for_provider(
     })
     .await?;
     Ok(updated)
+}
+
+async fn refresh_credential_models(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<vibe_protocol::Credential>, AppError> {
+    let credential = run_blocking(state.clone(), move |s| s.db.credential_get(&id))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("credential not found"))?;
+    let provider = run_blocking(state.clone(), {
+        let pid = credential.provider_id.clone();
+        move |s| s.db.provider_get(&pid)
+    })
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+
+    let secret = if let Some(auth_ref) = credential.auth_ref.as_deref() {
+        crate::secrets::resolve(auth_ref)?
+    } else if let Some(access) = credential.oauth_access_token.as_deref() {
+        access.to_string()
+    } else {
+        return Err(anyhow::anyhow!("credential has no resolvable secret").into());
+    };
+
+    let mut names = Vec::<String>::new();
+    for proto in provider.effective_protocols() {
+        if let Ok(mut batch) = fetch_model_ids_for_protocol(&state.http, &proto, &secret).await {
+            for mid in batch.drain(..) {
+                if !names.contains(&mid) {
+                    names.push(mid);
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    let fetched_at = chrono::Utc::now().timestamp();
+    let cred_id = credential.id.clone();
+    let updated = run_blocking(state.clone(), move |s| {
+        s.db.credential_update_remote_models(&cred_id, names, fetched_at)
+    })
+    .await?;
+
+    let _ = refresh_remote_models_for_provider(&state, &provider).await;
+    publish_providers_overview_soon(state);
+    Ok(Json(updated))
+}
+
+async fn refresh_credential_balance(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<vibe_protocol::Credential>, AppError> {
+    let credential = run_blocking(state.clone(), move |s| s.db.credential_get(&id))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("credential not found"))?;
+    let provider = run_blocking(state.clone(), {
+        let pid = credential.provider_id.clone();
+        move |s| s.db.provider_get(&pid)
+    })
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+
+    let secret = if let Some(auth_ref) = credential.auth_ref.as_deref() {
+        crate::secrets::resolve(auth_ref)?
+    } else if let Some(access) = credential.oauth_access_token.as_deref() {
+        access.to_string()
+    } else {
+        return Err(anyhow::anyhow!("credential has no resolvable secret").into());
+    };
+
+    let primary = provider.effective_protocols().into_iter().next();
+    let Some(proto) = primary else {
+        return Err(anyhow::anyhow!("provider has no protocols").into());
+    };
+    let financials = crate::intake::fetch_financials_for_base(
+        &state.http,
+        proto.kind,
+        &proto.base_url,
+        &secret,
+    )
+    .await;
+    let fetched_at = chrono::Utc::now().timestamp();
+    let cred_id = credential.id.clone();
+    let updated = run_blocking(state.clone(), move |s| {
+        s.db.credential_update_financials(
+            &cred_id,
+            financials.balance.clone(),
+            financials.usage.clone(),
+            fetched_at,
+        )
+    })
+    .await?;
+    publish_providers_overview_soon(state);
+    Ok(Json(updated))
 }
 
 // ---------------------------------------------------------------------------
@@ -2137,6 +2268,8 @@ fn provider_to_input(p: &Provider) -> ProviderInput {
         avatar_url: p.avatar_url.clone(),
         kind: p.kind,
         base_url: p.base_url.clone(),
+        protocols: p.effective_protocols(),
+        host: p.host.clone(),
         auth_ref: p.auth_ref.clone(),
         enabled: p.enabled,
         priority: p.priority,
@@ -2289,7 +2422,7 @@ async fn import_local_providers(
                     existing_provider
                 };
                 created.push(p);
-            } else if c.client.starts_with("ccs:") {
+            } else if c.client.starts_with("ccs:") || c.client.starts_with("ccs-db:") {
                 let pid = existing.id.clone();
                 let existing_provider = run_blocking(state.clone(), {
                     let pid = pid.clone();
@@ -5816,7 +5949,8 @@ mod request_body_limit_tests {
                 avatar_url: None,
                 kind: ProviderKind::OpenaiResponses,
                 base_url: "http://127.0.0.1:9".into(),
-                auth_ref: None,
+                protocols: vec![],
+                host: None,auth_ref: None,
                 enabled: true,
                 priority: 100,
                 supports_websocket: None,

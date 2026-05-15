@@ -21,6 +21,177 @@ pub enum ProviderKind {
     GeminiNative,
 }
 
+/// One upstream wire endpoint for a logical vendor (e.g. DeepSeek Chat + Messages).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/ProviderProtocol.ts")]
+pub struct ProviderProtocol {
+    pub kind: ProviderKind,
+    pub base_url: String,
+    #[serde(default)]
+    pub model_aliases: Vec<ModelAlias>,
+}
+
+/// Human-facing wire protocol label (not the internal slug).
+pub fn protocol_display_label(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Anthropic => "Messages",
+        ProviderKind::OpenaiChat => "Chat",
+        ProviderKind::OpenaiResponses => "Responses",
+        ProviderKind::GeminiNative => "Generate",
+    }
+}
+
+pub fn provider_kind_slug(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::OpenaiChat => "openai-chat",
+        ProviderKind::OpenaiResponses => "openai-responses",
+        ProviderKind::GeminiNative => "gemini-native",
+    }
+}
+
+/// Map API hostnames to a short brand label for display and icon matching.
+pub fn host_to_brand_label(host: &str) -> Option<&'static str> {
+    let h = host.trim().trim_start_matches("www.").to_ascii_lowercase();
+    match h.as_str() {
+        "api.deepseek.com" | "deepseek.com" => Some("DeepSeek"),
+        "api.moonshot.cn" | "api.moonshot.ai" | "moonshot.cn" => Some("Moonshot"),
+        "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com" => Some("Qwen"),
+        "open.bigmodel.cn" => Some("ChatGLM"),
+        "api.anthropic.com" => Some("Anthropic"),
+        "api.openai.com" => Some("OpenAI"),
+        "generativelanguage.googleapis.com" => Some("Google"),
+        "api.groq.com" => Some("Groq"),
+        "openrouter.ai" | "api.openrouter.ai" => Some("OpenRouter"),
+        "api.mistral.ai" => Some("Mistral"),
+        "api.x.ai" => Some("xAI"),
+        "api.together.xyz" => Some("Together"),
+        "api.fireworks.ai" => Some("Fireworks"),
+        "api.minimax.chat" => Some("MiniMax"),
+        "api.z.ai" | "open.z.ai" => Some("Zhipu"),
+        "api.siliconflow.cn" => Some("SiliconFlow"),
+        _ => None,
+    }
+}
+
+pub fn host_from_base_url(base_url: &str) -> Option<String> {
+    let trimmed = base_url.trim();
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))?;
+    let host = rest.split('/').next()?.split(':').next()?.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Normalized hostname for provider deduplication (lowercase, no `www.`).
+pub fn canonical_provider_host(input: &str) -> Option<String> {
+    let host = if input.contains("://") {
+        host_from_base_url(input)?
+    } else {
+        input.trim().to_string()
+    };
+    let key = host.trim().trim_start_matches("www.").to_ascii_lowercase();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
+}
+
+/// Fallback label from hostname segments, e.g. `api.deepseek.com` → `Api Deepseek`.
+pub fn host_label_camel_fallback(host: &str) -> String {
+    const SKIP: &[&str] = &[
+        "www", "api", "com", "cn", "net", "org", "io", "ai", "dev", "co", "uk",
+    ];
+    let parts: Vec<String> = host
+        .trim()
+        .trim_start_matches("www.")
+        .split('.')
+        .filter(|p| !p.is_empty() && !SKIP.contains(&p.to_ascii_lowercase().as_str()))
+        .map(|p| {
+            let mut chars = p.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let mut out = first.to_uppercase().to_string();
+                    out.push_str(chars.as_str());
+                    out
+                }
+            }
+        })
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        host.trim().to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+pub fn display_name_for_remote(
+    branding_name: Option<&str>,
+    base_url: &str,
+    _kind: ProviderKind,
+) -> String {
+    if let Some(name) = branding_name.map(str::trim).filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    if let Some(host) = host_from_base_url(base_url) {
+        if let Some(brand) = host_to_brand_label(&host) {
+            return brand.to_string();
+        }
+        return host_label_camel_fallback(&host);
+    }
+    base_url.trim().to_string()
+}
+
+impl ProviderProtocol {
+    pub fn from_kind_base(kind: ProviderKind, base_url: impl Into<String>) -> Self {
+        Self {
+            kind,
+            base_url: base_url.into(),
+            model_aliases: Vec::new(),
+        }
+    }
+}
+
+impl Provider {
+    /// Effective protocol list: stored `protocols` or a single entry from legacy `kind` + `base_url`.
+    pub fn effective_protocols(&self) -> Vec<ProviderProtocol> {
+        if !self.protocols.is_empty() {
+            return self.protocols.clone();
+        }
+        vec![ProviderProtocol {
+            kind: self.kind,
+            base_url: self.base_url.clone(),
+            model_aliases: self.model_aliases.clone(),
+        }]
+    }
+
+    /// Pick the protocol entry that matches `wire_kind`, or the primary (`kind` / first).
+    pub fn protocol_for_kind(&self, wire_kind: ProviderKind) -> ProviderProtocol {
+        self.effective_protocols()
+            .into_iter()
+            .find(|p| p.kind == wire_kind)
+            .unwrap_or_else(|| ProviderProtocol::from_kind_base(self.kind, self.base_url.clone()))
+    }
+
+    /// Provider clone with `kind` / `base_url` / aliases aligned to the chosen protocol.
+    pub fn with_protocol(&self, proto: &ProviderProtocol) -> Self {
+        let mut out = self.clone();
+        out.kind = proto.kind;
+        out.base_url = proto.base_url.clone();
+        if !proto.model_aliases.is_empty() {
+            out.model_aliases = proto.model_aliases.clone();
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/RouteTier.ts")]
 #[serde(rename_all = "kebab-case")]
@@ -47,6 +218,12 @@ pub struct Provider {
     pub avatar_url: Option<String>,
     pub kind: ProviderKind,
     pub base_url: String,
+    /// All wire endpoints for this vendor (Chat + Messages on the same host, etc.).
+    #[serde(default)]
+    pub protocols: Vec<ProviderProtocol>,
+    /// Parsed hostname for dedupe and branding (`api.deepseek.com`, …).
+    #[serde(default)]
+    pub host: Option<String>,
     pub auth_ref: Option<String>,
     pub enabled: bool,
     pub priority: i32,
@@ -99,11 +276,24 @@ pub struct RemoteProviderCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(
     export,
+    export_to = "../packages/protocol/types/RemoteDetectedProtocol.ts"
+)]
+pub struct RemoteDetectedProtocol {
+    pub kind: String,
+    pub label: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
     export_to = "../packages/protocol/types/RemoteProviderPreview.ts"
 )]
 pub struct RemoteProviderPreview {
     pub detected_kind: String,
     pub detected_base_url: String,
+    #[serde(default)]
+    pub detected_protocols: Vec<RemoteDetectedProtocol>,
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub note: String,
@@ -130,7 +320,7 @@ pub struct ProviderSpeedtestResult {
     pub checked_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/ModelAlias.ts")]
 pub struct ModelAlias {
     pub alias: String,
@@ -695,6 +885,10 @@ pub struct ProviderInput {
     pub avatar_url: Option<String>,
     pub kind: ProviderKind,
     pub base_url: String,
+    #[serde(default)]
+    pub protocols: Vec<ProviderProtocol>,
+    #[serde(default)]
+    pub host: Option<String>,
     pub auth_ref: Option<String>,
     pub enabled: bool,
     pub priority: i32,
@@ -1018,6 +1212,17 @@ pub struct Credential {
     /// Raw `chatgpt_plan_type` from `https://api.openai.com/auth` in the JWT (e.g. plus, pro); optional UI hint only.
     #[serde(default)]
     pub oauth_chatgpt_plan_slug: Option<String>,
+    /// Model ids fetched with this credential's key (may differ per key).
+    #[serde(default)]
+    pub remote_models: Vec<String>,
+    #[serde(default)]
+    pub remote_models_fetched_at: Option<i64>,
+    #[serde(default)]
+    pub balance: Option<ProviderBalanceSnapshot>,
+    #[serde(default)]
+    pub usage: Option<ProviderBalanceSnapshot>,
+    #[serde(default)]
+    pub balance_fetched_at: Option<i64>,
 }
 
 /// Body for `POST /_vp/providers/:id/credentials` and `PUT /_vp/credentials/:id`.

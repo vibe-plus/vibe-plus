@@ -3,12 +3,23 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import type { ProviderKind } from "../api/client.ts";
 import VpIcon from "./vp-icon.vue";
 import type { vp_icon_name } from "./vp-icon.vue";
+import { brandHintFromHost } from "../utils/brand-hint.ts";
+import {
+  faviconUrlForHost,
+  frameworkIconFromBaseUrl,
+  hostFromUrlOrHost,
+} from "../utils/provider-visual.ts";
 
 const props = withDefaults(
   defineProps<{
     kind?: ProviderKind;
     avatarUrl?: string | null;
     providerName?: string | null;
+    /** Host or URL used for favicon + brand hint (defaults to providerName). */
+    hostHint?: string | null;
+    /** Base URL for framework icon detection (sub2api / newapi). */
+    baseUrl?: string | null;
+    brandHint?: string | null;
     enabled?: boolean;
     circuitState?: string | null;
     activeRequestCount?: number;
@@ -18,6 +29,9 @@ const props = withDefaults(
     iconSizeClass?: string;
   }>(),
   {
+    brandHint: null,
+    hostHint: null,
+    baseUrl: null,
     enabled: true,
     circuitState: "closed",
     activeRequestCount: 0,
@@ -33,21 +47,191 @@ function providerIconName(kind: ProviderKind | undefined): vp_icon_name {
   return "server";
 }
 
-function providerBrandIconClass(kind: ProviderKind | undefined): string | null {
-  if (kind === "openai-responses" || kind === "openai-chat") return "i-lobe-openai";
-  if (kind === "anthropic") return "i-lobe-anthropic";
-  if (kind === "gemini-native") return "i-lobe-gemini-color";
+const BRAND_EXACT_KEYS = [
+  "deepseek",
+  "moonshot",
+  "openrouter",
+  "perplexity",
+  "fireworks",
+  "volcengine",
+  "huggingface",
+  "cloudflare",
+  "chatglm",
+  "baichuan",
+  "replicate",
+  "together",
+  "stepfun",
+  "minimax",
+  "mistral",
+  "bedrock",
+  "cohere",
+  "doubao",
+  "hunyuan",
+  "nvidia",
+  "ollama",
+  "spark",
+  "wenxin",
+  "zhipu",
+  "gemini",
+  "google",
+  "claude",
+  "openai",
+  "anthropic",
+  "azure",
+  "groq",
+  "grok",
+  "xai",
+  "qwen",
+  "kimi",
+] as const;
+
+const BRAND_ICON_MAP: Record<string, string> = {
+  openai: "i-lobe-openai",
+  anthropic: "i-lobe-anthropic",
+  claude: "i-lobe-claude-color",
+  gemini: "i-lobe-gemini-color",
+  google: "i-lobe-google-color",
+  deepseek: "i-lobe-deepseek-color",
+  qwen: "i-lobe-qwen-color",
+  moonshot: "i-lobe-moonshot",
+  kimi: "i-lobe-kimi-color",
+  groq: "i-lobe-groq",
+  openrouter: "i-lobe-openrouter",
+  mistral: "i-lobe-mistral-color",
+  fireworks: "i-lobe-fireworks-color",
+  grok: "i-lobe-grok",
+  xai: "i-lobe-xai",
+  together: "i-lobe-together-color",
+  replicate: "i-lobe-replicate",
+  zhipu: "i-lobe-zhipu-color",
+  chatglm: "i-lobe-chatglm-color",
+  azure: "i-lobe-azure-color",
+  bedrock: "i-lobe-bedrock-color",
+  baichuan: "i-lobe-baichuan-color",
+  cloudflare: "i-lobe-cloudflare-color",
+  cohere: "i-lobe-cohere-color",
+  doubao: "i-lobe-doubao-color",
+  huggingface: "i-lobe-huggingface-color",
+  hunyuan: "i-lobe-hunyuan-color",
+  minimax: "i-lobe-minimax-color",
+  nvidia: "i-lobe-nvidia-color",
+  ollama: "i-lobe-ollama",
+  perplexity: "i-lobe-perplexity-color",
+  spark: "i-lobe-spark-color",
+  stepfun: "i-lobe-stepfun-color",
+  volcengine: "i-lobe-volcengine-color",
+  wenxin: "i-lobe-wenxin-color",
+};
+
+const PROTOCOL_FALLBACK_MAP: Record<string, string> = {
+  anthropic: "i-lobe-anthropic",
+  "openai-chat": "i-lobe-openai",
+  "openai-compat": "i-lobe-openai",
+  "openai-responses": "i-lobe-openai",
+  "gemini-native": "i-lobe-gemini-color",
+};
+
+function brandIconForName(name: string): string | null {
+  const lower = name.toLowerCase();
+  if (BRAND_ICON_MAP[lower]) return BRAND_ICON_MAP[lower];
+  for (const key of BRAND_EXACT_KEYS) {
+    if (lower.includes(key) && BRAND_ICON_MAP[key]) return BRAND_ICON_MAP[key]!;
+  }
   return null;
 }
 
-const active = computed(() => props.enabled && props.activeRequestCount > 0);
-const blocked = computed(() => props.circuitState === "open" || props.circuitState === "half-open");
-const brandIconClass = computed(() => providerBrandIconClass(props.kind));
+function protocolFallbackIcon(kind: ProviderKind | undefined): string | null {
+  if (!kind) return null;
+  return PROTOCOL_FALLBACK_MAP[kind] ?? null;
+}
+
+function providerBrandIconClass(
+  kind: ProviderKind | undefined,
+  brandHint: string | null,
+  providerName: string | null,
+  hostHint: string | null,
+): string | null {
+  if (brandHint) {
+    const icon = brandIconForName(brandHint);
+    if (icon) return icon;
+  }
+  const host = hostFromUrlOrHost(hostHint) ?? hostFromUrlOrHost(providerName);
+  if (host) {
+    const fromHost = brandHintFromHost(host);
+    if (fromHost) {
+      const icon = brandIconForName(fromHost);
+      if (icon) return icon;
+    }
+  }
+  if (providerName) {
+    const icon = brandIconForName(providerName);
+    if (icon) return icon;
+  }
+  return protocolFallbackIcon(kind);
+}
+
+const resolvedHost = computed(
+  () =>
+    hostFromUrlOrHost(props.hostHint) ??
+    hostFromUrlOrHost(props.providerName) ??
+    hostFromUrlOrHost(props.baseUrl),
+);
+
+const brandIconClass = computed(() =>
+  providerBrandIconClass(
+    props.kind,
+    props.brandHint ?? null,
+    props.providerName ?? null,
+    resolvedHost.value,
+  ),
+);
+
+const frameworkIconClass = computed(() => frameworkIconFromBaseUrl(props.baseUrl));
+const faviconUrl = computed(() => faviconUrlForHost(resolvedHost.value));
+
+const avatarBroken = ref(false);
+const faviconBroken = ref(false);
+
+watch(
+  () => props.avatarUrl,
+  () => {
+    avatarBroken.value = false;
+  },
+);
+
+watch(faviconUrl, () => {
+  faviconBroken.value = false;
+});
+
+/** 1 LobeHub brand → 2 avatar URL → 3 favicon → 4 framework → 5 protocol / initial / generic */
+const visualMode = computed<
+  "brand" | "avatar" | "favicon" | "framework" | "protocol" | "initial" | "generic"
+>(() => {
+  if (brandIconClass.value) return "brand";
+  if (props.avatarUrl && !avatarBroken.value) return "avatar";
+  if (faviconUrl.value && !faviconBroken.value) return "favicon";
+  if (frameworkIconClass.value) return "framework";
+  if (protocolFallbackIcon(props.kind)) return "protocol";
+  if (props.providerName?.trim()) return "initial";
+  return "generic";
+});
+
+const showBrandIcon = computed(() => visualMode.value === "brand");
+const protocolIconClass = computed(() => protocolFallbackIcon(props.kind));
+const showProtocolIcon = computed(() => visualMode.value === "protocol");
+const showAvatarImg = computed(() => visualMode.value === "avatar");
+const showFaviconImg = computed(() => visualMode.value === "favicon");
+const showFrameworkIcon = computed(() => visualMode.value === "framework");
+
 const fallbackInitial = computed(() => (props.providerName?.trim()?.[0] ?? "?").toUpperCase());
 const fallbackIconName = computed(() => providerIconName(props.kind));
+
 const motionEl = ref<HTMLElement | null>(null);
 let frameId = 0;
 let currentPlaybackRate = 1;
+
+const active = computed(() => props.enabled && props.activeRequestCount > 0);
+const blocked = computed(() => props.circuitState === "open" || props.circuitState === "half-open");
 
 const targetPlaybackRate = computed(() => {
   if (!active.value) return 1;
@@ -99,6 +283,7 @@ watch(
 onBeforeUnmount(() => {
   if (frameId) window.cancelAnimationFrame(frameId);
 });
+
 const statusClass = computed(() => {
   if (!props.enabled) return "bg-slate-400";
   if (props.circuitState === "open") return "bg-red-500";
@@ -126,16 +311,8 @@ const title = computed(() => {
     ]"
     :title="title"
   >
-    <img
-      v-if="avatarUrl"
-      :src="avatarUrl"
-      :alt="providerName ?? 'provider avatar'"
-      class="h-full w-full object-cover"
-      loading="lazy"
-      referrerpolicy="no-referrer"
-    />
     <span
-      v-else-if="brandIconClass"
+      v-if="showBrandIcon"
       :ref="setMotionEl"
       :class="[
         brandIconClass,
@@ -144,15 +321,53 @@ const title = computed(() => {
       ]"
       aria-hidden="true"
     />
-    <div
-      v-else-if="providerName"
+    <span
+      v-else-if="showProtocolIcon"
+      :ref="setMotionEl"
+      :class="[
+        protocolIconClass,
+        iconSizeClass,
+        active ? 'provider-logo__spin' : 'provider-logo__breathe',
+      ]"
+      aria-hidden="true"
+    />
+    <img
+      v-else-if="showAvatarImg"
+      :src="avatarUrl!"
+      :alt="providerName ?? 'provider avatar'"
+      class="h-full w-full object-cover"
+      loading="lazy"
+      referrerpolicy="no-referrer"
+      @error="avatarBroken = true"
+    />
+    <img
+      v-else-if="showFaviconImg"
+      :src="faviconUrl!"
+      :alt="providerName ?? 'favicon'"
+      class="h-full w-full object-cover"
+      loading="lazy"
+      referrerpolicy="no-referrer"
+      @error="faviconBroken = true"
+    />
+    <span
+      v-else-if="showFrameworkIcon"
+      :ref="setMotionEl"
+      :class="[
+        frameworkIconClass,
+        iconSizeClass,
+        active ? 'provider-logo__spin' : 'provider-logo__breathe',
+      ]"
+      aria-hidden="true"
+    />
+    <span
+      v-else-if="visualMode === 'initial'"
       :ref="setMotionEl"
       class="text-xs font-semibold text-slate-700"
       :class="active ? 'provider-logo__breathe' : ''"
       aria-hidden="true"
     >
       {{ fallbackInitial }}
-    </div>
+    </span>
     <span
       v-else
       :ref="setMotionEl"

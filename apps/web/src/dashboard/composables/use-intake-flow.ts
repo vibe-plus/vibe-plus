@@ -581,6 +581,24 @@ function openWithCandidates(items: SmartIntakeItem[]) {
   return true;
 }
 
+let shyFocusTimer: number | null = null;
+let shyFocusBound = false;
+
+function bindShyClipboardOnFocus() {
+  if (shyFocusBound || typeof window === "undefined") return;
+  shyFocusBound = true;
+  const revisit = () => {
+    if (shyFocusTimer != null) window.clearTimeout(shyFocusTimer);
+    shyFocusTimer = window.setTimeout(() => {
+      void tryShyClipboard();
+    }, 900);
+  };
+  window.addEventListener("focus", revisit);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") revisit();
+  });
+}
+
 export function useIntakeFlow() {
   return {
     state,
@@ -620,6 +638,7 @@ export function useIntakeFlow() {
     openWithCandidates,
     dismissShy,
     acceptShy,
+    bindShyClipboardOnFocus,
   };
 }
 

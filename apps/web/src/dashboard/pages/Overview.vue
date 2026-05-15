@@ -609,7 +609,7 @@ const fuelCards = computed<FuelCard[]>(() => {
     value: formatUsd(recentCostUsd.value),
     detail: modelPrices.value.size ? "last hour · models.dev priced" : "last hour · local logs",
     tone: recentCostUsd.value > 5 ? "warn" : "muted",
-    to: "/statistics",
+    to: "/ui/statistics",
   });
 
   const codex = codexQuotaSummary.value;
@@ -631,7 +631,7 @@ const fuelCards = computed<FuelCard[]>(() => {
           : codex.remainingPct < 35
             ? "warn"
             : "good",
-    to: "/providers",
+    to: "/ui/providers",
   });
 
   cards.push({
@@ -648,7 +648,7 @@ const fuelCards = computed<FuelCard[]>(() => {
         : blockedCredentialTotal.value > 0
           ? "warn"
           : "good",
-    to: "/providers",
+    to: "/ui/providers",
   });
 
   const attention =
@@ -666,7 +666,7 @@ const fuelCards = computed<FuelCard[]>(() => {
         .filter(Boolean)
         .join(" · ") || "providers look stable",
     tone: attention ? "warn" : "good",
-    to: attention ? "/providers" : "/statistics",
+    to: attention ? "/ui/providers" : "/ui/statistics",
   });
 
   return cards;
@@ -688,7 +688,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
       icon: "alert-triangle",
       title: "Gateway offline",
       detail: "Start the gateway before running clients.",
-      to: "/settings",
+      to: "/ui/settings",
       tone: "warn",
     });
     return items;
@@ -703,7 +703,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
         scopedLiveTokensPerSec.value > 0
           ? `${fmtTps(scopedLiveTokensPerSec.value)} flowing right now.`
           : `${compactBytes(scopedLiveBytesPerSec.value)}/s flowing right now.`,
-      to: "/logs",
+      to: "/ui/monitor",
       tone: "live",
     });
   } else {
@@ -714,7 +714,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
       detail: hasProviderAttention.value
         ? "Idle right now; provider capacity has separate attention items below."
         : `${activeCredentialTotal.value} ready credential${activeCredentialTotal.value === 1 ? "" : "s"} standing by.`,
-      to: hasProviderAttention.value ? "/providers" : "/logs",
+      to: hasProviderAttention.value ? "/ui/providers" : "/ui/monitor",
       tone: hasProviderAttention.value ? "warn" : "muted",
     });
   }
@@ -725,7 +725,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
       icon: "alert-triangle",
       title: `${blockedCredentialTotal.value} credential${blockedCredentialTotal.value > 1 ? "s" : ""} blocked`,
       detail: "Rate limits or circuit breakers are reducing capacity.",
-      to: "/providers",
+      to: "/ui/providers",
       tone: "warn",
     });
   }
@@ -736,7 +736,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
       icon: "alert-triangle",
       title: `${providerIssueCount.value} provider${providerIssueCount.value > 1 ? "s" : ""} need attention`,
       detail: "Success rate dipped below the healthy range.",
-      to: "/providers",
+      to: "/ui/providers",
       tone: "warn",
     });
   }
@@ -747,7 +747,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
       icon: "server",
       title: "No ready credentials",
       detail: "Add or unpause credentials to restore routing capacity.",
-      to: "/providers",
+      to: "/ui/providers",
       tone: "warn",
     });
   }
@@ -761,7 +761,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
         scopedRequestCount.value > 0
           ? `${pct(scopedSuccessRate.value)} success over the last hour.`
           : "No recent traffic in this view.",
-      to: scopedRequestCount.value > 0 ? "/statistics" : "/providers",
+      to: scopedRequestCount.value > 0 ? "/ui/statistics" : "/ui/providers",
       tone: scopedRequestCount.value > 0 ? "good" : "muted",
     });
   }
@@ -772,7 +772,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
       icon: "pie-chart",
       title: "Review the detailed window",
       detail: "Use Statistics for 5h, 24h, 7d, and 30d breakdowns.",
-      to: "/statistics",
+      to: "/ui/statistics",
       tone: "muted",
     });
   }
@@ -1276,7 +1276,7 @@ const codexTransportItems = computed(() => [
                 <span class="text-sm font-semibold text-vp-text">Next</span>
               </div>
               <RouterLink
-                :to="{ path: '/statistics', query: route.query }"
+                :to="{ path: '/ui/statistics', query: route.query }"
                 class="inline-flex size-8 items-center justify-center rounded-lg text-vp-muted hover:bg-vp-bg-hover hover:text-vp-text"
                 title="Statistics"
               >
@@ -1307,7 +1307,7 @@ const codexTransportItems = computed(() => [
                 <span class="text-sm font-semibold text-vp-text">Providers</span>
               </div>
               <RouterLink
-                :to="{ path: '/providers', query: route.query }"
+                :to="{ path: '/ui/providers', query: route.query }"
                 class="font-mono text-[11px] text-vp-muted hover:text-vp-text"
                 title="Providers"
               >
@@ -1318,7 +1318,7 @@ const codexTransportItems = computed(() => [
               <RouterLink
                 v-for="p in activeProviderCards"
                 :key="p.provider_id"
-                :to="{ path: '/providers', query: { ...route.query, provider: p.provider_id } }"
+                :to="{ path: '/ui/providers', query: { ...route.query, provider: p.provider_id } }"
                 class="group/provider flex min-w-0 items-center gap-3 px-4 py-3 hover:bg-vp-bg-hover"
               >
                 <ProviderLogo
@@ -1393,7 +1393,7 @@ const codexTransportItems = computed(() => [
               <span class="font-mono text-xs text-vp-muted">{{ visibleRecentLogs.length }}</span>
             </div>
             <RouterLink
-              :to="{ path: '/logs', query: route.query }"
+              :to="{ path: '/ui/monitor', query: route.query }"
               class="block px-4 py-3 hover:bg-vp-bg-hover"
             >
               <div v-if="currentLog" class="flex min-w-0 items-center gap-2">

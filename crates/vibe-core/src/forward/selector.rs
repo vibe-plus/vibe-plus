@@ -279,7 +279,8 @@ mod tests {
             avatar_url: None,
             kind: ProviderKind::OpenaiChat,
             base_url: "https://example.com".into(),
-            auth_ref: auth_ref.map(str::to_string),
+            protocols: vec![],
+            host: None,auth_ref: auth_ref.map(str::to_string),
             enabled: true,
             priority: 10,
             supports_websocket: None,
@@ -425,6 +426,11 @@ mod tests {
             oauth_account_email: None,
             oauth_account_subject: None,
             oauth_chatgpt_plan_slug: None,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            balance: None,
+            usage: None,
+            balance_fetched_at: None,
         }
     }
 

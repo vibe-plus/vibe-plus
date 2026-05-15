@@ -5,6 +5,8 @@ import VpIcon from "./vp-icon.vue";
 import IntakeLootAnimation from "./intake-loot-animation.vue";
 import ProviderLogo from "./provider-logo.vue";
 import { displayProviderName } from "../utils/providers-display.ts";
+import { protocolLabel } from "../utils/protocol-label.ts";
+import { brandHintFromHost } from "../utils/brand-hint.ts";
 import type { ProbeResult, ProviderBalanceSnapshot } from "../api/intake-types.ts";
 
 const flow = useIntakeFlow();
@@ -104,6 +106,13 @@ function probeDetailText(candidateId: string, providerId: string): string {
   const r = flow.resultFor(candidateId, providerId);
   return r ? probeResponseSummary(r) : "";
 }
+
+const remoteCandidateRows = computed(() =>
+  remoteCandidates.value.map((cand) => ({
+    cand,
+    preview: remotePreviewByCandidate.value[cand.id] ?? null,
+  })),
+);
 </script>
 
 <template>
@@ -162,28 +171,44 @@ function probeDetailText(candidateId: string, providerId: string): string {
 
           <div v-if="remoteCandidate" class="grid gap-4 lg:grid-cols-2">
             <article
-              v-for="cand in remoteCandidates"
+              v-for="{ cand, preview } in remoteCandidateRows"
               :key="cand.id"
               class="rounded-2xl border border-vp-border bg-[color-mix(in_srgb,var(--vp-primary)_3%,var(--vp-surface))] p-4 shadow-sm"
             >
-              <template v-if="remotePreviewByCandidate[cand.id] as preview">
+              <template v-if="preview">
                 <div class="flex items-start gap-3">
                   <ProviderLogo
                     :kind="preview.detected_kind as any"
                     :avatar-url="preview.avatar_url"
                     :provider-name="preview.display_name"
+                    :host-hint="preview.detected_base_url"
+                    :base-url="preview.detected_base_url"
+                    :brand-hint="
+                      brandHintFromHost(preview.detected_base_url) ??
+                      brandHintFromHost(preview.display_name)
+                    "
                     size-class="size-12"
                     icon-size-class="size-6"
                   />
                   <div class="min-w-0 flex-1">
-                    <div class="flex items-center gap-2 min-w-0">
+                    <div class="flex flex-wrap items-center gap-1.5 min-w-0">
                       <h3 class="truncate text-base font-semibold text-vp-text">
                         {{ preview.display_name }}
                       </h3>
                       <span
-                        class="shrink-0 rounded-full border border-vp-border px-2 py-0.5 text-[10px] font-mono text-vp-muted"
+                        v-for="proto in preview.detected_protocols?.length
+                          ? preview.detected_protocols
+                          : [
+                              {
+                                kind: preview.detected_kind,
+                                label: protocolLabel(preview.detected_kind),
+                              },
+                            ]"
+                        :key="`${proto.kind}-${proto.base_url ?? ''}`"
+                        class="shrink-0 rounded-full border border-vp-border px-2 py-0.5 text-[10px] font-medium text-vp-muted"
+                        :title="proto.base_url"
                       >
-                        {{ preview.detected_kind }}
+                        {{ proto.label ?? protocolLabel(proto.kind) }}
                       </span>
                     </div>
                     <p class="mt-1 break-all font-mono text-[11px] text-vp-muted">

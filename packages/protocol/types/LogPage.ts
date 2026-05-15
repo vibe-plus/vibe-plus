@@ -4,4 +4,10 @@ import type { RequestLog } from "./RequestLog.js";
 /**
  * Paginated request log envelope returned by `GET /_vp/logs`.
  */
-export type LogPage = { items: Array<RequestLog>; total: bigint; limit: bigint; offset: bigint };
+export type LogPage = {
+  items: Array<RequestLog>;
+  total: bigint;
+  limit: bigint;
+  offset: bigint;
+  has_more: boolean;
+};

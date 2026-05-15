@@ -37,6 +37,13 @@ export interface ModelAlias {
   alias: string;
   upstream_model: string;
 }
+
+export interface ProviderProtocol {
+  kind: ProviderKind;
+  base_url: string;
+  model_aliases: ModelAlias[];
+}
+
 export interface Provider {
   id: string;
   name: string;
@@ -44,6 +51,8 @@ export interface Provider {
   avatar_url: string | null;
   kind: ProviderKind;
   base_url: string;
+  protocols?: ProviderProtocol[];
+  host?: string | null;
   auth_ref: string | null;
   enabled: boolean;
   priority: number;
@@ -70,6 +79,8 @@ export interface ProviderInput {
   avatar_url: string | null;
   kind: ProviderKind;
   base_url: string;
+  protocols?: ProviderProtocol[];
+  host?: string | null;
   auth_ref: string | null;
   enabled: boolean;
   priority: number;
@@ -723,6 +734,21 @@ export interface Credential {
   oauth_account_subject?: string | null;
   /** Raw JWT `https://api.openai.com/auth.chatgpt_plan_type` value, such as plus or pro; secondary display only. */
   oauth_chatgpt_plan_slug?: string | null;
+  remote_models?: string[];
+  remote_models_fetched_at?: number | null;
+  balance?: ProviderBalanceSnapshot | null;
+  usage?: ProviderBalanceSnapshot | null;
+  balance_fetched_at?: number | null;
+}
+
+export interface ProviderBalanceSnapshot {
+  currency: string;
+  balance: string | null;
+  remaining: string | null;
+  used: string | null;
+  total: string | null;
+  period: string | null;
+  note: string | null;
 }
 
 export interface CredentialInput {
@@ -970,6 +996,10 @@ export const api = {
       req<CredentialPlanSnapshot>(`/_vp/credentials/${id}/plan/refresh`, {
         method: "POST",
       }),
+    refreshModels: (id: string) =>
+      req<Credential>(`/_vp/credentials/${id}/models/refresh`, { method: "POST" }),
+    refreshBalance: (id: string) =>
+      req<Credential>(`/_vp/credentials/${id}/balance/refresh`, { method: "POST" }),
   },
   routes: {
     list: () => req<Route[]>("/_vp/routes"),

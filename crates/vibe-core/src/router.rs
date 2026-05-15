@@ -52,32 +52,48 @@ pub fn candidates(providers: &[Provider], wire: Wire, requested_model: &str) -> 
 
     providers
         .iter()
-        .filter(|p| p.enabled && kinds.contains(&p.kind))
+        .filter(|p| p.enabled && provider_supports_wire_kinds(p, kinds))
         .filter_map(|p| {
-            if provider_is_chatgpt_codex_official(p) {
+            let routed = provider_for_wire_kinds(p, kinds)?;
+            if provider_is_chatgpt_codex_official(&routed) {
                 return Some(Pick {
-                    provider: p.clone(),
+                    provider: routed,
                     upstream_model: requested_model.to_string(),
                 });
             }
-            if p.model_aliases.is_empty() {
-                // Pass-through provider: accepts any model.
+            if routed.model_aliases.is_empty() {
                 Some(Pick {
-                    provider: p.clone(),
+                    provider: routed,
                     upstream_model: requested_model.to_string(),
                 })
             } else {
-                // Alias-configured provider: only match if an alias entry matches.
-                p.model_aliases
+                let upstream = routed
+                    .model_aliases
                     .iter()
                     .find(|a| a.alias == requested_model || a.upstream_model == requested_model)
-                    .map(|a| Pick {
-                        provider: p.clone(),
-                        upstream_model: a.upstream_model.clone(),
-                    })
+                    .map(|a| a.upstream_model.clone())?;
+                Some(Pick {
+                    provider: routed,
+                    upstream_model: upstream,
+                })
             }
         })
         .collect()
+}
+
+fn provider_supports_wire_kinds(p: &Provider, kinds: &[ProviderKind]) -> bool {
+    p.effective_protocols()
+        .iter()
+        .any(|proto| kinds.contains(&proto.kind))
+}
+
+fn provider_for_wire_kinds(p: &Provider, kinds: &[ProviderKind]) -> Option<Provider> {
+    for proto in p.effective_protocols() {
+        if kinds.contains(&proto.kind) {
+            return Some(p.with_protocol(&proto));
+        }
+    }
+    None
 }
 
 pub fn matching_route<'a>(routes: &'a [Route], requested_model: &str) -> Option<&'a Route> {
@@ -122,7 +138,8 @@ mod tests {
             avatar_url: None,
             kind: ProviderKind::OpenaiResponses,
             base_url: "https://chatgpt.com/backend-api/codex".into(),
-            auth_ref: None,
+            protocols: vec![],
+            host: None,auth_ref: None,
             enabled: true,
             priority: 10,
             supports_websocket: Some(true),
@@ -149,7 +166,8 @@ mod tests {
             avatar_url: None,
             kind: ProviderKind::OpenaiChat,
             base_url: "https://api.deepseek.com".into(),
-            auth_ref: None,
+            protocols: vec![],
+            host: None,auth_ref: None,
             enabled: true,
             priority: 40,
             supports_websocket: None,
@@ -180,7 +198,8 @@ mod tests {
             avatar_url: None,
             kind: ProviderKind::OpenaiResponses,
             base_url: "https://api.openai.com/v1".into(),
-            auth_ref: None,
+            protocols: vec![],
+            host: None,auth_ref: None,
             enabled: true,
             priority: 5,
             supports_websocket: None,
@@ -199,7 +218,8 @@ mod tests {
             avatar_url: None,
             kind: ProviderKind::OpenaiResponses,
             base_url: "https://example.com".into(),
-            auth_ref: None,
+            protocols: vec![],
+            host: None,auth_ref: None,
             enabled: true,
             priority: 10,
             supports_websocket: None,
@@ -236,7 +256,8 @@ mod tests {
             avatar_url: None,
             kind: ProviderKind::OpenaiResponses,
             base_url: "https://api.openai.com/v1".into(),
-            auth_ref: None,
+            protocols: vec![],
+            host: None,auth_ref: None,
             enabled: true,
             priority: 5,
             supports_websocket: None,
@@ -255,7 +276,8 @@ mod tests {
             avatar_url: None,
             kind: ProviderKind::OpenaiResponses,
             base_url: "https://example.com".into(),
-            auth_ref: None,
+            protocols: vec![],
+            host: None,auth_ref: None,
             enabled: true,
             priority: 10,
             supports_websocket: None,
@@ -292,7 +314,8 @@ mod tests {
             avatar_url: None,
             kind: ProviderKind::OpenaiChat,
             base_url: "https://api.deepseek.com".into(),
-            auth_ref: None,
+            protocols: vec![],
+            host: None,auth_ref: None,
             enabled: true,
             priority: 40,
             supports_websocket: None,

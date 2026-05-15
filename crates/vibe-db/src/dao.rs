@@ -22,6 +22,10 @@ struct ProviderConfig {
     remote_models_fetched_at: Option<i64>,
     #[serde(default)]
     last_speedtest: Option<ProviderSpeedtestResult>,
+    #[serde(default)]
+    protocols: Vec<ProviderProtocol>,
+    #[serde(default)]
+    host: Option<String>,
 }
 
 impl Default for ProviderConfig {
@@ -34,8 +38,68 @@ impl Default for ProviderConfig {
             remote_models: Vec::new(),
             remote_models_fetched_at: None,
             last_speedtest: None,
+            protocols: Vec::new(),
+            host: None,
         }
     }
+}
+
+fn normalize_protocols(input: &ProviderInput) -> Vec<ProviderProtocol> {
+    if !input.protocols.is_empty() {
+        return input.protocols.clone();
+    }
+    vec![ProviderProtocol {
+        kind: input.kind,
+        base_url: input.base_url.clone(),
+        model_aliases: input.model_aliases.clone(),
+    }]
+}
+
+fn host_key_from_base(base_url: &str) -> Option<String> {
+    vibe_protocol::canonical_provider_host(base_url)
+}
+
+fn provider_effective_host(p: &Provider) -> Option<String> {
+    if let Some(ref h) = p.host {
+        if let Some(key) = vibe_protocol::canonical_provider_host(h) {
+            return Some(key);
+        }
+    }
+    for proto in p.effective_protocols() {
+        if let Some(key) = host_key_from_base(&proto.base_url) {
+            return Some(key);
+        }
+    }
+    host_key_from_base(&p.base_url)
+}
+
+fn merge_protocol_lists(
+    existing: Vec<ProviderProtocol>,
+    incoming: Vec<ProviderProtocol>,
+) -> Vec<ProviderProtocol> {
+    let mut out = existing;
+    for proto in incoming {
+        let key = format!(
+            "{}::{}",
+            provider_kind_to_str(proto.kind),
+            proto.base_url.trim_end_matches('/').to_lowercase()
+        );
+        if out.iter().any(|p| {
+            format!(
+                "{}::{}",
+                provider_kind_to_str(p.kind),
+                p.base_url.trim_end_matches('/').to_lowercase()
+            ) == key
+        }) {
+            continue;
+        }
+        out.push(proto);
+    }
+    out
+}
+
+fn primary_from_protocols(protocols: &[ProviderProtocol]) -> Option<(ProviderKind, String)> {
+    protocols.first().map(|p| (p.kind, p.base_url.clone()))
 }
 
 fn default_passthrough_mode() -> bool {
@@ -57,6 +121,8 @@ fn provider_config_from_provider(p: &Provider) -> ProviderConfig {
         remote_models: p.remote_models.clone(),
         remote_models_fetched_at: p.remote_models_fetched_at,
         last_speedtest: p.last_speedtest.clone(),
+        protocols: p.effective_protocols(),
+        host: p.host.clone(),
     }
 }
 
@@ -197,14 +263,69 @@ impl Db {
         }
         let want = norm(base_url);
         let list = self.provider_list()?;
+        Ok(list.into_iter().find(|p| {
+            p.effective_protocols()
+                .iter()
+                .any(|proto| proto.kind == kind && norm(&proto.base_url) == want)
+                || (p.kind == kind && norm(&p.base_url) == want)
+        }))
+    }
+
+    pub fn provider_find_by_host(&self, host: &str) -> Result<Option<Provider>> {
+        Ok(self.provider_find_all_by_host(host)?.into_iter().next())
+    }
+
+    pub fn provider_find_all_by_host(&self, host: &str) -> Result<Vec<Provider>> {
+        let want = vibe_protocol::canonical_provider_host(host).unwrap_or_default();
+        if want.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list = self.provider_list()?;
         Ok(list
             .into_iter()
-            .find(|p| p.kind == kind && norm(&p.base_url) == want))
+            .filter(|p| provider_effective_host(p).as_deref() == Some(want.as_str()))
+            .collect())
+    }
+
+    /// Move credentials from duplicate providers (same host) into `keep_id`, then delete dupes.
+    pub fn provider_consolidate_by_host(&self, keep_id: &str, host: &str) -> Result<()> {
+        let want = vibe_protocol::canonical_provider_host(host).unwrap_or_default();
+        if want.is_empty() {
+            return Ok(());
+        }
+        let dupes: Vec<Provider> = self
+            .provider_find_all_by_host(&want)?
+            .into_iter()
+            .filter(|p| p.id != keep_id)
+            .collect();
+        if dupes.is_empty() {
+            return Ok(());
+        }
+        let now = now_secs();
+        for dup in dupes {
+            self.with(|c| {
+                c.execute(
+                    "UPDATE credentials SET provider_id = ?2, updated_at = ?3 WHERE provider_id = ?1",
+                    params![dup.id, keep_id, now],
+                )?;
+                Ok(())
+            })?;
+            self.provider_delete(&dup.id)?;
+        }
+        Ok(())
     }
 
     pub fn provider_insert(&self, input: ProviderInput) -> Result<Provider> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
+        let protocols = normalize_protocols(&input);
+        let (kind, base_url) = primary_from_protocols(&protocols)
+            .map(|(k, u)| (k, u))
+            .unwrap_or((input.kind, input.base_url.clone()));
+        let host = input
+            .host
+            .clone()
+            .or_else(|| host_key_from_base(&base_url));
         let aliases_json = serde_json::to_string(&input.model_aliases)?;
         let config_json = serde_json::to_string(&ProviderConfig {
             passthrough_mode: input.passthrough_mode,
@@ -214,6 +335,8 @@ impl Db {
             remote_models: Vec::new(),
             remote_models_fetched_at: None,
             last_speedtest: None,
+            protocols,
+            host,
         })?;
         self.with(|c| {
             c.execute(
@@ -223,8 +346,8 @@ impl Db {
                 params![
                     id,
                     input.name,
-                    provider_kind_to_str(input.kind),
-                    input.base_url,
+                    provider_kind_to_str(kind),
+                    base_url,
                     input.auth_ref,
                     input.enabled as i32,
                     input.priority,
@@ -248,6 +371,15 @@ impl Db {
             .as_ref()
             .map(provider_config_from_provider)
             .unwrap_or_default();
+        let incoming_protocols = normalize_protocols(&input);
+        let protocols = merge_protocol_lists(existing_cfg.protocols.clone(), incoming_protocols);
+        let (kind, base_url) = primary_from_protocols(&protocols)
+            .map(|(k, u)| (k, u))
+            .unwrap_or((input.kind, input.base_url.clone()));
+        let host = input
+            .host
+            .clone()
+            .or_else(|| host_key_from_base(&base_url));
         let config_json = serde_json::to_string(&ProviderConfig {
             passthrough_mode: input.passthrough_mode,
             group_name: normalize_opt_string(input.group_name),
@@ -256,6 +388,8 @@ impl Db {
             remote_models: existing_cfg.remote_models,
             remote_models_fetched_at: existing_cfg.remote_models_fetched_at,
             last_speedtest: existing_cfg.last_speedtest,
+            protocols,
+            host,
         })?;
         let updated = self.with(|c| {
             let n = c.execute(
@@ -266,8 +400,8 @@ impl Db {
                 params![
                     id,
                     input.name,
-                    provider_kind_to_str(input.kind),
-                    input.base_url,
+                    provider_kind_to_str(kind),
+                    base_url,
                     input.auth_ref,
                     input.enabled as i32,
                     input.priority,
@@ -1588,7 +1722,8 @@ impl Db {
          rl_tokens_limit, rl_tokens_remaining, rl_tokens_reset_at,
          last_used_at, last_error, consecutive_failures, created_at, updated_at,
          oauth_access_token, oauth_refresh_token, oauth_expires_at, auth_fingerprint,
-         oauth_cached_email, oauth_cached_subject, oauth_cached_plan_slug";
+         oauth_cached_email, oauth_cached_subject, oauth_cached_plan_slug,
+         remote_models_json, remote_models_fetched_at, balance_json, usage_json, balance_fetched_at";
 
     const LOG_COLS_LIST: &'static str =
         "id, started_at, app, provider_id, requested_model, upstream_model,
@@ -1797,6 +1932,49 @@ impl Db {
     }
 
     /// Called after a successful OAuth token refresh: persists fresh tokens.
+    pub fn credential_update_remote_models(
+        &self,
+        id: &str,
+        remote_models: Vec<String>,
+        fetched_at: i64,
+    ) -> Result<vibe_protocol::Credential> {
+        let models_json = serde_json::to_string(&remote_models)?;
+        let now = now_secs();
+        self.with(|c| {
+            c.execute(
+                "UPDATE credentials SET remote_models_json = ?2, remote_models_fetched_at = ?3, updated_at = ?4 WHERE id = ?1",
+                params![id, models_json, fetched_at, now],
+            )?;
+            Ok(())
+        })?;
+        self.credential_get(id)?
+            .context("credential missing after remote_models update")
+    }
+
+    pub fn credential_update_financials(
+        &self,
+        id: &str,
+        balance: Option<ProviderBalanceSnapshot>,
+        usage: Option<ProviderBalanceSnapshot>,
+        fetched_at: i64,
+    ) -> Result<vibe_protocol::Credential> {
+        let balance_json = balance
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let usage_json = usage.as_ref().map(serde_json::to_string).transpose()?;
+        let now = now_secs();
+        self.with(|c| {
+            c.execute(
+                "UPDATE credentials SET balance_json = ?2, usage_json = ?3, balance_fetched_at = ?4, updated_at = ?5 WHERE id = ?1",
+                params![id, balance_json, usage_json, fetched_at, now],
+            )?;
+            Ok(())
+        })?;
+        self.credential_get(id)?
+            .context("credential missing after financials update")
+    }
+
     pub fn credential_update_oauth_tokens(
         &self,
         id: &str,
@@ -1936,15 +2114,31 @@ fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
     let aliases_json: String = r.get(7)?;
     let config_json: String = r.get(8)?;
     let cfg: ProviderConfig = serde_json::from_str(&config_json).unwrap_or_default();
+    let kind = provider_kind_from_str(&kind_s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into())
+    })?;
+    let base_url: String = r.get(3)?;
+    let mut protocols = cfg.protocols.clone();
+    if protocols.is_empty() {
+        protocols.push(ProviderProtocol {
+            kind,
+            base_url: base_url.clone(),
+            model_aliases: serde_json::from_str(&aliases_json).unwrap_or_default(),
+        });
+    }
+    let host = cfg
+        .host
+        .clone()
+        .or_else(|| host_key_from_base(&base_url));
     Ok(Provider {
         id: r.get(0)?,
         name: r.get(1)?,
         group_name: cfg.group_name,
         avatar_url: cfg.avatar_url,
-        kind: provider_kind_from_str(&kind_s).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into())
-        })?,
-        base_url: r.get(3)?,
+        kind,
+        base_url,
+        protocols,
+        host,
         auth_ref: r.get(4)?,
         enabled: r.get::<_, i64>(5)? != 0,
         priority: r.get(6)?,
@@ -2001,7 +2195,16 @@ fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Crede
     // 19 oauth_access_token, 20 oauth_refresh_token, 21 oauth_expires_at,
     // 22 auth_fingerprint
     // 23 oauth_cached_email, 24 oauth_cached_subject, 25 oauth_cached_plan_slug
+    // 26 remote_models_json, 27 remote_models_fetched_at, 28 balance_json, 29 usage_json, 30 balance_fetched_at
     let oauth_has_refresh: bool = r.get::<_, Option<String>>(20)?.is_some();
+    let remote_models_json: String = r.get(26)?;
+    let remote_models: Vec<String> = serde_json::from_str(&remote_models_json).unwrap_or_default();
+    let balance: Option<ProviderBalanceSnapshot> = r
+        .get::<_, Option<String>>(28)?
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let usage: Option<ProviderBalanceSnapshot> = r
+        .get::<_, Option<String>>(29)?
+        .and_then(|s| serde_json::from_str(&s).ok());
     Ok(vibe_protocol::Credential {
         id: r.get(0)?,
         provider_id: r.get(1)?,
@@ -2029,6 +2232,11 @@ fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Crede
         oauth_account_email: r.get(23)?,
         oauth_account_subject: r.get(24)?,
         oauth_chatgpt_plan_slug: r.get(25)?,
+        remote_models,
+        remote_models_fetched_at: r.get(27)?,
+        balance,
+        usage,
+        balance_fetched_at: r.get(30)?,
     })
 }
 
@@ -2248,7 +2456,8 @@ mod tests {
             kind: ProviderKind::Anthropic,
             avatar_url: None,
             base_url: "https://api.anthropic.com".into(),
-            auth_ref: Some("keyring:anthropic-prod".into()),
+            protocols: vec![],
+            host: None,auth_ref: Some("keyring:anthropic-prod".into()),
             enabled: true,
             priority: 100,
             supports_websocket: None,

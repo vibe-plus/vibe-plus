@@ -17,6 +17,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use url::Url;
 use vibe_protocol::{CredentialInput, ModelAlias, ProviderInput, ProviderKind};
+use rusqlite;
+
+fn is_localhost_url(url: &str) -> bool {
+    let s = url.trim_start_matches("http://").trim_start_matches("https://");
+    s.starts_with("127.") || s.starts_with("localhost") || s.starts_with("[::1]")
+}
 
 /// One importable local provider candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +55,9 @@ pub fn scan() -> Vec<LocalCandidate> {
     if let Some(c) = scan_codex() {
         out.push(c);
     }
+    // CC Switch DB comes first — it has the real upstream URLs and API keys.
+    // Profile files come second for backwards compat with older CCS installs.
+    out.extend(scan_ccs_db());
     out.extend(scan_ccs_profiles());
     out
 }
@@ -414,6 +423,10 @@ fn scan_ccs_profiles() -> Vec<LocalCandidate> {
     profiles
         .into_iter()
         .filter_map(|p| ccs_profile_to_candidate(&p))
+        // Skip profiles that route through CC Switch's local proxy — the real upstream
+        // data comes from scan_ccs_db(). Keep these only for older CCS installs that
+        // don't have a SQLite DB (i.e., when scan_ccs_db found nothing).
+        .filter(|c| !is_localhost_url(&c.base_url))
         .collect()
 }
 
@@ -608,6 +621,7 @@ fn ccs_model_aliases(env: &serde_json::Map<String, Value>, _kind: ProviderKind) 
         ("ANTHROPIC_DEFAULT_SONNET_MODEL", "sonnet"),
         ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku"),
         ("OPENAI_MODEL", "default"),
+        ("GEMINI_MODEL", "default"),
         ("MODEL", "default"),
     ] {
         let Some(model) = env.get(key).and_then(|v| v.as_str()).map(str::trim) else {
@@ -646,6 +660,216 @@ fn push_alias_once(out: &mut Vec<ModelAlias>, alias: &str, upstream_model: &str)
     });
 }
 
+// ---------------------------------------------------------------------------
+// CC Switch SQLite database — authoritative provider registry
+// (~/.cc-switch/cc-switch.db, providers table)
+// ---------------------------------------------------------------------------
+
+fn ccs_db_path() -> Option<PathBuf> {
+    let path = home()?.join(".cc-switch").join("cc-switch.db");
+    path.exists().then_some(path)
+}
+
+fn scan_ccs_db() -> Vec<LocalCandidate> {
+    let Some(db_path) = ccs_db_path() else {
+        return vec![];
+    };
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT id, app_type, name, settings_config FROM providers",
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let mut out = Vec::new();
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    });
+    if let Ok(rows) = rows {
+        for (id, app_type, name, settings_json) in rows.filter_map(|r| r.ok()) {
+            let Ok(cfg) = serde_json::from_str::<Value>(&settings_json) else {
+                continue;
+            };
+            if let Some(c) = ccs_db_row_to_candidate(&id, &app_type, &name, &cfg, &db_path) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+fn ccs_db_row_to_candidate(
+    id: &str,
+    app_type: &str,
+    name: &str,
+    cfg: &Value,
+    db_path: &Path,
+) -> Option<LocalCandidate> {
+    match app_type {
+        "claude" => ccs_db_claude(id, name, cfg, db_path),
+        "codex" => ccs_db_codex(id, name, cfg, db_path),
+        "gemini" => ccs_db_gemini(id, name, cfg, db_path),
+        "open-code" | "opencode" => ccs_db_opencode(id, name, cfg, db_path),
+        _ => None,
+    }
+}
+
+fn ccs_db_claude(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<LocalCandidate> {
+    let env = cfg.get("env")?.as_object()?;
+    let base_url = first_env_string(env, &["ANTHROPIC_BASE_URL"])?;
+    if is_localhost_url(&base_url) {
+        return None;
+    }
+    let auth_ref = first_env_string(env, &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"])
+        .and_then(|v| ccs_env_string_to_auth_ref(&v));
+    let token_ok = auth_ref
+        .as_ref()
+        .map(|r| crate::secrets::resolve(r).is_ok())
+        .unwrap_or(false);
+    let default_aliases = ccs_model_aliases(env, ProviderKind::Anthropic);
+    Some(LocalCandidate {
+        client: format!("ccs-db:{id}"),
+        name: name.to_string(),
+        kind: ProviderKind::Anthropic,
+        base_url,
+        auth_ref,
+        token_ok,
+        source_path: db_path.display().to_string(),
+        default_aliases,
+        extra_credentials: vec![],
+    })
+}
+
+fn ccs_db_codex(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<LocalCandidate> {
+    let api_key = cfg
+        .pointer("/auth/OPENAI_API_KEY")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    let auth_ref = ccs_env_string_to_auth_ref(api_key);
+    let token_ok = auth_ref
+        .as_ref()
+        .map(|r| crate::secrets::resolve(r).is_ok())
+        .unwrap_or(false);
+
+    let config_str = cfg.get("config").and_then(|v| v.as_str())?;
+    let toml_val: toml::Value = toml::from_str(config_str).ok()?;
+    let base_url = codex_toml_base_url(&toml_val)?;
+    if is_localhost_url(&base_url) {
+        return None;
+    }
+
+    let model = toml_val
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let default_aliases = if let Some(m) = model {
+        vec![
+            ModelAlias {
+                alias: "default".into(),
+                upstream_model: m.clone(),
+            },
+            ModelAlias {
+                alias: m.clone(),
+                upstream_model: m,
+            },
+        ]
+    } else {
+        vec![]
+    };
+
+    Some(LocalCandidate {
+        client: format!("ccs-db:{id}"),
+        name: name.to_string(),
+        kind: ProviderKind::OpenaiResponses,
+        base_url,
+        auth_ref,
+        token_ok,
+        source_path: db_path.display().to_string(),
+        default_aliases,
+        extra_credentials: vec![],
+    })
+}
+
+fn ccs_db_gemini(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<LocalCandidate> {
+    let env = cfg.get("env")?.as_object()?;
+    let auth_ref = first_env_string(env, &["GEMINI_API_KEY", "GOOGLE_API_KEY"])
+        .and_then(|v| ccs_env_string_to_auth_ref(&v));
+    // Skip official Gemini entry that has no configured key.
+    let token_ok = auth_ref
+        .as_ref()
+        .map(|r| crate::secrets::resolve(r).is_ok())
+        .unwrap_or(false);
+    if !token_ok {
+        return None;
+    }
+    let base_url =
+        first_env_string(env, &["GOOGLE_GEMINI_BASE_URL", "GEMINI_BASE_URL", "BASE_URL"])
+            .unwrap_or_else(|| "https://generativelanguage.googleapis.com".into());
+    if is_localhost_url(&base_url) {
+        return None;
+    }
+    let default_aliases = ccs_model_aliases(env, ProviderKind::GeminiNative);
+    Some(LocalCandidate {
+        client: format!("ccs-db:{id}"),
+        name: name.to_string(),
+        kind: ProviderKind::GeminiNative,
+        base_url,
+        auth_ref,
+        token_ok,
+        source_path: db_path.display().to_string(),
+        default_aliases,
+        extra_credentials: vec![],
+    })
+}
+
+fn ccs_db_opencode(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<LocalCandidate> {
+    // OpenCode entries store base_url and api_key at the top level of settings_config.
+    let base_url = first_json_string(cfg, &["base_url", "baseUrl", "baseURL", "OPENAI_BASE_URL"])
+        .or_else(|| {
+            cfg.get("env")
+                .and_then(|e| e.as_object())
+                .and_then(|env| first_env_string(env, &["OPENAI_BASE_URL", "BASE_URL"]))
+        })?;
+    if is_localhost_url(&base_url) {
+        return None;
+    }
+    let raw_key = first_json_string(cfg, &["api_key", "apiKey", "OPENAI_API_KEY"])
+        .or_else(|| {
+            cfg.get("env")
+                .and_then(|e| e.as_object())
+                .and_then(|env| first_env_string(env, &["OPENAI_API_KEY", "API_KEY"]))
+        });
+    let auth_ref = raw_key.and_then(|v| ccs_env_string_to_auth_ref(&v));
+    let token_ok = auth_ref
+        .as_ref()
+        .map(|r| crate::secrets::resolve(r).is_ok())
+        .unwrap_or(false);
+    let kind = model_defaults::detect_kind_from_base_url(&base_url)
+        .unwrap_or(ProviderKind::OpenaiChat);
+    Some(LocalCandidate {
+        client: format!("ccs-db:{id}"),
+        name: name.to_string(),
+        kind,
+        base_url,
+        auth_ref,
+        token_ok,
+        source_path: db_path.display().to_string(),
+        default_aliases: vec![],
+        extra_credentials: vec![],
+    })
+}
+
 fn ccs_candidate_to_plan(c: &LocalCandidate) -> ImportPlan {
     ImportPlan {
         provider: ProviderInput {
@@ -653,13 +877,14 @@ fn ccs_candidate_to_plan(c: &LocalCandidate) -> ImportPlan {
             group_name: None,
             kind: c.kind,
             base_url: c.base_url.clone(),
-            avatar_url: None,
+            protocols: vec![],
+            host: None,avatar_url: None,
             auth_ref: c.auth_ref.clone(),
             enabled: true,
             priority: 10,
             supports_websocket: None,
             passthrough_mode: true,
-            model_aliases: vec![],
+            model_aliases: c.default_aliases.clone(),
         },
         credentials: vec![],
     }
@@ -945,19 +1170,39 @@ fn cc_switch_request_to_plan(request: &CcSwitchProviderRequest) -> anyhow::Resul
         .and_then(ccs_env_string_to_auth_ref);
     let name = format!("CC Switch {}", request.name.trim());
 
+    let mut model_aliases = Vec::new();
+    if let Some(m) = request.model.as_deref().filter(|s| !s.is_empty()) {
+        push_alias_once(&mut model_aliases, "default", m);
+        push_alias_once(&mut model_aliases, m, m);
+    }
+    if let Some(m) = request.haiku_model.as_deref().filter(|s| !s.is_empty()) {
+        push_alias_once(&mut model_aliases, "haiku", m);
+        push_alias_once(&mut model_aliases, m, m);
+    }
+    if let Some(m) = request.sonnet_model.as_deref().filter(|s| !s.is_empty()) {
+        push_alias_once(&mut model_aliases, "sonnet", m);
+        push_alias_once(&mut model_aliases, m, m);
+    }
+    if let Some(m) = request.opus_model.as_deref().filter(|s| !s.is_empty()) {
+        push_alias_once(&mut model_aliases, "opus", m);
+        push_alias_once(&mut model_aliases, m, m);
+    }
+
     Ok(ImportPlan {
         provider: ProviderInput {
             name,
             group_name: None,
             kind,
             base_url,
+            protocols: vec![],
+            host: None,
             avatar_url: None,
             auth_ref,
             enabled: true,
             priority: 10,
             supports_websocket: None,
             passthrough_mode: true,
-            model_aliases: vec![],
+            model_aliases,
         },
         credentials: vec![],
     })
@@ -1048,7 +1293,8 @@ fn codex_candidate_to_plan(c: &LocalCandidate) -> anyhow::Result<ImportPlan> {
             group_name: None,
             kind: c.kind.clone(),
             base_url: c.base_url.clone(),
-            avatar_url: None,
+            protocols: vec![],
+            host: None,avatar_url: None,
             auth_ref: None,
             enabled: true,
             priority: 10,
@@ -1067,7 +1313,8 @@ fn claude_candidate_to_plan(c: &LocalCandidate) -> ImportPlan {
             group_name: None,
             kind: c.kind.clone(),
             base_url: c.base_url.clone(),
-            avatar_url: None,
+            protocols: vec![],
+            host: None,avatar_url: None,
             auth_ref: c.auth_ref.clone(),
             enabled: true,
             priority: 10,
@@ -1083,7 +1330,7 @@ pub fn candidate_to_plan(c: &LocalCandidate) -> anyhow::Result<ImportPlan> {
     match c.client.as_str() {
         "codex" => codex_candidate_to_plan(c),
         "claude" => Ok(claude_candidate_to_plan(c)),
-        s if s.starts_with("ccs:") => Ok(ccs_candidate_to_plan(c)),
+        s if s.starts_with("ccs:") || s.starts_with("ccs-db:") => Ok(ccs_candidate_to_plan(c)),
         other => anyhow::bail!("unknown import client: {other}"),
     }
 }
@@ -1094,7 +1341,8 @@ pub fn candidate_to_input(c: &LocalCandidate) -> ProviderInput {
         group_name: None,
         kind: c.kind.clone(),
         base_url: c.base_url.clone(),
-        avatar_url: None,
+        protocols: vec![],
+        host: None,avatar_url: None,
         auth_ref: c.auth_ref.clone(),
         enabled: true,
         priority: 10,

@@ -11,6 +11,8 @@ use vibe_protocol::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     Provider::export_all()?;
+    ProviderProtocol::export_all()?;
+    RemoteDetectedProtocol::export_all()?;
     ProviderSpeedtestResult::export_all()?;
     ModelAlias::export_all()?;
     ProviderKind::export_all()?;

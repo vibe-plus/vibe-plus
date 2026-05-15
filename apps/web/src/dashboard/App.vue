@@ -136,6 +136,7 @@ const viewTitle = computed<Record<WorkspaceView, string>>(() => ({
 }));
 
 onMounted(() => {
+  intakeFlow.bindShyClipboardOnFocus();
   trafficTimer = window.setInterval(() => {
     trafficPhase.value += 1;
   }, 180);

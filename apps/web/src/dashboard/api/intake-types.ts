@@ -109,9 +109,16 @@ export interface RemoteProviderCapabilities {
   can_fetch_usage: boolean;
 }
 
+export interface RemoteDetectedProtocol {
+  kind: string;
+  label: string;
+  base_url: string;
+}
+
 export interface RemotePreviewResponse {
   detected_kind: string;
   detected_base_url: string;
+  detected_protocols: RemoteDetectedProtocol[];
   display_name: string;
   avatar_url: string | null;
   note: string;

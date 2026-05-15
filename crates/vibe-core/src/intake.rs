@@ -18,7 +18,7 @@
 use crate::model_defaults;
 use crate::secrets;
 use crate::state::AppState;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use axum::{extract::State, Json};
 use reqwest::{RequestBuilder, Url};
 use scraper::{Html, Selector};
@@ -26,8 +26,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use vibe_protocol::{
-    Credential, CredentialInput, ModelAlias, Provider, ProviderBalanceSnapshot, ProviderInput,
-    ProviderKind, RemoteProviderCapabilities, RemoteProviderPreview,
+    canonical_provider_host, display_name_for_remote, host_from_base_url, host_label_camel_fallback,
+    host_to_brand_label, protocol_display_label, provider_kind_slug, Credential, CredentialInput,
+    ModelAlias, Provider, ProviderBalanceSnapshot, ProviderInput, ProviderKind, ProviderProtocol,
+    RemoteDetectedProtocol, RemoteProviderCapabilities, RemoteProviderPreview,
 };
 
 const DEFAULT_PROBE_TIMEOUT_MS: u64 = 8_000;
@@ -181,9 +183,9 @@ struct RemoteBranding {
 }
 
 #[derive(Debug, Clone, Default)]
-struct RemoteFinancialSnapshot {
-    balance: Option<ProviderBalanceSnapshot>,
-    usage: Option<ProviderBalanceSnapshot>,
+pub(crate) struct RemoteFinancialSnapshot {
+    pub balance: Option<ProviderBalanceSnapshot>,
+    pub usage: Option<ProviderBalanceSnapshot>,
 }
 
 pub type RemotePreviewResponse = RemoteProviderPreview;
@@ -203,10 +205,25 @@ struct RemoteSnippet {
 }
 
 #[derive(Debug, Clone)]
-struct DiscoveryProbe {
+pub(crate) struct DiscoveryProbe {
     kind: ProviderKind,
     base_url: String,
     note: String,
+}
+
+/// Fetch balance/usage snapshot for a credential refresh (OpenAI-compat paths only).
+pub(crate) async fn fetch_financials_for_base(
+    http: &reqwest::Client,
+    kind: ProviderKind,
+    base_url: &str,
+    secret: &str,
+) -> RemoteFinancialSnapshot {
+    let discovery = DiscoveryProbe {
+        kind,
+        base_url: base_url.to_string(),
+        note: String::new(),
+    };
+    fetch_remote_financials(http, &discovery, secret).await
 }
 
 // ---------------------------------------------------------------------------
@@ -319,22 +336,41 @@ pub async fn remote_import_handler(
     Json(input): Json<RemoteImportInput>,
 ) -> Result<Json<RemoteImportResponse>, crate::server::AppError> {
     let snippet = parse_remote_snippet(&input.text)?;
-    let discovery = discover_remote_provider(&state.http, &snippet).await?;
+    let discoveries = discover_remote_provider(&state.http, &snippet).await?;
+    let primary = pick_primary_discovery(&discoveries);
+    let discovery = primary.clone();
 
     let branding = fetch_remote_branding(&state.http, &snippet.url)
         .await
         .unwrap_or_default();
-    let display_name = branding
-        .display_name
-        .clone()
-        .unwrap_or_else(|| display_name_from_url(&snippet.url, discovery.kind));
-    let financials = fetch_remote_financials(&state.http, &discovery, &snippet.secret).await;
+    let host = host_from_base_url(&discovery.base_url)
+        .as_deref()
+        .and_then(canonical_provider_host);
+    let display_name = resolve_remote_display_name(
+        &state.http,
+        host.as_deref(),
+        &discovery.base_url,
+        branding.display_name.as_deref(),
+    )
+    .await;
+    let protocols: Vec<ProviderProtocol> = discoveries
+        .iter()
+        .map(|d| ProviderProtocol::from_kind_base(d.kind, d.base_url.clone()))
+        .collect();
+    let financials = fetch_remote_financials_for_discoveries(
+        &state.http,
+        &discoveries,
+        &snippet.secret,
+    )
+    .await;
     let provider_input = ProviderInput {
         name: display_name.clone(),
         group_name: None,
         avatar_url: branding.avatar_url.clone(),
         kind: discovery.kind,
         base_url: discovery.base_url.clone(),
+        protocols: protocols.clone(),
+        host: host.clone(),
         auth_ref: None,
         enabled: true,
         priority: 100,
@@ -360,11 +396,60 @@ pub async fn remote_import_handler(
     let provider = upsert_remote_provider(state.clone(), provider_input).await?;
     let credential =
         upsert_remote_credential(state.clone(), &provider.id, credential_input).await?;
-    let provider =
-        crate::server::refresh_remote_models_for_provider_if_supported(&state, &provider)
-            .await
-            .unwrap_or(provider);
-    let preview = build_remote_preview(&discovery, &provider, &branding, &financials);
+
+    let mut merged_models = Vec::new();
+    for probe in &discoveries {
+        let batch =
+            fetch_upstream_model_ids(&state.http, probe.kind, &probe.base_url, &snippet.secret)
+                .await;
+        for id in batch {
+            if !merged_models.contains(&id) {
+                merged_models.push(id);
+            }
+        }
+    }
+    merged_models.sort();
+    merged_models.dedup();
+
+    let provider = if merged_models.is_empty() {
+        provider
+    } else {
+        let fetched_at = chrono::Utc::now().timestamp();
+        let id = provider.id.clone();
+        let models = merged_models.clone();
+        let state_cl = state.clone();
+        tokio::task::spawn_blocking(move || {
+            state_cl.db.provider_update_remote_models(&id, models, fetched_at)
+        })
+        .await??
+    };
+
+    let cred_models = merged_models.clone();
+    let cred_id = credential.id.clone();
+    let cred_fetched_at = chrono::Utc::now().timestamp();
+    let state_cl = state.clone();
+    let credential = tokio::task::spawn_blocking(move || {
+        state_cl
+            .db
+            .credential_update_remote_models(&cred_id, cred_models, cred_fetched_at)
+    })
+    .await??;
+
+    if financials.balance.is_some() || financials.usage.is_some() {
+        let cred_id = credential.id.clone();
+        let balance = financials.balance.clone();
+        let usage = financials.usage.clone();
+        let fetched_at = chrono::Utc::now().timestamp();
+        let state_cl = state.clone();
+        tokio::task::spawn_blocking(move || {
+            state_cl
+                .db
+                .credential_update_financials(&cred_id, balance, usage, fetched_at)
+        })
+        .await??;
+    }
+
+    let preview = build_remote_preview(&discoveries, &provider, &branding, &financials);
 
     Ok(Json(RemoteImportResponse {
         provider: provider.clone(),
@@ -378,20 +463,35 @@ pub async fn remote_preview_handler(
     Json(input): Json<RemoteImportInput>,
 ) -> Result<Json<RemotePreviewResponse>, crate::server::AppError> {
     let snippet = parse_remote_snippet(&input.text)?;
-    let discovery = discover_remote_provider(&state.http, &snippet).await?;
+    let discoveries = discover_remote_provider(&state.http, &snippet).await?;
+    let primary = pick_primary_discovery(&discoveries);
+    let discovery = primary.clone();
     let branding = fetch_remote_branding(&state.http, &snippet.url)
         .await
         .unwrap_or_default();
+    let host = host_from_base_url(&discovery.base_url)
+        .as_deref()
+        .and_then(canonical_provider_host);
+    let display_name = resolve_remote_display_name(
+        &state.http,
+        host.as_deref(),
+        &discovery.base_url,
+        branding.display_name.as_deref(),
+    )
+    .await;
+    let protocols: Vec<ProviderProtocol> = discoveries
+        .iter()
+        .map(|d| ProviderProtocol::from_kind_base(d.kind, d.base_url.clone()))
+        .collect();
     let mut provider = Provider {
         id: "preview".into(),
-        name: branding
-            .display_name
-            .clone()
-            .unwrap_or_else(|| display_name_from_url(&snippet.url, discovery.kind)),
+        name: display_name,
         group_name: None,
         avatar_url: branding.avatar_url.clone(),
         kind: discovery.kind,
         base_url: discovery.base_url.clone(),
+        protocols: protocols.clone(),
+        host: host_from_base_url(&discovery.base_url),
         auth_ref: None,
         enabled: true,
         priority: 100,
@@ -405,11 +505,28 @@ pub async fn remote_preview_handler(
         updated_at: 0,
     };
 
-    provider = preview_remote_models(&state, &provider, &snippet.secret)
-        .await
-        .unwrap_or(provider);
-    let financials = fetch_remote_financials(&state.http, &discovery, &snippet.secret).await;
-    let preview = build_remote_preview(&discovery, &provider, &branding, &financials);
+    let mut merged_models = Vec::new();
+    for probe in &discoveries {
+        let batch =
+            fetch_upstream_model_ids(&state.http, probe.kind, &probe.base_url, &snippet.secret)
+                .await;
+        for id in batch {
+            if !merged_models.contains(&id) {
+                merged_models.push(id);
+            }
+        }
+    }
+    merged_models.sort();
+    merged_models.dedup();
+    provider.remote_models = merged_models;
+
+    let financials = fetch_remote_financials_for_discoveries(
+        &state.http,
+        &discoveries,
+        &snippet.secret,
+    )
+    .await;
+    let preview = build_remote_preview(&discoveries, &provider, &branding, &financials);
 
     Ok(Json(preview))
 }
@@ -747,31 +864,33 @@ fn parse_remote_snippet(raw: &str) -> Result<RemoteSnippet> {
 async fn discover_remote_provider(
     http: &reqwest::Client,
     snippet: &RemoteSnippet,
-) -> Result<DiscoveryProbe> {
+) -> Result<Vec<DiscoveryProbe>> {
     let base = normalize_remote_base(&snippet.url)?;
+    let api_root = remote_api_root(&base);
+
     let mut probes = Vec::new();
     let mut seen = HashSet::new();
 
     for candidate in [
         (
             ProviderKind::OpenaiResponses,
-            normalize_openai_base(&base),
-            "OpenAI-compatible via /v1/models",
+            normalize_openai_base(&api_root),
+            "OpenAI Responses via /v1/models",
         ),
         (
             ProviderKind::OpenaiChat,
-            normalize_openai_base(&base),
-            "OpenAI chat-compatible via /v1/models",
+            normalize_openai_base(&api_root),
+            "OpenAI Chat via /v1/models",
         ),
         (
             ProviderKind::Anthropic,
-            normalize_anthropic_base(&base),
-            "Anthropic-compatible via /v1/messages",
+            normalize_anthropic_base(&api_root),
+            "Messages API via /v1/messages",
         ),
         (
             ProviderKind::GeminiNative,
-            normalize_gemini_base(&base),
-            "Gemini-compatible via /v1beta/models",
+            normalize_gemini_base(&api_root),
+            "Gemini Generate via /v1beta/models",
         ),
     ] {
         let key = format!("{}::{}", provider_kind_slug(candidate.0), candidate.1);
@@ -785,17 +904,33 @@ async fn discover_remote_provider(
     }
 
     let timeout = Duration::from_millis(DEFAULT_PROBE_TIMEOUT_MS);
+    let mut matched = Vec::new();
     let mut best_err = String::new();
     for probe in probes {
         if remote_probe_ok(http, &probe, &snippet.secret, timeout).await {
-            return Ok(probe);
-        }
-        if best_err.is_empty() {
+            matched.push(probe);
+        } else if best_err.is_empty() {
             best_err = format!("{} {}", provider_kind_slug(probe.kind), probe.base_url);
         }
     }
 
-    anyhow::bail!("could not verify remote provider protocol for {best_err}")
+    if matched.is_empty() {
+        anyhow::bail!("could not verify remote provider protocol for {best_err}");
+    }
+
+    const ORDER: [ProviderKind; 4] = [
+        ProviderKind::OpenaiChat,
+        ProviderKind::OpenaiResponses,
+        ProviderKind::Anthropic,
+        ProviderKind::GeminiNative,
+    ];
+    matched.sort_by_key(|p| {
+        ORDER
+            .iter()
+            .position(|k| *k == p.kind)
+            .unwrap_or(ORDER.len())
+    });
+    Ok(matched)
 }
 
 async fn remote_probe_ok(
@@ -811,6 +946,11 @@ async fn remote_probe_ok(
         avatar_url: None,
         kind: probe.kind,
         base_url: probe.base_url.clone(),
+        protocols: vec![ProviderProtocol::from_kind_base(
+            probe.kind,
+            probe.base_url.clone(),
+        )],
+        host: host_from_base_url(&probe.base_url),
         auth_ref: None,
         enabled: true,
         priority: 100,
@@ -830,29 +970,107 @@ async fn remote_probe_ok(
     match tokio::time::timeout(timeout, plan.build(http, secret).send()).await {
         Ok(Ok(resp)) => {
             let status = resp.status().as_u16();
-            (200..300).contains(&status) || status == 401 || status == 403 || status == 429
+            let headers = resp.headers().clone();
+            let body = resp.bytes().await.unwrap_or_default();
+            response_confirms_probe_kind(probe.kind, status, &headers, &body)
         }
         _ => false,
     }
 }
 
-async fn preview_remote_models(
-    state: &AppState,
-    provider: &Provider,
-    secret: &str,
-) -> Result<Provider> {
-    let mut preview = provider.clone();
-    let base = provider.base_url.trim_end_matches('/');
-    let url = match provider.kind {
-        ProviderKind::OpenaiChat | ProviderKind::OpenaiResponses => format!("{base}/v1/models"),
-        ProviderKind::Anthropic => format!("{base}/v1/models"),
-        ProviderKind::GeminiNative => return Ok(preview),
+fn is_openai_models_success_body(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
     };
-    let resp = state.http.get(url).bearer_auth(secret).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("model list preview failed: HTTP {}", resp.status());
+    v.get("data").and_then(|x| x.as_array()).is_some()
+}
+
+fn is_anthropic_messages_success_body(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    v.get("type").and_then(|x| x.as_str()) == Some("message")
+        || v.get("content").is_some()
+        || v.get("role").and_then(|x| x.as_str()) == Some("assistant")
+}
+
+fn is_gemini_generate_success_body(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    v.get("candidates").is_some() || v.get("usageMetadata").is_some()
+}
+
+/// True when the HTTP response body/headers match the wire we probed (not a generic 401 from wrong route).
+fn response_confirms_probe_kind(
+    probe_kind: ProviderKind,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &[u8],
+) -> bool {
+    if (200..300).contains(&status) {
+        return match probe_kind {
+            ProviderKind::OpenaiChat | ProviderKind::OpenaiResponses => {
+                is_openai_models_success_body(body)
+            }
+            ProviderKind::Anthropic => is_anthropic_messages_success_body(body),
+            ProviderKind::GeminiNative => is_gemini_generate_success_body(body),
+        };
     }
-    let v: serde_json::Value = resp.json().await?;
+
+    if matches!(status, 400 | 401 | 403 | 429) {
+        let header_hint = header_kind_hint(headers);
+        if let Some((detected, _, _)) = fingerprint_from_error_body(body, header_hint) {
+            return wire_kinds_equivalent(detected, probe_kind);
+        }
+        return false;
+    }
+
+    false
+}
+
+fn wire_kinds_equivalent(detected: ProviderKind, probe: ProviderKind) -> bool {
+    match (detected, probe) {
+        (ProviderKind::OpenaiChat, ProviderKind::OpenaiResponses)
+        | (ProviderKind::OpenaiResponses, ProviderKind::OpenaiChat) => true,
+        (a, b) => a == b,
+    }
+}
+
+/// List upstream model IDs using the OpenAI-style `/v1/models` route on the API host root.
+pub(crate) async fn fetch_upstream_model_ids(
+    http: &reqwest::Client,
+    kind: ProviderKind,
+    base_url: &str,
+    secret: &str,
+) -> Vec<String> {
+    if kind == ProviderKind::GeminiNative {
+        return Vec::new();
+    }
+    let root = normalize_openai_base(base_url);
+    let url = format!("{root}/v1/models");
+    for use_bearer in [true, false] {
+        let req = http.get(&url);
+        let req = if use_bearer {
+            req.bearer_auth(secret)
+        } else {
+            req.header("x-api-key", secret)
+        };
+        if let Ok(resp) = req.send().await {
+            if resp.status().is_success() {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    let names = parse_models_json_value(&v);
+                    if !names.is_empty() {
+                        return names;
+                    }
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn parse_models_json_value(v: &serde_json::Value) -> Vec<String> {
     let mut names = Vec::<String>::new();
     if let Some(arr) = v.get("data").and_then(|x| x.as_array()) {
         for item in arr {
@@ -866,8 +1084,100 @@ async fn preview_remote_models(
     }
     names.sort();
     names.dedup();
-    preview.remote_models = names;
-    Ok(preview)
+    names
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsDevProviderEntry {
+    name: Option<String>,
+    api: Option<String>,
+}
+
+async fn models_dev_display_name(http: &reqwest::Client, host: &str) -> Option<String> {
+    let want = canonical_provider_host(host)?;
+    let data: std::collections::HashMap<String, ModelsDevProviderEntry> = http
+        .get("https://models.dev/api.json")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    for prov in data.values() {
+        if let Some(api) = prov.api.as_deref() {
+            if canonical_provider_host(api).as_deref() == Some(want.as_str()) {
+                return prov.name.clone().filter(|n| !n.trim().is_empty());
+            }
+        }
+    }
+    for (id, prov) in &data {
+        let id_lower = id.to_ascii_lowercase();
+        if id_lower.len() >= 4 && want.contains(&id_lower) {
+            return prov.name.clone().filter(|n| !n.trim().is_empty());
+        }
+    }
+    None
+}
+
+fn marketing_site_url(host: &str) -> Option<String> {
+    let h = host.trim().trim_start_matches("www.");
+    if let Some(rest) = h.strip_prefix("api.") {
+        let site = rest.trim();
+        if !site.is_empty() {
+            return Some(format!("https://{site}"));
+        }
+    }
+    None
+}
+
+async fn resolve_remote_display_name(
+    http: &reqwest::Client,
+    host: Option<&str>,
+    base_url: &str,
+    api_branding_name: Option<&str>,
+) -> String {
+    if let Some(host) = host {
+        if let Some(name) = models_dev_display_name(http, host).await {
+            return name;
+        }
+        if let Some(site) = marketing_site_url(host) {
+            if let Ok(branding) = fetch_remote_branding(http, &site).await {
+                if let Some(name) = branding
+                    .display_name
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                {
+                    return name.to_string();
+                }
+            }
+        }
+        if let Some(brand) = host_to_brand_label(host) {
+            return brand.to_string();
+        }
+        return host_label_camel_fallback(host);
+    }
+    display_name_for_remote(api_branding_name, base_url, ProviderKind::OpenaiChat)
+}
+
+async fn fetch_remote_financials_for_discoveries(
+    http: &reqwest::Client,
+    discoveries: &[DiscoveryProbe],
+    secret: &str,
+) -> RemoteFinancialSnapshot {
+    let mut out = RemoteFinancialSnapshot::default();
+    for probe in discoveries {
+        let snap = fetch_remote_financials(http, probe, secret).await;
+        if out.balance.is_none() {
+            out.balance = snap.balance;
+        }
+        if out.usage.is_none() {
+            out.usage = snap.usage;
+        }
+        if out.balance.is_some() && out.usage.is_some() {
+            break;
+        }
+    }
+    out
 }
 
 fn normalize_remote_base(raw: &str) -> Result<String> {
@@ -884,37 +1194,62 @@ fn normalize_remote_base(raw: &str) -> Result<String> {
     Ok(out)
 }
 
+/// API origin only (`scheme://host[:port]`), ignoring path prefixes like `/anthropic`.
+fn remote_api_root(base: &str) -> String {
+    let trimmed = base.trim().trim_end_matches('/');
+    if let Ok(url) = Url::parse(trimmed) {
+        if let Some(host) = url.host_str() {
+            let mut out = format!("{}://{}", url.scheme(), host);
+            if let Some(port) = url.port() {
+                out.push(':');
+                out.push_str(&port.to_string());
+            }
+            return out;
+        }
+    }
+    trimmed.to_string()
+}
+
 fn normalize_openai_base(base: &str) -> String {
-    base.trim_end_matches('/')
+    let root = remote_api_root(base);
+    root.trim_end_matches('/')
         .trim_end_matches("/v1")
         .to_string()
 }
 
 fn normalize_anthropic_base(base: &str) -> String {
-    let trimmed = base.trim_end_matches('/');
+    let trimmed = remote_api_root(base).trim_end_matches('/').to_string();
     if let Some(stripped) = trimmed.strip_suffix("/v1") {
         return stripped.to_string();
     }
     if let Some(stripped) = trimmed.strip_suffix("/anthropic") {
         return stripped.to_string();
     }
-    trimmed.to_string()
+    trimmed
 }
 
 fn normalize_gemini_base(base: &str) -> String {
-    base.trim_end_matches('/')
+    remote_api_root(base)
+        .trim_end_matches('/')
         .trim_end_matches("/v1beta")
         .to_string()
 }
 
-fn display_name_from_url(raw: &str, kind: ProviderKind) -> String {
-    let host = reqwest::Url::parse(raw)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_string))
-        .unwrap_or_else(|| raw.to_string());
-    let label = host.strip_prefix("www.").unwrap_or(&host);
-    format!("{} ({})", label, provider_kind_slug(kind))
+fn pick_primary_discovery<'a>(discoveries: &'a [DiscoveryProbe]) -> &'a DiscoveryProbe {
+    const ORDER: [ProviderKind; 4] = [
+        ProviderKind::OpenaiChat,
+        ProviderKind::OpenaiResponses,
+        ProviderKind::Anthropic,
+        ProviderKind::GeminiNative,
+    ];
+    for kind in ORDER {
+        if let Some(d) = discoveries.iter().find(|p| p.kind == kind) {
+            return d;
+        }
+    }
+    &discoveries[0]
 }
+
 
 async fn fetch_remote_branding(http: &reqwest::Client, raw_url: &str) -> Result<RemoteBranding> {
     let url = Url::parse(raw_url)?;
@@ -1044,12 +1379,50 @@ async fn fetch_remote_financials(
     discovery: &DiscoveryProbe,
     secret: &str,
 ) -> RemoteFinancialSnapshot {
-    match discovery.kind {
-        ProviderKind::OpenaiChat | ProviderKind::OpenaiResponses => {
-            fetch_openai_compatible_financials(http, &discovery.base_url, secret).await
+    let root = normalize_openai_base(&discovery.base_url);
+    let mut out = fetch_openai_compatible_financials(http, &root, secret).await;
+    if out.balance.is_none() {
+        if let Some(balance) = fetch_deepseek_user_balance(http, &root, secret).await {
+            out.balance = Some(balance);
         }
-        _ => RemoteFinancialSnapshot::default(),
     }
+    out
+}
+
+async fn fetch_deepseek_user_balance(
+    http: &reqwest::Client,
+    base_url: &str,
+    secret: &str,
+) -> Option<ProviderBalanceSnapshot> {
+    if !base_url.to_ascii_lowercase().contains("deepseek.com") {
+        return None;
+    }
+    let url = format!("{}/user/balance", base_url.trim_end_matches('/'));
+    let resp = http.get(url).bearer_auth(secret).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let infos = v.get("balance_infos")?.as_array()?;
+    let first = infos.first()?;
+    let currency = first
+        .get("currency")
+        .and_then(|x| x.as_str())
+        .unwrap_or("USD")
+        .to_string();
+    let total = first
+        .get("total_balance")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    Some(ProviderBalanceSnapshot {
+        currency,
+        balance: total.clone(),
+        remaining: total,
+        used: None,
+        total: None,
+        period: None,
+        note: Some("deepseek user balance".into()),
+    })
 }
 
 async fn fetch_openai_compatible_financials(
@@ -1200,28 +1573,47 @@ fn json_num_string(value: Option<&serde_json::Value>) -> Option<String> {
 }
 
 fn build_remote_preview(
-    discovery: &DiscoveryProbe,
+    discoveries: &[DiscoveryProbe],
     provider: &Provider,
     branding: &RemoteBranding,
     financials: &RemoteFinancialSnapshot,
 ) -> RemoteProviderPreview {
+    let primary = pick_primary_discovery(discoveries);
+    let detected_protocols: Vec<RemoteDetectedProtocol> = discoveries
+        .iter()
+        .map(|d| RemoteDetectedProtocol {
+            kind: provider_kind_slug(d.kind).into(),
+            label: protocol_display_label(d.kind).into(),
+            base_url: d.base_url.clone(),
+        })
+        .collect();
+    let note = if discoveries.len() > 1 {
+        discoveries
+            .iter()
+            .map(|d| format!("{} ({})", protocol_display_label(d.kind), d.base_url))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    } else {
+        primary.note.clone()
+    };
     RemoteProviderPreview {
-        detected_kind: provider_kind_slug(discovery.kind).into(),
-        detected_base_url: discovery.base_url.clone(),
+        detected_kind: provider_kind_slug(primary.kind).into(),
+        detected_base_url: primary.base_url.clone(),
+        detected_protocols,
         display_name: provider.name.clone(),
         avatar_url: branding
             .avatar_url
             .clone()
             .or_else(|| provider.avatar_url.clone()),
-        note: discovery.note.clone(),
+        note,
         passthrough_mode: provider.passthrough_mode,
         remote_models: provider.remote_models.clone(),
         model_aliases: suggested_aliases(provider),
         balance: financials.balance.clone(),
         usage: financials.usage.clone(),
         capabilities: RemoteProviderCapabilities {
-            can_fetch_branding: true,
-            can_fetch_models: true,
+            can_fetch_branding: branding.display_name.is_some() || branding.avatar_url.is_some(),
+            can_fetch_models: !provider.remote_models.is_empty(),
             can_fetch_balance: financials.balance.is_some(),
             can_fetch_usage: financials.usage.is_some(),
         },
@@ -1240,15 +1632,6 @@ fn credential_label_from_secret(secret: &str) -> String {
         secret.to_string()
     };
     format!("API Key {short}")
-}
-
-fn provider_kind_slug(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Anthropic => "anthropic",
-        ProviderKind::OpenaiChat => "openai-chat",
-        ProviderKind::OpenaiResponses => "openai-responses",
-        ProviderKind::GeminiNative => "gemini-native",
-    }
 }
 
 fn default_aliases_for_kind(kind: ProviderKind) -> Vec<ModelAlias> {
@@ -1585,21 +1968,46 @@ fn suggested_aliases(provider: &Provider) -> Vec<ModelAlias> {
 }
 
 async fn upsert_remote_provider(state: AppState, input: ProviderInput) -> Result<Provider> {
-    let kind = input.kind;
-    let base = input.base_url.clone();
-    let dup = tokio::task::spawn_blocking({
-        let state = state.clone();
-        move || state.db.provider_find_by_kind_and_base_url(kind, &base)
-    })
-    .await??;
+    let host_key = input
+        .host
+        .clone()
+        .or_else(|| host_from_base_url(&input.base_url))
+        .and_then(|h| canonical_provider_host(&h));
 
-    if let Some(existing) = dup {
+    let existing = if let Some(ref hk) = host_key {
+        tokio::task::spawn_blocking({
+            let state = state.clone();
+            let hk = hk.clone();
+            move || state.db.provider_find_by_host(&hk)
+        })
+        .await??
+    } else {
+        None
+    };
+
+    let provider = if let Some(existing) = existing {
         let provider_id = existing.id.clone();
-        return tokio::task::spawn_blocking(move || state.db.provider_update(&provider_id, input))
-            .await?;
-    }
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || state.db.provider_update(&provider_id, input)).await??
+    } else {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || state.db.provider_insert(input)).await??
+    };
 
-    tokio::task::spawn_blocking(move || state.db.provider_insert(input)).await?
+    if let Some(hk) = host_key {
+        let keep_id = provider.id.clone();
+        let state_cl = state.clone();
+        tokio::task::spawn_blocking(move || state_cl.db.provider_consolidate_by_host(&keep_id, &hk))
+            .await??;
+        let state_cl = state.clone();
+        let keep_id = provider.id.clone();
+        if let Some(refreshed) =
+            tokio::task::spawn_blocking(move || state_cl.db.provider_get(&keep_id)).await??
+        {
+            return Ok(refreshed);
+        }
+    }
+    Ok(provider)
 }
 
 async fn upsert_remote_credential(
@@ -1654,7 +2062,8 @@ mod tests {
             avatar_url: None,
             kind,
             base_url: base.into(),
-            auth_ref: None,
+            protocols: vec![],
+            host: None,auth_ref: None,
             enabled: true,
             priority: 100,
             supports_websocket: None,
@@ -1855,13 +2264,49 @@ mod tests {
             "https://agent.example"
         );
         assert_eq!(
+            normalize_openai_base("https://api.deepseek.com/anthropic/v1"),
+            "https://api.deepseek.com"
+        );
+        assert_eq!(
             normalize_gemini_base("https://generativelanguage.googleapis.com/v1beta"),
             "https://generativelanguage.googleapis.com"
         );
         assert_eq!(
-            normalize_anthropic_base("https://anthropic.example/v1"),
-            "https://anthropic.example"
+            normalize_anthropic_base("https://api.deepseek.com/anthropic/v1"),
+            "https://api.deepseek.com"
         );
+        assert_eq!(
+            remote_api_root("https://api.deepseek.com/anthropic/v1"),
+            "https://api.deepseek.com"
+        );
+    }
+
+    #[test]
+    fn response_confirms_rejects_gemini_fingerprint_on_openai_error() {
+        let body = br#"{"error":{"code":"invalid_api_key","type":"invalid_request_error"}}"#;
+        assert!(!response_confirms_probe_kind(
+            ProviderKind::GeminiNative,
+            401,
+            &reqwest::header::HeaderMap::new(),
+            body,
+        ));
+        assert!(response_confirms_probe_kind(
+            ProviderKind::OpenaiChat,
+            401,
+            &reqwest::header::HeaderMap::new(),
+            body,
+        ));
+    }
+
+    #[test]
+    fn response_confirms_openai_models_list() {
+        let body = br#"{"object":"list","data":[{"id":"deepseek-chat"}]}"#;
+        assert!(response_confirms_probe_kind(
+            ProviderKind::OpenaiChat,
+            200,
+            &reqwest::header::HeaderMap::new(),
+            body,
+        ));
     }
 
     #[test]

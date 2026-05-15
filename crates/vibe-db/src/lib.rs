@@ -64,6 +64,10 @@ impl Db {
                 "../migrations/013_upstream_attempt_log_detail.sql"
             )),
             M::up(include_str!("../migrations/014_app_logs.sql")),
+            M::up(include_str!("../migrations/015_provider_protocols.sql")),
+            M::up(include_str!(
+                "../migrations/016_credential_models_and_balance.sql"
+            )),
         ])
     }
 

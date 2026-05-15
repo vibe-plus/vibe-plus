@@ -4,8 +4,6 @@ import {
   api,
   type Provider,
   type ProviderInput,
-  type ProviderKind,
-  type ModelAlias,
   type ProviderHealthSummary,
   type ProviderAuthPoolSummary,
   type CredentialPoolStatus,
@@ -14,7 +12,6 @@ import {
   type CredentialPlanSnapshot,
   type ProviderCodexPlanItem,
   type ProvidersOverview,
-  type LocalCandidate,
   type RequestRuntimeStats,
   isProviderHealthSummary,
 } from "../api/client.ts";
@@ -22,166 +19,23 @@ import {
   CLIENT_TOOLS,
   getCodexClientTool,
   getToolProtocolSupport,
-  providerServesCodexCliRoute,
   type ClientToolId,
   type ClientToolInfo,
   type ProtocolSupportInfo,
 } from "../utils/client-tools.ts";
 import { useRoute, useRouter } from "vue-router";
 import { resolvePageAccent } from "../utils/page-accent.ts";
-import {
-  mapUpstreamUserMessage,
-  displayProviderName,
-  credentialPrimaryAccountLabel,
-} from "../utils/providers-display.ts";
+import { displayProviderName } from "../utils/providers-display.ts";
 import { hintsFromAuthJsonTokens } from "../utils/codex-oauth-hints.ts";
 import VpIcon from "../components/vp-icon.vue";
 import ProviderCard from "../components/provider-card.vue";
-import ProviderLogo from "../components/provider-logo.vue";
-import ProviderEditorModal from "../components/provider-editor-modal.vue";
+import ProviderSmartModal from "../components/provider-smart-modal.vue";
+import ProviderImportModal from "../components/provider-import-modal.vue";
 import { requestWsSnapshot, useWs } from "../composables/useProxy.ts";
 import { useIntakeFlow, INTAKE_FLOW_IMPORTED_EVENT } from "../composables/use-intake-flow.ts";
 import { workspaceViewFromQuery, type WorkspaceView } from "../utils/workspace-view.ts";
 
 const intakeFlow = useIntakeFlow();
-
-// ---------------------------------------------------------------------------
-// Provider presets
-// ---------------------------------------------------------------------------
-interface Preset {
-  label: string;
-  icon: string;
-  name: string;
-  kind: ProviderInput["kind"];
-  base_url: string;
-  auth_ref_hint: string;
-  priority: number;
-}
-
-const PRESETS: Preset[] = [
-  {
-    label: "OpenAI / Codex",
-    icon: "i-lucide-bot",
-    name: "OpenAI",
-    kind: "openai-responses",
-    base_url: "https://api.openai.com",
-    auth_ref_hint: "env:OPENAI_API_KEY  or  keyring:…",
-    priority: 10,
-    // Align with Codex CLI model slugs; the authoritative set is from GET /codex/v1/models (or upstream) after takeover.
-  },
-  {
-    label: "Anthropic",
-    icon: "i-lucide-sparkles",
-    name: "Anthropic",
-    kind: "anthropic",
-    base_url: "https://api.anthropic.com",
-    auth_ref_hint: "env:ANTHROPIC_API_KEY  or  keyring:…",
-    priority: 10,
-  },
-  {
-    label: "DeepSeek",
-    icon: "i-lucide-brain",
-    name: "DeepSeek",
-    kind: "openai-chat",
-    base_url: "https://api.deepseek.com",
-    auth_ref_hint: "env:DEEPSEEK_API_KEY",
-    priority: 200,
-  },
-  {
-    label: "Qwen (Alibaba)",
-    icon: "i-lucide-cloud",
-    name: "Qwen",
-    kind: "openai-chat",
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    auth_ref_hint: "env:DASHSCOPE_API_KEY",
-    priority: 200,
-  },
-  {
-    label: "Moonshot / Kimi",
-    icon: "i-lucide-moon",
-    name: "Moonshot",
-    kind: "openai-chat",
-    base_url: "https://api.moonshot.cn/v1",
-    auth_ref_hint: "env:MOONSHOT_API_KEY",
-    priority: 200,
-  },
-  {
-    label: "Zhipu / GLM",
-    icon: "i-lucide-zap",
-    name: "Zhipu",
-    kind: "openai-chat",
-    base_url: "https://open.bigmodel.cn/api/paas/v4",
-    auth_ref_hint: "env:ZHIPU_API_KEY",
-    priority: 200,
-  },
-  {
-    label: "Gemini",
-    icon: "i-lucide-gem",
-    name: "Google Gemini",
-    kind: "gemini-native",
-    base_url: "https://generativelanguage.googleapis.com/v1beta",
-    auth_ref_hint: "env:GEMINI_API_KEY",
-    priority: 150,
-  },
-];
-
-function applyPreset(p: Preset) {
-  form.value = {
-    name: p.name,
-    group_name: p.name,
-    kind: p.kind,
-    base_url: p.base_url,
-    auth_ref: null,
-    enabled: true,
-    priority: p.priority,
-    supports_websocket: null,
-    passthrough_mode: true,
-    model_aliases: [],
-  };
-  editTarget.value = null;
-  showPresets.value = false;
-  showForm.value = true;
-}
-
-const showPresets = ref(false);
-const PRESET_MENU_W = 288;
-const presetTriggerWrap = ref<HTMLElement | null>(null);
-const presetPanelRef = ref<HTMLElement | null>(null);
-const presetMenuPos = ref({ top: 0, left: 0 });
-
-function measurePresetMenu() {
-  const wrap = presetTriggerWrap.value;
-  if (!wrap) return;
-  const r = wrap.getBoundingClientRect();
-  const left = Math.min(
-    Math.max(8, r.right - PRESET_MENU_W),
-    Math.max(8, window.innerWidth - PRESET_MENU_W - 8),
-  );
-  presetMenuPos.value = { top: r.bottom + 4, left };
-}
-
-function onPresetViewportChange() {
-  if (showPresets.value) measurePresetMenu();
-}
-
-function onPresetGlobalPointerDown(ev: PointerEvent) {
-  if (!showPresets.value) return;
-  const n = ev.target as Node | null;
-  if (!n) return;
-  if (presetTriggerWrap.value?.contains(n)) return;
-  if (presetPanelRef.value?.contains(n)) return;
-  showPresets.value = false;
-}
-
-watch(showPresets, async (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onPresetGlobalPointerDown, true);
-    await nextTick();
-    measurePresetMenu();
-  } else {
-    document.removeEventListener("pointerdown", onPresetGlobalPointerDown, true);
-  }
-});
 
 const providers = ref<Provider[]>([]);
 const healthMap = ref<Record<string, ProviderHealthSummary>>({});
@@ -229,6 +83,8 @@ const circuitResetBusy = ref<Record<string, boolean>>({});
 const speedtestBusy = ref<Record<string, boolean>>({});
 /** Per-provider remote model refresh busy state. */
 const modelRefreshBusy = ref<Record<string, boolean>>({});
+const credModelRefreshBusy = ref<Record<string, boolean>>({});
+const credBalanceRefreshBusy = ref<Record<string, boolean>>({});
 /** Per-credential enable/disable busy state (PUT /_vp/credentials/:id). */
 const credToggleBusy = ref<Record<string, boolean>>({});
 const activeProviderTab = ref<"common" | ClientToolId>("common");
@@ -238,27 +94,9 @@ let providersOverviewFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 // Provider form
 const showForm = ref(false);
 const editTarget = ref<Provider | null>(null);
-const emptyForm = (): ProviderInput => ({
-  name: "",
-  group_name: null,
-  avatar_url: null,
-  kind: "anthropic",
-  base_url: "https://api.anthropic.com",
-  auth_ref: null,
-  enabled: true,
-  priority: 100,
-  supports_websocket: null,
-  passthrough_mode: true,
-  model_aliases: [],
-});
-const form = ref<ProviderInput>(emptyForm());
 
-const PROVIDER_KINDS: ProviderKind[] = [
-  "anthropic",
-  "openai-chat",
-  "openai-responses",
-  "gemini-native",
-];
+// Import modal
+const showImportModal = ref(false);
 
 const editProviderLive = computed(() => {
   if (!editTarget.value) return null;
@@ -266,278 +104,12 @@ const editProviderLive = computed(() => {
 });
 
 const editProviderModelCount = computed(() => editProviderLive.value?.remote_models?.length ?? 0);
-const editProviderAliasCount = computed(() => form.value.model_aliases?.length ?? 0);
 const editProviderSpeedLabel = computed(() => {
   const result = editProviderLive.value?.last_speedtest;
   if (!result) return "Not tested";
   if (result.error) return result.error;
   return result.latency_ms == null ? "Tested" : `${result.latency_ms}ms`;
 });
-
-function providerKindLabel(kind: ProviderKind): string {
-  switch (kind) {
-    case "openai-responses":
-      return "OPENAI RESPONSES";
-    case "openai-chat":
-      return "OPENAI CHAT";
-    case "anthropic":
-      return "ANTHROPIC";
-    case "gemini-native":
-      return "GEMINI";
-    default:
-      return kind;
-  }
-}
-
-const providerFormImportPaste = ref("");
-const providerFormImportErr = ref("");
-const providerImportFileRef = ref<HTMLInputElement | null>(null);
-const aliasBulkPaste = ref("");
-const aliasBulkErr = ref("");
-
-const syncMenuOpen = ref(false);
-const protocolSyncBusy = ref(false);
-
-const syncPreview = ref<import("../api/client.ts").ProviderSyncPreview | null>(null);
-
-function closeSyncMenu() {
-  syncMenuOpen.value = false;
-}
-
-async function syncProviderProtocol(providerId: string) {
-  if (protocolSyncBusy.value) return;
-  protocolSyncBusy.value = true;
-  try {
-    const updated = await api.providers.probe(providerId);
-    replaceProviderInList(updated);
-    if (editTarget.value?.id === providerId) {
-      form.value.kind = updated.kind;
-      form.value.supports_websocket = updated.supports_websocket ?? null;
-    }
-    error.value = "";
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    protocolSyncBusy.value = false;
-  }
-}
-
-async function syncProviderScope(
-  providerId: string,
-  scope: "all" | "brand" | "protocol" | "models" | "usage",
-) {
-  protocolSyncBusy.value = true;
-  try {
-    const preview = await api.providers.sync(providerId, scope);
-    syncPreview.value = preview;
-    replaceProviderInList(preview.provider);
-    if (editTarget.value?.id === providerId) {
-      form.value.name = preview.provider.name;
-      form.value.avatar_url = preview.provider.avatar_url ?? null;
-      form.value.kind = preview.provider.kind;
-      form.value.supports_websocket = preview.provider.supports_websocket ?? null;
-      form.value.model_aliases = [...preview.provider.model_aliases];
-    }
-    error.value = "";
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    protocolSyncBusy.value = false;
-    closeSyncMenu();
-  }
-}
-
-async function syncProviderAll(providerId: string) {
-  await syncProviderScope(providerId, "all");
-}
-
-async function syncProviderBrand(providerId: string) {
-  await syncProviderScope(providerId, "brand");
-}
-
-async function syncProviderUsage(providerId: string) {
-  await syncProviderScope(providerId, "usage");
-}
-
-function isProviderKind(value: string): value is ProviderKind {
-  return PROVIDER_KINDS.includes(value as ProviderKind);
-}
-
-function mergeProviderImportObject(v: Record<string, unknown>): void {
-  if (typeof v.name === "string") form.value.name = v.name;
-  if (v.group_name === null || typeof v.group_name === "string") {
-    form.value.group_name = v.group_name?.trim() ? v.group_name.trim() : null;
-  }
-  if (typeof v.kind === "string" && isProviderKind(v.kind)) form.value.kind = v.kind;
-  if (typeof v.base_url === "string") form.value.base_url = v.base_url;
-  if (v.auth_ref === null || typeof v.auth_ref === "string") {
-    form.value.auth_ref = v.auth_ref?.trim() ? v.auth_ref.trim() : null;
-  }
-  if (typeof v.priority === "number" && Number.isFinite(v.priority)) {
-    form.value.priority = Math.round(v.priority);
-  }
-  if (typeof v.enabled === "boolean") form.value.enabled = v.enabled;
-  if (typeof v.passthrough_mode === "boolean") form.value.passthrough_mode = v.passthrough_mode;
-  if (typeof v.supports_websocket === "boolean" || v.supports_websocket === null) {
-    form.value.supports_websocket = v.supports_websocket;
-  }
-  if (Array.isArray(v.model_aliases)) {
-    const next: ModelAlias[] = [];
-    for (const row of v.model_aliases) {
-      if (!row || typeof row !== "object") continue;
-      const r = row as Record<string, unknown>;
-      if (typeof r.alias !== "string" || typeof r.upstream_model !== "string") continue;
-      const alias = r.alias.trim();
-      const upstream_model = r.upstream_model.trim();
-      if (!alias || !upstream_model) continue;
-      next.push({ alias, upstream_model });
-    }
-    form.value.model_aliases = next;
-  }
-}
-
-function applyProviderJsonImportText(raw: string, clearInput: boolean): void {
-  providerFormImportErr.value = "";
-  try {
-    const v = JSON.parse(raw) as Record<string, unknown>;
-    mergeProviderImportObject(v);
-    if (clearInput) providerFormImportPaste.value = "";
-  } catch (e: unknown) {
-    providerFormImportErr.value = e instanceof Error ? e.message : String(e);
-  }
-}
-
-function triggerProviderImportFilePick(): void {
-  providerImportFileRef.value?.click();
-}
-
-function readProviderImportFile(file: File): void {
-  providerFormImportErr.value = "";
-  const reader = new FileReader();
-  reader.onload = () => {
-    const text = typeof reader.result === "string" ? reader.result : "";
-    applyProviderJsonImportText(text, false);
-  };
-  reader.onerror = () => {
-    providerFormImportErr.value = "Could not read file.";
-  };
-  reader.readAsText(file, "UTF-8");
-}
-
-function onProviderImportFileChange(ev: Event): void {
-  const input = ev.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = "";
-  if (!file) return;
-  readProviderImportFile(file);
-}
-
-function parseAliasBulkPaste(): void {
-  aliasBulkErr.value = "";
-  const raw = aliasBulkPaste.value.trim();
-  if (!raw) return;
-
-  try {
-    const parsedRoot = JSON.parse(raw) as unknown;
-    let parsedJson: unknown = parsedRoot;
-    if (parsedRoot && typeof parsedRoot === "object" && !Array.isArray(parsedRoot)) {
-      const ma = (parsedRoot as Record<string, unknown>).model_aliases;
-      if (Array.isArray(ma)) parsedJson = ma;
-    }
-    if (Array.isArray(parsedJson)) {
-      const next: ModelAlias[] = [];
-      for (const row of parsedJson) {
-        if (!row || typeof row !== "object") continue;
-        const r = row as Record<string, unknown>;
-        if (typeof r.alias !== "string" || typeof r.upstream_model !== "string") continue;
-        const alias = r.alias.trim();
-        const upstream_model = r.upstream_model.trim();
-        if (!alias || !upstream_model) continue;
-        next.push({ alias, upstream_model });
-      }
-      if (!next.length) {
-        aliasBulkErr.value = "JSON array does not contain a valid alias / upstream_model.";
-        return;
-      }
-      form.value.model_aliases = [...form.value.model_aliases, ...next];
-      aliasBulkPaste.value = "";
-      return;
-    }
-    aliasBulkErr.value = 'JSON must be an array like [{"alias":"...","upstream_model":"..."}].';
-    return;
-  } catch {
-    /* Parse line by line */
-  }
-
-  const lines = raw.split(/\r?\n/);
-  const next: ModelAlias[] = [];
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t || t.startsWith("#")) continue;
-    let alias = "";
-    let upstream = "";
-    if (t.includes("->")) {
-      const parts = t.split("->");
-      alias = parts[0]?.trim() ?? "";
-      upstream = parts.slice(1).join("->").trim();
-    } else if (t.includes("\t")) {
-      const parts = t.split("\t");
-      alias = parts[0]?.trim() ?? "";
-      upstream = parts.slice(1).join("\t").trim();
-    } else if (/[,，|]/.test(t)) {
-      const m = t.split(/[,，|]/);
-      alias = (m[0] ?? "").trim();
-      upstream = (m[1] ?? "").trim();
-    } else {
-      const tok = t.split(/\s+/).filter(Boolean);
-      if (tok.length >= 2) {
-        alias = tok[0] ?? "";
-        upstream = tok.slice(1).join(" ");
-      }
-    }
-    if (alias && upstream) next.push({ alias, upstream_model: upstream });
-  }
-  if (!next.length) {
-    aliasBulkErr.value =
-      "Could not parse. Supported formats: one alias -> upstream per line, alias<TAB>upstream, alias upstream, or a JSON array.";
-    return;
-  }
-  form.value.model_aliases = [...form.value.model_aliases, ...next];
-  aliasBulkPaste.value = "";
-}
-
-function addModelAliasRow(): void {
-  form.value.model_aliases = [...form.value.model_aliases, { alias: "", upstream_model: "" }];
-}
-
-function removeModelAliasRow(index: number): void {
-  form.value.model_aliases = form.value.model_aliases.filter((_, i) => i !== index);
-}
-
-function summarizeAuthRefHint(ref: string | null): string {
-  if (!ref) return "—";
-  if (ref.startsWith("literal:")) return "literal:•••";
-  return ref;
-}
-
-function sanitizeProviderPayload(input: ProviderInput): ProviderInput {
-  return {
-    ...input,
-    name: input.name.trim(),
-    group_name: input.group_name?.trim() ? input.group_name.trim() : null,
-    avatar_url: input.avatar_url?.trim() ? input.avatar_url.trim() : null,
-    base_url: input.base_url.trim(),
-    auth_ref: input.auth_ref?.trim() ? input.auth_ref.trim() : null,
-    model_aliases: input.model_aliases
-      .map((a) => ({
-        alias: a.alias.trim(),
-        upstream_model: a.upstream_model.trim(),
-      }))
-      .filter((a) => a.alias.length > 0 && a.upstream_model.length > 0),
-    supports_websocket: input.supports_websocket,
-    passthrough_mode: input.passthrough_mode,
-  };
-}
 
 // Credential management (list loads by default; see load())
 const credsByProvider = ref<Record<string, Credential[]>>({});
@@ -728,45 +300,6 @@ function jwtExp(token: string | null | undefined): number | null {
     return typeof exp === "number" ? exp : null;
   } catch {
     return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Local import (scan installed tools)
-// ---------------------------------------------------------------------------
-const localCandidates = ref<LocalCandidate[]>([]);
-const showImport = ref(false);
-const importLoading = ref(false);
-const importError = ref("");
-const importingClients = ref<Set<string>>(new Set());
-
-async function openImport() {
-  showImport.value = true;
-  importLoading.value = true;
-  importError.value = "";
-  try {
-    const candidates = await api.providers.scanLocal();
-    localCandidates.value = candidates.map((candidate) => ({
-      ...candidate,
-      extra_credentials: candidate.extra_credentials ?? [],
-    }));
-  } catch (e) {
-    importError.value = String(e);
-  } finally {
-    importLoading.value = false;
-  }
-}
-
-async function doImport(client: string) {
-  importingClients.value.add(client);
-  try {
-    await api.providers.importLocal([client]);
-    showImport.value = false;
-    await load();
-  } catch (e) {
-    importError.value = String(e);
-  } finally {
-    importingClients.value.delete(client);
   }
 }
 
@@ -1047,6 +580,52 @@ async function refreshProviderModels(providerId: string) {
   } finally {
     const { [providerId]: _, ...rest } = modelRefreshBusy.value;
     modelRefreshBusy.value = rest;
+  }
+}
+
+async function refreshCredentialModels(credentialId: string) {
+  if (credModelRefreshBusy.value[credentialId]) return;
+  credModelRefreshBusy.value = { ...credModelRefreshBusy.value, [credentialId]: true };
+  try {
+    const updated = await api.credentials.refreshModels(credentialId);
+    const pid = updated.provider_id;
+    const list = credsByProvider.value[pid];
+    if (list) {
+      const ix = list.findIndex((c) => c.id === credentialId);
+      if (ix >= 0) {
+        list[ix] = updated;
+        credsByProvider.value = { ...credsByProvider.value, [pid]: [...list] };
+      }
+    }
+    error.value = "";
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    const { [credentialId]: _, ...rest } = credModelRefreshBusy.value;
+    credModelRefreshBusy.value = rest;
+  }
+}
+
+async function refreshCredentialBalance(credentialId: string) {
+  if (credBalanceRefreshBusy.value[credentialId]) return;
+  credBalanceRefreshBusy.value = { ...credBalanceRefreshBusy.value, [credentialId]: true };
+  try {
+    const updated = await api.credentials.refreshBalance(credentialId);
+    const pid = updated.provider_id;
+    const list = credsByProvider.value[pid];
+    if (list) {
+      const ix = list.findIndex((c) => c.id === credentialId);
+      if (ix >= 0) {
+        list[ix] = updated;
+        credsByProvider.value = { ...credsByProvider.value, [pid]: [...list] };
+      }
+    }
+    error.value = "";
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    const { [credentialId]: _, ...rest } = credBalanceRefreshBusy.value;
+    credBalanceRefreshBusy.value = rest;
   }
 }
 
@@ -1499,33 +1078,23 @@ async function loadAndScrollToTargetProvider() {
 }
 
 function startAdd() {
-  form.value = emptyForm();
   editTarget.value = null;
   showForm.value = true;
 }
 function startEdit(p: Provider) {
-  form.value = {
-    name: p.name,
-    group_name: p.group_name ?? null,
-    avatar_url: p.avatar_url ?? null,
-    kind: p.kind,
-    base_url: p.base_url,
-    auth_ref: p.auth_ref,
-    enabled: p.enabled,
-    priority: p.priority,
-    supports_websocket: p.supports_websocket ?? null,
-    passthrough_mode: p.passthrough_mode ?? true,
-    model_aliases: [...(p.model_aliases ?? [])],
-  };
   editTarget.value = p;
   showForm.value = true;
 }
 
-async function save() {
+async function save(payload: ProviderInput) {
   try {
-    const payload = sanitizeProviderPayload(form.value);
-    if (editTarget.value) await api.providers.update(editTarget.value.id, payload);
-    else await api.providers.create(payload);
+    if (editTarget.value) {
+      await api.providers.update(editTarget.value.id, payload);
+    } else {
+      const created = await api.providers.create(payload);
+      // Fire-and-forget: auto-refresh model list after creation so cards show model counts immediately
+      api.providers.refreshModels(created.id).catch(() => {});
+    }
     showForm.value = false;
     await load();
   } catch (e) {
@@ -1599,7 +1168,7 @@ async function remove(id: string) {
 }
 
 function viewProviderLogs(providerId: string) {
-  void router.push({ path: "/monitor", query: { ...route.query, provider_id: providerId } });
+  void router.push({ path: "/ui/monitor", query: { ...route.query, provider_id: providerId } });
 }
 
 // Credential actions
@@ -1742,43 +1311,15 @@ function onIntakeImported(ev?: Event) {
   });
 }
 
-async function pasteProviderImportFromClipboard(): Promise<void> {
-  providerFormImportErr.value = "";
-  try {
-    const text = await navigator.clipboard.readText();
-    providerFormImportPaste.value = text;
-    applyProviderJsonImportText(text, false);
-  } catch (e: unknown) {
-    providerFormImportErr.value = e instanceof Error ? e.message : String(e);
-  }
-}
-
-async function pasteAliasBulkFromClipboard(): Promise<void> {
-  aliasBulkErr.value = "";
-  try {
-    aliasBulkPaste.value = await navigator.clipboard.readText();
-  } catch (e: unknown) {
-    aliasBulkErr.value = e instanceof Error ? e.message : String(e);
-  }
-}
-
 watch(showForm, async (open) => {
-  if (!open) {
-    providerFormImportPaste.value = "";
-    providerFormImportErr.value = "";
-    aliasBulkPaste.value = "";
-    aliasBulkErr.value = "";
-    return;
-  }
+  if (!open) return;
   if (editTarget.value) await reloadProviderCreds(editTarget.value.id);
 });
 
 onMounted(() => {
   void loadAndScrollToTargetProvider();
-  window.addEventListener("scroll", onPresetViewportChange, true);
-  window.addEventListener("resize", onPresetViewportChange);
   window.addEventListener(INTAKE_FLOW_IMPORTED_EVENT, onIntakeImported);
-  // Try one restrained clipboard read on Providers entry; failures, empty content, and duplicates stay silent.
+  intakeFlow.bindShyClipboardOnFocus();
   void intakeFlow.tryShyClipboard();
 });
 onUnmounted(() => {
@@ -1786,9 +1327,6 @@ onUnmounted(() => {
     clearTimeout(providersOverviewFallbackTimer);
     providersOverviewFallbackTimer = null;
   }
-  document.removeEventListener("pointerdown", onPresetGlobalPointerDown, true);
-  window.removeEventListener("scroll", onPresetViewportChange, true);
-  window.removeEventListener("resize", onPresetViewportChange);
   window.removeEventListener(INTAKE_FLOW_IMPORTED_EVENT, onIntakeImported);
 });
 
@@ -1947,26 +1485,14 @@ useWs((ev: unknown) => {
         <div class="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:w-auto">
           <button
             type="button"
-            class="btn-ghost flex min-h-11 min-w-11 items-center justify-center gap-2 px-2.5 py-2 text-sm rounded-lg border border-vp-border/80 sm:px-3.5 sm:py-1.5"
-            title="local:import"
-            aria-label="local:import"
-            @click="openImport"
+            class="btn-ghost flex min-h-11 items-center justify-center gap-2 px-3 py-2 text-sm rounded-lg border border-vp-border/80 sm:py-1.5"
+            title="本地导入"
+            aria-label="本地导入"
+            @click="showImportModal = true"
           >
             <VpIcon name="folder-input" size-class="size-4 shrink-0" />
-            <span class="sr-only">local:import</span>
+            <span class="hidden sm:inline">导入</span>
           </button>
-          <div ref="presetTriggerWrap" class="relative">
-            <button
-              type="button"
-              class="btn-ghost flex min-h-11 min-w-11 items-center justify-center gap-2 px-2.5 py-2 text-sm rounded-lg border border-vp-border/80 sm:px-3.5 sm:py-1.5"
-              aria-label="presets"
-              title="presets"
-              @click="showPresets = !showPresets"
-            >
-              <VpIcon name="sparkles" size-class="size-4 shrink-0" />
-              <span class="sr-only">presets</span>
-            </button>
-          </div>
           <button
             type="button"
             :class="[
@@ -2097,6 +1623,8 @@ useWs((ev: unknown) => {
               :circuit-reset-busy="!!circuitResetBusy[card.provider.id]"
               :speedtest-busy="!!speedtestBusy[card.provider.id]"
               :model-refresh-busy="!!modelRefreshBusy[card.provider.id]"
+              :cred-model-refresh-busy="credModelRefreshBusy"
+              :cred-balance-refresh-busy="credBalanceRefreshBusy"
               :cred-toggle-busy="credToggleBusy"
               :pool-rows="poolByProviderId[card.provider.id]?.credentials ?? []"
               :plan-snap-by-cred="planSnapByCred"
@@ -2115,6 +1643,8 @@ useWs((ev: unknown) => {
               @sync-creds="reloadProviderCreds($event)"
               @speedtest-provider="speedtestProvider($event)"
               @refresh-models="refreshProviderModels($event)"
+              @refresh-cred-models="refreshCredentialModels($event)"
+              @refresh-cred-balance="refreshCredentialBalance($event)"
               @toggle-provider="toggleProviderEnabled($event)"
               @reset-circuit="resetProviderCircuit($event)"
               @edit-provider="startEdit($event)"
@@ -2130,71 +1660,28 @@ useWs((ev: unknown) => {
       </div>
     </div>
 
-    <Teleport to="body">
-      <div
-        v-if="showPresets"
-        ref="presetPanelRef"
-        class="fixed z-[105] bg-white border border-slate-200 rounded-xl shadow-lg p-3 w-72 max-h-[min(70vh,calc(100dvh-1rem))] overflow-y-auto"
-        :style="{ top: `${presetMenuPos.top}px`, left: `${presetMenuPos.left}px` }"
-        role="menu"
-        aria-label="presets"
-      >
-        <p class="sr-only">presets</p>
-        <button
-          v-for="preset in PRESETS"
-          :key="preset.label"
-          type="button"
-          class="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-50 text-sm flex items-center gap-2 transition-colors"
-          @click="applyPreset(preset)"
-        >
-          <span :class="[preset.icon, 'size-4 text-slate-500']" aria-hidden="true" />
-          <div>
-            <div class="font-medium text-slate-900">{{ preset.label }}</div>
-            <div class="text-xs text-slate-500">p{{ preset.priority }} · {{ preset.kind }}</div>
-          </div>
-        </button>
-      </div>
-    </Teleport>
-
-    <ProviderEditorModal
+    <ProviderSmartModal
       :open="showForm"
       :edit-target="editTarget"
-      :provider-live="editProviderLive"
-      :form="form"
-      :provider-kinds="PROVIDER_KINDS"
       :creds="editTarget ? (credsByProvider[editTarget.id] ?? []) : []"
       :loading-creds="!!(editTarget && loadingCreds[editTarget.id])"
-      :alias-bulk-paste="aliasBulkPaste"
-      :alias-bulk-err="aliasBulkErr"
-      :provider-form-import-paste="providerFormImportPaste"
-      :provider-form-import-err="providerFormImportErr"
       :cred-toggle-busy="credToggleBusy"
       :model-refresh-busy="!!(editTarget && modelRefreshBusy[editTarget.id])"
       :speed-label="editProviderSpeedLabel"
-      :sync-open="syncMenuOpen"
-      :protocol-sync-busy="protocolSyncBusy"
       @close="showForm = false"
-      @save="save"
+      @save="save($event)"
       @refresh-models="editTarget && refreshProviderModels(editTarget.id)"
-      @add-alias-row="addModelAliasRow"
-      @remove-alias-row="removeModelAliasRow($event)"
-      @paste-alias-bulk="pasteAliasBulkFromClipboard"
-      @parse-alias-bulk="parseAliasBulkPaste"
       @add-credential="editTarget && startAddCred(editTarget.id)"
       @reload-creds="editTarget && reloadProviderCreds(editTarget.id)"
       @edit-credential="startEditCred($event)"
       @remove-credential="removeCred($event)"
       @toggle-credential="toggleCredentialEnabled($event)"
-      @paste-provider-json="pasteProviderImportFromClipboard"
-      @apply-provider-json="applyProviderJsonImportText(providerFormImportPaste, false)"
-      @toggle-sync-menu="syncMenuOpen = !syncMenuOpen"
-      @sync-all="editTarget && syncProviderAll(editTarget.id)"
-      @sync-brand="editTarget && syncProviderBrand(editTarget.id)"
-      @sync-protocol="editTarget && syncProviderScope(editTarget.id, 'protocol')"
-      @sync-models="editTarget && syncProviderScope(editTarget.id, 'models')"
-      @sync-usage="editTarget && syncProviderUsage(editTarget.id)"
-      @update:alias-bulk-paste="aliasBulkPaste = $event"
-      @update:provider-form-import-paste="providerFormImportPaste = $event"
+    />
+
+    <ProviderImportModal
+      :open="showImportModal"
+      @close="showImportModal = false"
+      @imported="load()"
     />
 
     <Teleport to="body">
@@ -2422,143 +1909,6 @@ useWs((ev: unknown) => {
             >
               <VpIcon name="check" size-class="size-4 text-white" />
               <span class="sr-only">save</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-    <Teleport to="body">
-      <div
-        v-if="showImport"
-        class="vp-modal-backdrop z-[110]"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="import-local-title"
-        @click.self="showImport = false"
-      >
-        <div class="vp-modal-panel max-w-lg flex flex-col max-h-[90vh]" @click.stop>
-          <div class="vp-modal-header">
-            <span
-              class="grid size-10 shrink-0 place-items-center rounded-xl bg-cyan-100 text-cyan-800 ring-1 ring-cyan-200"
-              aria-hidden="true"
-            >
-              <VpIcon name="download" size-class="size-5" />
-            </span>
-            <div class="min-w-0 flex-1">
-              <h2 id="import-local-title" class="sr-only">local.import</h2>
-              <p class="text-sm text-vp-muted mt-1 leading-relaxed">
-                <code
-                  class="font-mono text-slate-700 bg-slate-100 px-1 rounded border border-slate-200 text-xs"
-                  >auth*.json</code
-                >
-              </p>
-            </div>
-            <button
-              type="button"
-              class="vp-icon-btn shrink-0"
-              aria-label="close"
-              title="close"
-              @click="showImport = false"
-            >
-              <VpIcon name="x" size-class="size-5" />
-            </button>
-          </div>
-          <div class="px-6 py-4 overflow-y-auto flex-1 min-h-0">
-            <div
-              v-if="importLoading"
-              class="text-sm text-slate-600 py-4 text-center flex items-center justify-center gap-2"
-            >
-              <VpIcon name="loader-2" size-class="size-4 animate-spin" />
-              ...
-            </div>
-            <div
-              v-else-if="importError"
-              class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-2 mb-4"
-            >
-              {{ importError }}
-            </div>
-            <div
-              v-else-if="localCandidates.length === 0"
-              class="text-sm text-slate-600 py-4 text-center"
-            >
-              <span class="sr-only">empty</span>
-            </div>
-            <div v-else class="space-y-3">
-              <div
-                v-for="c in localCandidates"
-                :key="c.client"
-                class="bg-slate-50 rounded-xl border border-slate-200 p-4"
-              >
-                <div class="flex items-start justify-between gap-3 card-lift">
-                  <div class="flex-1 min-w-0">
-                    <div class="flex items-center gap-2 flex-wrap">
-                      <span class="font-medium text-slate-900">{{ c.name }}</span>
-                      <span
-                        :class="
-                          c.token_ok
-                            ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                            : 'bg-amber-50 text-amber-900 border border-amber-200'
-                        "
-                        class="text-xs px-1.5 py-0.5 rounded"
-                      >
-                        {{ c.token_ok ? "token:ok" : "token:missing" }}
-                      </span>
-                      <span
-                        class="text-xs px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-600"
-                        >{{ c.kind }}</span
-                      >
-                    </div>
-                    <div class="text-xs text-slate-600 mt-1 font-mono truncate">
-                      {{ c.source_path }}
-                    </div>
-
-                    <!-- Extra credentials (additional accounts) -->
-                    <div v-if="(c.extra_credentials?.length ?? 0) > 0" class="mt-2 space-y-1">
-                      <div class="text-xs text-slate-600 font-medium">
-                        +{{ c.extra_credentials?.length ?? 0 }}
-                      </div>
-                      <div
-                        v-for="ec in c.extra_credentials ?? []"
-                        :key="ec.source_path"
-                        class="flex items-center gap-2 text-xs text-slate-600"
-                      >
-                        <span :class="ec.token_ok ? 'text-emerald-600' : 'text-amber-600'">●</span>
-                        <span class="font-mono truncate">{{ ec.label }}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    class="shrink-0 inline-flex items-center justify-center rounded-lg bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-50 disabled:cursor-not-allowed p-2.5 sm:px-3 sm:py-1.5 transition-colors"
-                    :disabled="importingClients.has(c.client)"
-                    :aria-label="`import ${c.name}`"
-                    :title="importingClients.has(c.client) ? 'importing' : 'import'"
-                    @click="doImport(c.client)"
-                  >
-                    <VpIcon
-                      v-if="importingClients.has(c.client)"
-                      name="loader-2"
-                      size-class="size-5 text-white animate-spin"
-                    />
-                    <VpIcon v-else name="folder-input" size-class="size-5 text-white" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div
-            class="flex justify-end gap-2 px-6 py-4 border-t border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2%,var(--vp-surface))]"
-          >
-            <button
-              type="button"
-              class="btn-ghost flex items-center gap-2 !px-3"
-              aria-label="close"
-              @click="showImport = false"
-            >
-              <VpIcon name="x" size-class="size-4" />
-              <span class="sr-only">close</span>
             </button>
           </div>
         </div>

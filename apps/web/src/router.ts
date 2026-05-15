@@ -6,6 +6,14 @@ export const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: "/", component: LanderPage },
+    { path: "/providers", redirect: "/ui/providers" },
+    { path: "/statistics", redirect: "/ui/statistics" },
+    { path: "/usage", redirect: "/ui/statistics" },
+    { path: "/logs", redirect: "/ui/monitor" },
+    { path: "/monitor", redirect: "/ui/monitor" },
+    { path: "/settings", redirect: "/ui/settings" },
+    { path: "/overview", redirect: "/ui/overview" },
+    { path: "/routes", redirect: "/ui/providers" },
     {
       path: "/ui",
       component: DashboardShell,

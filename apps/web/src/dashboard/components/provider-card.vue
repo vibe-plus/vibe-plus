@@ -15,6 +15,8 @@ import {
   mergedPoolStatus,
   primaryPlanPercent,
 } from "../utils/providers-display.ts";
+import { protocolLabelsForProvider } from "../utils/protocol-label.ts";
+import { brandHintFromHost } from "../utils/brand-hint.ts";
 
 type ProviderGroupKey = "native" | "bridged" | "other";
 type ClientToolId = "codex" | "opencode" | "claude-code";
@@ -51,6 +53,8 @@ const props = defineProps<{
   circuitResetBusy: boolean;
   speedtestBusy: boolean;
   modelRefreshBusy: boolean;
+  credModelRefreshBusy: Record<string, boolean>;
+  credBalanceRefreshBusy: Record<string, boolean>;
   credToggleBusy: Record<string, boolean>;
   poolRows: CredentialPoolStatus[];
   planSnapByCred: Record<string, CredentialPlanSnapshot | null>;
@@ -63,6 +67,8 @@ const emit = defineEmits<{
   "sync-creds": [providerId: string];
   "speedtest-provider": [providerId: string];
   "refresh-models": [providerId: string];
+  "refresh-cred-models": [credentialId: string];
+  "refresh-cred-balance": [credentialId: string];
   "toggle-provider": [provider: Provider];
   "reset-circuit": [providerId: string];
   "edit-provider": [provider: Provider];
@@ -135,19 +141,24 @@ watch(
   { deep: true },
 );
 
-function providerKindFamily(kind: Provider["kind"]): string {
-  switch (kind) {
-    case "openai-responses":
-      return "OPENAI RESPONSES";
-    case "openai-chat":
-      return "OPENAI CHAT";
-    case "anthropic":
-      return "ANTHROPIC";
-    case "gemini-native":
-      return "GEMINI";
-    default:
-      return kind.toUpperCase();
-  }
+const providerProtocolLabels = computed(() => protocolLabelsForProvider(props.card.provider));
+
+const providerBrandHint = computed(
+  () =>
+    brandHintFromHost(props.card.provider.host) ?? brandHintFromHost(props.card.provider.base_url),
+);
+
+function credentialModelLabel(credential: Credential): string {
+  const n = credential.remote_models?.length ?? 0;
+  return n > 0 ? `${n} models` : "no models";
+}
+
+function credentialBalanceLabel(credential: Credential): string {
+  const snap = credential.balance;
+  if (!snap?.balance && !snap?.remaining) return "";
+  const amount = snap.remaining ?? snap.balance;
+  if (!amount) return "";
+  return `${snap.currency} ${amount}`;
 }
 
 function statusDotClass(tone: "ok" | "warn" | "bad"): string {
@@ -454,6 +465,9 @@ onUnmounted(() => {
             :kind="card.provider.kind"
             :avatar-url="card.provider.avatar_url ?? null"
             :provider-name="card.title"
+            :host-hint="card.provider.host ?? card.provider.base_url"
+            :base-url="card.provider.base_url"
+            :brand-hint="providerBrandHint"
             :enabled="providerEnabled"
             :circuit-state="providerCircuitState"
             :active-request-count="activeRequestCount ?? 0"
@@ -469,8 +483,16 @@ onUnmounted(() => {
               {{ providerStateText }}
             </span>
           </div>
-          <p class="mt-0.5 truncate text-[11px] uppercase tracking-wide text-slate-500">
-            {{ providerKindFamily(card.provider.kind) }}
+          <p
+            class="mt-0.5 flex flex-wrap gap-1 truncate text-[11px] uppercase tracking-wide text-slate-500"
+          >
+            <span
+              v-for="label in providerProtocolLabels"
+              :key="label"
+              class="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-medium normal-case"
+            >
+              {{ label }}
+            </span>
           </p>
         </div>
 
@@ -665,11 +687,43 @@ onUnmounted(() => {
             >
               {{ credentialTrafficText(credential) }}
             </p>
+            <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500">
+              <span class="font-mono">{{ credentialModelLabel(credential) }}</span>
+              <span v-if="credentialBalanceLabel(credential)" class="text-emerald-700">
+                {{ credentialBalanceLabel(credential) }}
+              </span>
+            </p>
           </div>
 
           <div
             class="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-1 rounded-md bg-white/95 p-0.5 opacity-0 pointer-events-none shadow-sm transition-opacity group-hover/cred:opacity-100 group-hover/cred:pointer-events-auto group-focus-within/cred:opacity-100 group-focus-within/cred:pointer-events-auto"
           >
+            <button
+              type="button"
+              class="inline-flex size-6 items-center justify-center rounded border border-sky-200 bg-sky-50 text-sky-800 hover:bg-sky-100 disabled:opacity-50"
+              :title="credentialModelLabel(credential)"
+              :disabled="!!credModelRefreshBusy[credential.id]"
+              @click.stop="emit('refresh-cred-models', credential.id)"
+            >
+              <VpIcon
+                name="book-open"
+                size-class="size-3"
+                :spin="!!credModelRefreshBusy[credential.id]"
+              />
+            </button>
+            <button
+              type="button"
+              class="inline-flex size-6 items-center justify-center rounded border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+              title="refresh balance"
+              :disabled="!!credBalanceRefreshBusy[credential.id]"
+              @click.stop="emit('refresh-cred-balance', credential.id)"
+            >
+              <VpIcon
+                name="pie-chart"
+                size-class="size-3"
+                :spin="!!credBalanceRefreshBusy[credential.id]"
+              />
+            </button>
             <button
               v-if="poolRowFor(credential.id)?.circuit_open"
               type="button"

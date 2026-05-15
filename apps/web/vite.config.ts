@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { resolve, relative, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
@@ -65,8 +65,12 @@ function generateUiManifest(version: string, minCliProtocol = 1): Plugin {
 
 export default defineConfig({
   base: process.env.VITE_BASE_PATH ?? "/",
+  server: {
+    port: 15876,
+    strictPort: true,
+  },
   plugins: [
-    caddyLocalhost({ host: "website.localhost" }),
+    caddyLocalhost({ host: "web.vibe-plus.localhost" }),
     singleton(),
     vue(),
     UnoCSS(),
