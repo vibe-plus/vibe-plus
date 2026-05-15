@@ -10,6 +10,7 @@ const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), 
 };
 
 export default defineConfig({
+  base: process.env.VITE_BASE_PATH ?? "/",
   plugins: [caddyLocalhost(), singleton(), vue(), UnoCSS()],
   build: {
     outDir: "dist",

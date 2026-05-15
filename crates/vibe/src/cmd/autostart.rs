@@ -1,7 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Subcommand;
+
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
 const LABEL: &str = "com.vibe-plus.gateway";
 
 #[derive(Subcommand)]

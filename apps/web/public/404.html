@@ -4,9 +4,11 @@
     <meta charset="UTF-8" />
     <title>vibe+</title>
     <script>
-      // Save the path and redirect to root so the SPA can restore it
+      // GitHub Pages serves this file for unknown routes. Preserve the requested
+      // SPA route, then reload the app from this repository's project-site base.
       sessionStorage.setItem("ghpages-redirect", window.location.pathname + window.location.search);
+      window.location.replace("/vibe-plus/");
     </script>
-    <meta http-equiv="refresh" content="0; url=/" />
+    <meta http-equiv="refresh" content="0; url=/vibe-plus/" />
   </head>
 </html>

@@ -33,8 +33,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
     }
 
     if !args.foreground {
-        daemonise(args.port)?;
-        return Ok(());
+        return start_background_or_foreground(args.port).await;
     }
 
     start_server(args.port).await
@@ -74,7 +73,7 @@ fn is_alive(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn daemonise(port: u16) -> Result<()> {
+async fn start_background_or_foreground(port: u16) -> Result<()> {
     let exe = std::env::current_exe()?;
     std::process::Command::new(exe)
         .arg("start")
@@ -91,9 +90,8 @@ fn daemonise(port: u16) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn daemonise(port: u16) -> Result<()> {
+async fn start_background_or_foreground(port: u16) -> Result<()> {
     // On Windows, run foreground for now; proper service wrapper is Phase 2.
     println!("Background mode not yet supported on Windows — running in foreground.");
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(start_server(port))
+    start_server(port).await
 }

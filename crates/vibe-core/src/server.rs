@@ -37,15 +37,17 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use vibe_protocol::{
     AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexAppActionResult,
-    CodexAppProcess, CodexAppStatus, CodexPlanRefreshResult, Credential, CredentialInput,
+    CodexAppStatus, CodexPlanRefreshResult, Credential, CredentialInput,
     CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats, Health, HealthSummary, LogPage,
     Provider, ProviderAuthPoolSummary, ProviderBalanceSnapshot, ProviderCodexPlanItem,
     ProviderHealth, ProviderHealthSummary, ProviderInput, ProviderSpeedtestInput,
     ProviderSpeedtestResult, ProvidersOverview, ProvidersOverviewCodexPlansChunk,
     ProvidersOverviewCredentialsChunk, ProvidersOverviewHealthChunk, ProvidersOverviewPoolsChunk,
     ProvidersOverviewProvidersChunk, ProvidersOverviewStreamEnded, ProvidersOverviewStreamStarted,
-    Status, UpstreamAttemptLog, UsageSummary, WsEvent,
+    Status, UpstreamAttemptLog, UsageSummary,     WsEvent,
 };
+#[cfg(target_os = "macos")]
+use vibe_protocol::CodexAppProcess;
 
 #[derive(Debug, Deserialize)]
 struct ProviderSyncInput {
@@ -5196,6 +5198,7 @@ fn codex_app_status() -> anyhow::Result<CodexAppStatusResponse> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn classify_codex_app_process(command: &str) -> &'static str {
     if command.starts_with("/Applications/Codex.app/Contents/MacOS/Codex") {
         "main"
@@ -5843,6 +5846,7 @@ mod request_body_limit_tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn codex_app_process_roles_are_specific() {
         assert_eq!(
             classify_codex_app_process("/Applications/Codex.app/Contents/MacOS/Codex"),

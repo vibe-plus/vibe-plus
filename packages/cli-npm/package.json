@@ -14,9 +14,9 @@
   "license": "MIT",
   "author": "cheezone <cheezone@163.com>",
   "bin": {
-    "v": "./bin/vibe.js",
-    "vibe": "./bin/vibe.js",
-    "vibe-plus": "./bin/vibe.js"
+    "v": "bin/vibe.js",
+    "vibe": "bin/vibe.js",
+    "vibe-plus": "bin/vibe.js"
   },
   "files": [
     "bin/",

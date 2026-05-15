@@ -67,7 +67,8 @@ async function main() {
   const wrapper = await readJson(path.join(root, "package.json"));
   assert(wrapper.name === "@vibe-plus/cli", "wrapper package name changed");
   assert(wrapper.type === "module", "wrapper package must mark bin/vibe.js as ESM");
-  assert(wrapper.bin?.vibe === "./bin/vibe.js", "wrapper bin must expose vibe");
+  const vibeBin = wrapper.bin?.vibe?.replace(/^\.\//, "");
+  assert(vibeBin === "bin/vibe.js", "wrapper bin must expose vibe");
   assert(wrapper.files?.includes("bin/"), "wrapper package must publish bin/");
   assert(wrapper.files?.includes("README.md"), "wrapper package must publish README.md");
   assert(

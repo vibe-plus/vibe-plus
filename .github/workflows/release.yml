@@ -138,7 +138,6 @@ jobs:
           ];
 
           const files = [
-            "packages/vibeplus/package.json",
             "packages/cli-npm/package.json",
             "packages/cli-npm/platform/darwin-arm64/package.json",
             "packages/cli-npm/platform/win32-x64/package.json",
@@ -179,18 +178,6 @@ jobs:
       - name: Publish @vibe-plus/cli
         run: |
           cd packages/cli-npm
-          PKG=$(node -p "require('./package.json').name")
-          if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
-            echo "$PKG@$VERSION already exists, skipping"
-          else
-            npm publish --access public
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish vibeplus (onboarding CLI)
-        run: |
-          cd packages/vibeplus
           PKG=$(node -p "require('./package.json').name")
           if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
             echo "$PKG@$VERSION already exists, skipping"

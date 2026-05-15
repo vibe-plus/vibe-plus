@@ -23,11 +23,10 @@ with npm.
 
 ## Supported npm platforms
 
-- macOS arm64/x64
-- Linux arm64/x64
-- Windows arm64/x64
+- macOS Apple Silicon (arm64)
+- Windows x64
 
-32-bit Linux ARM and other niche targets are not published yet. Build from
+Intel Mac, Linux, and Windows ARM64 are not published on npm yet. Build from
 source or use a future standalone installer for those platforms.
 
 ## Update

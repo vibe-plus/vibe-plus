@@ -3,7 +3,7 @@ import LanderPage from "./lander/LanderPage.vue";
 import DashboardShell from "./dashboard/App.vue";
 
 export const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: "/", component: LanderPage },
     {

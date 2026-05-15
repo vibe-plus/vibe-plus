@@ -35,6 +35,8 @@ jobs:
       - name: Build
         run: bun run build
         working-directory: apps/web
+        env:
+          VITE_BASE_PATH: /vibe-plus/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
