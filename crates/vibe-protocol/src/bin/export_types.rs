@@ -19,6 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     RouteTier::export_all()?;
     RequestLog::export_all()?;
     ModelPricing::export_all()?;
+    Meta::export_all()?;
+    WebCompatibility::export_all()?;
     Status::export_all()?;
     UsageSummary::export_all()?;
     ClientStatus::export_all()?;

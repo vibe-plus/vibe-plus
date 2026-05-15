@@ -284,9 +284,30 @@ pub struct ModelPricing {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/Meta.ts")]
+pub struct Meta {
+    /// Semver of the running CLI binary.
+    pub cli_version: String,
+    /// Gateway protocol epoch (bump when new `/_vp/` endpoints are added).
+    pub protocol_version: u32,
+    /// Oldest Web UI protocol epoch this gateway can serve.
+    pub min_web_protocol: u32,
+    /// Canonical URL of the hosted Web UI (GitHub Pages).
+    pub ui_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/WebCompatibility.ts")]
+pub struct WebCompatibility {
+    pub api: u32,
+    pub min_web_api: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/Status.ts")]
 pub struct Status {
     pub version: String,
+    pub web_compatibility: WebCompatibility,
     pub uptime_secs: u64,
     pub port: u16,
     pub providers_total: usize,

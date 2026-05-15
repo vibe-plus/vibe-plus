@@ -18,7 +18,9 @@ directories = { workspace = true }
 http = { workspace = true }
 mime_guess = { workspace = true }
 png = { workspace = true }
+reqwest = { workspace = true }
 rust-embed = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tao = { workspace = true }
 tray-icon = { workspace = true }

@@ -1,5 +1,6 @@
 mod embedded;
 mod ui_assets;
+mod ui_updater;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -278,6 +279,7 @@ fn run(args: Args) -> Result<()> {
     // Spawn the embedded gateway unless we're in dev mode.
     if !dev_mode {
         let proxy = event_loop.create_proxy();
+        let embedded_ui_version = ui_assets::embedded_ui_version();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -291,6 +293,11 @@ fn run(args: Args) -> Result<()> {
                 });
                 embedded::wait_until_ready(gateway_port).await;
                 proxy.send_event(UserEvent::GatewayReady).ok();
+
+                // Background: check GitHub Pages for a newer UI build and
+                // download it to ~/.vibe/ui-cache/ if one is available.
+                // Runs after the gateway is up so startup latency is unaffected.
+                tokio::spawn(ui_updater::check_and_update(embedded_ui_version));
             });
         });
     }

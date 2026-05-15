@@ -308,8 +308,14 @@ export interface UpstreamAttemptLog {
   response_headers?: string | null;
   response_body?: string | null;
 }
+export interface WebCompatibility {
+  api: number;
+  min_web_api: number;
+}
+
 export interface Status {
   version: string;
+  web_compatibility?: WebCompatibility;
   uptime_secs: number;
   port: number;
   providers_total: number;

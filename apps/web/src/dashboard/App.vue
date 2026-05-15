@@ -11,6 +11,7 @@ import SmartIntake from "./components/SmartIntake.vue";
 import IntakeWizard from "./components/intake-wizard.vue";
 import { useLiveWorkspaceActivity } from "./composables/use-live-workspace-activity.ts";
 import { workspaceViewFromQuery, type WorkspaceView } from "./utils/workspace-view.ts";
+import { useWebCompatibility } from "./composables/use-web-compatibility.ts";
 
 const { online, status } = useProxyStatus();
 const route = useRoute();
@@ -97,6 +98,8 @@ const viewPrefix = computed(() => {
   return "";
 });
 
+const webCompatibility = useWebCompatibility(online, status);
+
 const hasAnyScopedActivity = computed(
   () => activeCounts.value.codex > 0 || activeCounts.value.claude > 0,
 );
@@ -172,6 +175,23 @@ function tabLabel(label: string) {
 
 <template>
   <div class="layout-shell">
+    <div
+      v-if="!webCompatibility.ok"
+      class="fixed left-1/2 top-3 z-[80] w-[min(42rem,calc(100vw-1.5rem))] -translate-x-1/2 rounded-2xl border border-amber-300/70 bg-amber-50/95 px-4 py-3 text-sm text-amber-950 shadow-2xl shadow-amber-900/10 backdrop-blur"
+      role="alert"
+    >
+      <div class="flex items-start gap-3">
+        <VpIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0 text-amber-600" />
+        <div class="min-w-0">
+          <p class="font-semibold">Vibe CLI update required</p>
+          <p class="mt-0.5 text-xs leading-5 text-amber-900/85">{{ webCompatibility.message }}</p>
+          <code
+            class="mt-2 inline-flex rounded-lg border border-amber-300/60 bg-white/70 px-2 py-1 text-[11px] text-amber-950"
+            >npm install -g @vibe-plus/cli@latest</code
+          >
+        </div>
+      </div>
+    </div>
     <aside
       class="nav-aside noise-overlay w-full sm:w-[4.25rem] lg:w-56 transition-[width] duration-200"
     >

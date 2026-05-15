@@ -50,15 +50,15 @@
     },
     "packages/cli-npm": {
       "name": "@vibe-plus/cli",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "bin": {
         "v": "bin/vibe.js",
         "vibe": "bin/vibe.js",
         "vibe-plus": "bin/vibe.js",
       },
       "optionalDependencies": {
-        "@vibe-plus/cli-darwin-arm64": "0.0.2",
-        "@vibe-plus/cli-win32-x64": "0.0.2",
+        "@vibe-plus/cli-darwin-arm64": "0.0.3",
+        "@vibe-plus/cli-win32-x64": "0.0.3",
       },
     },
     "packages/mcp": {

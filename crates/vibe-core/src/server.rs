@@ -39,12 +39,12 @@ use vibe_protocol::{
     AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexAppActionResult,
     CodexAppStatus, CodexPlanRefreshResult, Credential, CredentialInput,
     CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats, Health, HealthSummary, LogPage,
-    Provider, ProviderAuthPoolSummary, ProviderBalanceSnapshot, ProviderCodexPlanItem,
+    Meta, Provider, ProviderAuthPoolSummary, ProviderBalanceSnapshot, ProviderCodexPlanItem,
     ProviderHealth, ProviderHealthSummary, ProviderInput, ProviderSpeedtestInput,
     ProviderSpeedtestResult, ProvidersOverview, ProvidersOverviewCodexPlansChunk,
     ProvidersOverviewCredentialsChunk, ProvidersOverviewHealthChunk, ProvidersOverviewPoolsChunk,
     ProvidersOverviewProvidersChunk, ProvidersOverviewStreamEnded, ProvidersOverviewStreamStarted,
-    Status, UpstreamAttemptLog, UsageSummary,     WsEvent,
+    Status, UpstreamAttemptLog, UsageSummary, WsEvent,
 };
 #[cfg(target_os = "macos")]
 use vibe_protocol::CodexAppProcess;
@@ -104,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         // health / status
         .route("/health", get(health))
         .route("/status", get(status))
+        .route("/_vp/meta", get(get_meta))
         .route("/_vp/config", get(get_config).put(put_config))
         // Generic model APIs (no tool prefix — for direct / legacy usage)
         .route("/v1/models", get(list_models_all))
@@ -291,11 +292,21 @@ async fn root_discovery() -> Json<Value> {
         "service": "vibe-plus-gateway",
         "health": "/health",
         "status": "/status",
+        "meta": "/_vp/meta",
         "websocket": "/_vp/ws",
         "control_api": "/_vp/",
         "web_dev": "http://127.0.0.1:15876",
         "note": "The gateway does not host the Web UI; during development run apps/web separately outside this port (see vite.config port).",
     }))
+}
+
+async fn get_meta() -> Json<Meta> {
+    Json(Meta {
+        cli_version: VERSION.to_string(),
+        protocol_version: crate::WEB_COMPAT_API,
+        min_web_protocol: crate::MIN_WEB_COMPAT_API,
+        ui_url: crate::UI_BASE_URL.to_string(),
+    })
 }
 
 /// Browsers request /favicon.ico; without a static site, return 204 to avoid console 404s.
@@ -314,6 +325,10 @@ async fn compute_status(state: AppState) -> Result<Status, AppError> {
     let codex_transport = state.codex_transport.snapshot();
     Ok(Status {
         version: VERSION.to_string(),
+        web_compatibility: vibe_protocol::WebCompatibility {
+            api: crate::WEB_COMPAT_API,
+            min_web_api: crate::MIN_WEB_COMPAT_API,
+        },
         uptime_secs: state.started_at.elapsed().as_secs(),
         port: state.port,
         providers_total: providers.len(),

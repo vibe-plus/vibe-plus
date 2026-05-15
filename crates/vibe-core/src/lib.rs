@@ -42,3 +42,13 @@ pub use state::AppState;
 
 /// Crate version, exposed in `/status` and `WsEvent::Hello`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Dashboard/backend compatibility epoch. Increment when the local Web UI needs
+/// gateway APIs that older CLI binaries do not expose.
+pub const WEB_COMPAT_API: u32 = 1;
+
+/// Oldest dashboard compatibility epoch this gateway promises to serve.
+pub const MIN_WEB_COMPAT_API: u32 = 1;
+
+/// Canonical URL of the hosted Web UI (GitHub Pages).
+pub const UI_BASE_URL: &str = "https://vibe-plus.github.io/vibe-plus/ui/";

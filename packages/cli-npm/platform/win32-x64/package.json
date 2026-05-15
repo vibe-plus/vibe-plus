@@ -1,6 +1,6 @@
 {
   "name": "@vibe-plus/cli-win32-x64",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "vibe binary for win32-x64",
   "license": "MIT",
   "author": "cheezone <cheezone@163.com>",
