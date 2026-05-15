@@ -1,6 +1,6 @@
 {
   "name": "@vibe-plus/app",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "vibe+ native desktop app",
   "keywords": [
     "ai",
@@ -24,8 +24,8 @@
     "access": "public"
   },
   "optionalDependencies": {
-    "@vibe-plus/app-darwin-arm64": "0.0.1",
-    "@vibe-plus/app-win32-x64": "0.0.1"
+    "@vibe-plus/app-darwin-arm64": "0.0.2",
+    "@vibe-plus/app-win32-x64": "0.0.2"
   },
   "engines": {
     "node": ">=18.0.0"
