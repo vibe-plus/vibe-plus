@@ -1,12 +1,9 @@
 {
-  "name": "@vibe-plus/linux-arm64",
+  "name": "@vibe-plus/cli-linux-arm64",
   "version": "0.0.1",
   "description": "vibe binary for linux-arm64",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/vibe-plus/vibe-plus"
-  },
+  "author": "cheezone <cheezone@163.com>",
   "files": [
     "bin/"
   ],

@@ -97,11 +97,20 @@ cargo run -p vibe -- takeover codex
 cargo run -p vibe -- takeover opencode
 ```
 
-Run any OpenAI/Anthropic-compatible command through Vibe Plus:
+Install the Vibe Plus MCP server for Codex:
 
 ```bash
-cargo run -p vibe -- run -- <command> [args...]
+cargo run -p vibe -- mcp install
 ```
+
+This registers the built-in Rust MCP server for Codex:
+
+```text
+command = cargo
+args = run -q -p vibe -- mcp serve
+```
+
+The MCP surface is intentionally small: it returns logs-page/API URLs and lightweight overviews, then lets the model inspect the linked data.
 
 ## Optional Web Console
 

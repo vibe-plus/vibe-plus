@@ -59,6 +59,40 @@ pub async fn try_forward_official_codex_ws(
         return UpstreamWsOutcome::Fallback(body_bytes);
     }
 
+    forward::publish_request_started(
+        &state,
+        &prepared.log_id,
+        prepared.started_at,
+        &prepared.app,
+        &prepared.log_ctx,
+        None,
+        &prepared.requested_model,
+    );
+    forward::persist_request_log_placeholder(
+        &state,
+        &prepared.log_id,
+        prepared.started_at,
+        &prepared.app,
+        &prepared.log_ctx,
+        None,
+        &prepared.requested_model,
+    );
+    let attempt = forward::new_attempt_ctx(
+        &prepared.log_id,
+        1,
+        prepared.started_at,
+        Some(&prepared.provider.id),
+        prepared.credential_id.as_deref(),
+        &prepared.requested_model,
+        &prepared.upstream_model,
+    );
+    forward::publish_upstream_attempt_started(
+        &state,
+        &prepared.log_ctx,
+        &attempt,
+        vibe_protocol::UpstreamAttemptPhase::Connecting,
+    );
+
     let mut log = forward::request_log_from_parts(
         &prepared.log_ctx,
         &prepared.log_id,
@@ -88,6 +122,20 @@ pub async fn try_forward_official_codex_ws(
                 &err,
             );
             let _ = send_text(socket, &payload).await;
+            forward::persist_upstream_attempt_log(
+                &state,
+                forward::attempt_log_from_parts(
+                    &prepared.log_ctx,
+                    &attempt,
+                    vibe_protocol::UpstreamAttemptPhase::Failed,
+                    vibe_protocol::UpstreamAttemptOutcome::ClientError,
+                    &prepared.started_instant,
+                    Some(502),
+                    Some(502),
+                    Some("failed to build upstream websocket request".into()),
+                    Usage::default(),
+                ),
+            );
             finalize_log(
                 &state,
                 prepared,
@@ -115,6 +163,20 @@ pub async fn try_forward_official_codex_ws(
                 false,
                 prepared.started_instant.elapsed().as_millis() as i64,
                 Some("websocket connect failed".into()),
+            );
+            forward::persist_upstream_attempt_log(
+                &state,
+                forward::attempt_log_from_parts(
+                    &prepared.log_ctx,
+                    &attempt,
+                    vibe_protocol::UpstreamAttemptPhase::Failed,
+                    vibe_protocol::UpstreamAttemptOutcome::TransportError,
+                    &prepared.started_instant,
+                    Some(status),
+                    Some(status),
+                    Some("websocket connect failed".into()),
+                    Usage::default(),
+                ),
             );
             finalize_log(
                 &state,
@@ -149,6 +211,20 @@ pub async fn try_forward_official_codex_ws(
             &err.to_string(),
         );
         let _ = send_text(socket, &payload).await;
+        forward::persist_upstream_attempt_log(
+            &state,
+            forward::attempt_log_from_parts(
+                &prepared.log_ctx,
+                &attempt,
+                vibe_protocol::UpstreamAttemptPhase::Failed,
+                vibe_protocol::UpstreamAttemptOutcome::TransportError,
+                &prepared.started_instant,
+                Some(502),
+                Some(502),
+                Some("websocket send failed".into()),
+                Usage::default(),
+            ),
+        );
         finalize_log(
             &state,
             prepared,
@@ -177,6 +253,8 @@ pub async fn try_forward_official_codex_ws(
     let mut failed_status: Option<i32> = None;
     let mut failed_error: Option<String> = None;
     let mut trace_stats = StreamTraceStats::new("websocket", "responses_to_ws");
+    let mut upstream_decode_tps_peak: Option<f64> = None;
+    let mut downstream_emit_tps_peak: Option<f64> = None;
 
     while let Some(next) = upstream_ws.next().await {
         match next {
@@ -212,24 +290,25 @@ pub async fn try_forward_official_codex_ws(
                     current_response_id = created_id;
                 }
                 let is_created = codex_frame_is_response_created(&text);
-                if let Some(summary) = summary_injection.before_forwarding_frame(
-                    &text,
+                let mut emitted_frames = summary_injection.maybe_append_to_frame_batch(
+                    vec![text.clone()],
                     prepared.started_instant.elapsed().as_millis() as i64,
-                ) {
-                    append_trace(&mut client_trace, &summary);
-                    if send_text(socket, &summary).await.is_err() {
-                        trace_stats.finish("downstream_closed");
-                        break;
-                    } else {
-                        trace_stats.record_client_chunk(&prepared.started_instant, summary.len());
-                    }
+                );
+                if emitted_frames.is_empty() {
+                    emitted_frames.push(text);
                 }
-                append_trace(&mut client_trace, &text);
-                if send_text(socket, &text).await.is_err() {
-                    trace_stats.finish("downstream_closed");
+                let mut downstream_closed = false;
+                for frame in emitted_frames {
+                    append_trace(&mut client_trace, &frame);
+                    if send_text(socket, &frame).await.is_err() {
+                        trace_stats.finish("downstream_closed");
+                        downstream_closed = true;
+                        break;
+                    }
+                    trace_stats.record_client_chunk(&prepared.started_instant, frame.len());
+                }
+                if downstream_closed {
                     break;
-                } else {
-                    trace_stats.record_client_chunk(&prepared.started_instant, text.len());
                 }
                 if is_created {
                     if let Some(injection) = status_injection.as_mut() {
@@ -246,6 +325,52 @@ pub async fn try_forward_official_codex_ws(
                         }
                     }
                 }
+                let elapsed_ms = prepared.started_instant.elapsed().as_millis() as i64;
+                let active_upstream_decode_tps =
+                    trace_stats.active_upstream_decode_tps(usage.output_tokens, elapsed_ms);
+                let active_downstream_emit_tps =
+                    trace_stats.active_downstream_emit_tps(usage.output_tokens, elapsed_ms);
+                let runtime_rates = trace_stats.runtime_rates(usage.output_tokens, elapsed_ms);
+                forward::update_peak(&mut upstream_decode_tps_peak, active_upstream_decode_tps);
+                forward::update_peak(&mut downstream_emit_tps_peak, active_downstream_emit_tps);
+                forward::publish_runtime_stats(
+                    &state,
+                    &attempt.request_id,
+                    Some(&attempt.attempt_id),
+                    Some(&prepared.provider.id),
+                    None,
+                    active_upstream_decode_tps,
+                    active_downstream_emit_tps,
+                    runtime_rates.active_output_tokens_per_sec,
+                    runtime_rates.active_upstream_bytes_per_sec,
+                    runtime_rates.active_downstream_bytes_per_sec,
+                    runtime_rates.active_flow_bytes_per_sec,
+                    usage.output_tokens,
+                    trace_stats.upstream_bytes(),
+                    trace_stats.client_bytes(),
+                    trace_stats.upstream_first_byte_ms(),
+                    trace_stats.client_first_write_ms(),
+                    true,
+                );
+                forward::publish_runtime_stats(
+                    &state,
+                    &attempt.request_id,
+                    None,
+                    Some(&prepared.provider.id),
+                    active_upstream_decode_tps.or(runtime_rates.active_output_tokens_per_sec),
+                    None,
+                    None,
+                    runtime_rates.active_output_tokens_per_sec,
+                    runtime_rates.active_upstream_bytes_per_sec,
+                    runtime_rates.active_downstream_bytes_per_sec,
+                    runtime_rates.active_flow_bytes_per_sec,
+                    usage.output_tokens,
+                    trace_stats.upstream_bytes(),
+                    trace_stats.client_bytes(),
+                    trace_stats.upstream_first_byte_ms(),
+                    trace_stats.client_first_write_ms(),
+                    false,
+                );
                 if terminal_seen {
                     break;
                 }
@@ -316,13 +441,48 @@ pub async fn try_forward_official_codex_ws(
     log.status_code = failed_status.or(Some(200));
     log.upstream_http_status = failed_status.or(Some(101));
     log.error = failed_error;
-    if state.config.log.bodies {
-        log.response_body = (!upstream_trace.is_empty()).then_some(upstream_trace);
-        log.client_response_body = (!client_trace.is_empty()).then_some(client_trace);
-    }
+    log.response_body = (!upstream_trace.is_empty()).then_some(upstream_trace);
+    log.client_response_body = (!client_trace.is_empty()).then_some(client_trace);
     log.latency_ms = Some(prepared.started_instant.elapsed().as_millis() as i64);
     log.estimated_cost_usd = usage.estimated_cost_usd(&prepared.upstream_model);
     trace_stats.apply_to_log(&mut log);
+
+    let mut attempt_log = forward::attempt_log_from_parts(
+        &prepared.log_ctx,
+        &attempt,
+        if failed_status.is_none() {
+            vibe_protocol::UpstreamAttemptPhase::Completed
+        } else {
+            vibe_protocol::UpstreamAttemptPhase::Failed
+        },
+        if failed_status.is_none() {
+            vibe_protocol::UpstreamAttemptOutcome::Success
+        } else {
+            vibe_protocol::UpstreamAttemptOutcome::TransportError
+        },
+        &prepared.started_instant,
+        log.status_code,
+        log.upstream_http_status,
+        log.error.clone(),
+        usage,
+    );
+    attempt_log.first_token_ms = first_token_ms;
+    attempt_log.upstream_first_byte_ms = log.upstream_first_byte_ms;
+    attempt_log.client_first_write_ms = log.client_first_write_ms;
+    attempt_log.last_upstream_event_ms = log.last_upstream_event_ms;
+    attempt_log.last_client_write_ms = log.last_client_write_ms;
+    attempt_log.upstream_chunk_count = log.upstream_chunk_count;
+    attempt_log.upstream_bytes = log.upstream_bytes;
+    attempt_log.client_chunk_count = log.client_chunk_count;
+    attempt_log.client_bytes = log.client_bytes;
+    attempt_log.parse_error_count = log.parse_error_count;
+    attempt_log.bridge_mode = log.bridge_mode.clone();
+    attempt_log.status_injected = log.status_injected;
+    attempt_log.terminal_injected = log.terminal_injected;
+    attempt_log.upstream_terminal_type = log.upstream_terminal_type.clone();
+    attempt_log.active_upstream_decode_tps_peak = upstream_decode_tps_peak;
+    attempt_log.active_downstream_emit_tps_peak = downstream_emit_tps_peak;
+    forward::persist_upstream_attempt_log(&state, attempt_log);
 
     forward::mark_provider_health(
         &state,
@@ -331,6 +491,12 @@ pub async fn try_forward_official_codex_ws(
         prepared.started_instant.elapsed().as_millis() as i64,
         failed_status.map(|s| format!("websocket status {s}")),
     );
+    // If this WS attempt failed, drop the sticky route so the next retry is
+    // free to pick a different provider/credential instead of being locked
+    // onto the same broken slot.
+    if log.status_code != Some(200) {
+        forward::forget_codex_sticky_route_if_present(&state, prepared.sticky_key.as_deref());
+    }
     forward::persist_request_log(&state, log);
 
     UpstreamWsOutcome::Forwarded
@@ -353,8 +519,9 @@ impl CodexStatusInjection {
         state: &AppState,
     ) -> Option<Self> {
         visual.map(|visual| {
-            let suppress_status =
-                !should_show_status || !should_emit_codex_route_status(state, turn_id, &visual);
+            let suppress_status = !state.codex_route_status_enabled()
+                || !should_show_status
+                || !should_emit_codex_route_status(state, turn_id, &visual);
             Self {
                 visual,
                 ttfs_ms,
@@ -374,7 +541,7 @@ impl CodexStatusInjection {
             frames.push(event);
         }
         if !self.suppress_status {
-            frames.push(codex_visual::status_message_done_event(
+            frames.extend(codex_visual::status_message_events(
                 &self.visual,
                 response_id,
                 self.ttfs_ms,
@@ -498,7 +665,13 @@ async fn send_prepare_error(socket: &mut WebSocket, state: &AppState, err: Prepa
             log_ctx,
             request_snapshot,
         } => {
-            let message = "no provider matches request shape".to_string();
+            let ctx = vec![format!(
+                "context · cred — · wire {} · model {}",
+                forward::wire_as_str(log_ctx.wire),
+                requested_model
+            )];
+            let message =
+                forward::compose_routing_error_message("no provider matches request shape", &ctx);
             let payload =
                 transforms::codex_response_failed_event("resp-proxy-error", 503, &message);
             let log = forward::request_log_from_parts(

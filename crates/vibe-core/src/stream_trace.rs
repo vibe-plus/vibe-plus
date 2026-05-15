@@ -32,6 +32,21 @@ pub(crate) struct StreamTraceStats {
     last_data_event_ms: Option<i64>,
     status_injected: bool,
     terminal_injected: bool,
+    last_runtime_sample_ms: Option<i64>,
+    last_runtime_output_tokens: i64,
+    last_runtime_upstream_bytes: i64,
+    last_runtime_client_bytes: i64,
+    active_output_tokens_per_sec: Option<f64>,
+    active_upstream_bytes_per_sec: f64,
+    active_downstream_bytes_per_sec: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RuntimeRates {
+    pub(crate) active_output_tokens_per_sec: Option<f64>,
+    pub(crate) active_upstream_bytes_per_sec: f64,
+    pub(crate) active_downstream_bytes_per_sec: f64,
+    pub(crate) active_flow_bytes_per_sec: f64,
 }
 
 impl StreamTraceStats {
@@ -65,6 +80,13 @@ impl StreamTraceStats {
             last_data_event_ms: None,
             status_injected: false,
             terminal_injected: false,
+            last_runtime_sample_ms: None,
+            last_runtime_output_tokens: 0,
+            last_runtime_upstream_bytes: 0,
+            last_runtime_client_bytes: 0,
+            active_output_tokens_per_sec: None,
+            active_upstream_bytes_per_sec: 0.0,
+            active_downstream_bytes_per_sec: 0.0,
         }
     }
 
@@ -182,6 +204,78 @@ impl StreamTraceStats {
         self.terminal_seen
     }
 
+    pub(crate) fn upstream_first_byte_ms(&self) -> Option<i64> {
+        self.upstream_first_byte_ms
+    }
+
+    pub(crate) fn client_first_write_ms(&self) -> Option<i64> {
+        self.client_first_write_ms
+    }
+
+    pub(crate) fn upstream_bytes(&self) -> i64 {
+        self.upstream_bytes
+    }
+
+    pub(crate) fn client_bytes(&self) -> i64 {
+        self.client_bytes
+    }
+
+    pub(crate) fn active_upstream_decode_tps(
+        &self,
+        output_tokens: i64,
+        elapsed_ms: i64,
+    ) -> Option<f64> {
+        active_tokens_per_sec(output_tokens, self.upstream_first_byte_ms, elapsed_ms)
+    }
+
+    pub(crate) fn active_downstream_emit_tps(
+        &self,
+        output_tokens: i64,
+        elapsed_ms: i64,
+    ) -> Option<f64> {
+        active_tokens_per_sec(output_tokens, self.client_first_write_ms, elapsed_ms)
+    }
+
+    pub(crate) fn runtime_rates(&mut self, output_tokens: i64, elapsed_ms: i64) -> RuntimeRates {
+        if let Some(prev_ms) = self.last_runtime_sample_ms {
+            let delta_ms = elapsed_ms - prev_ms;
+            if delta_ms > 0 {
+                let denom = delta_ms as f64 / 1000.0;
+                let output_delta = output_tokens.saturating_sub(self.last_runtime_output_tokens);
+                let upstream_delta = self
+                    .upstream_bytes
+                    .saturating_sub(self.last_runtime_upstream_bytes);
+                let client_delta = self
+                    .client_bytes
+                    .saturating_sub(self.last_runtime_client_bytes);
+
+                if output_delta > 0 {
+                    self.active_output_tokens_per_sec = Some(output_delta as f64 / denom);
+                }
+                if upstream_delta > 0 {
+                    self.active_upstream_bytes_per_sec = upstream_delta as f64 / denom;
+                }
+                if client_delta > 0 {
+                    self.active_downstream_bytes_per_sec = client_delta as f64 / denom;
+                }
+            }
+        }
+
+        self.last_runtime_sample_ms = Some(elapsed_ms);
+        self.last_runtime_output_tokens = output_tokens;
+        self.last_runtime_upstream_bytes = self.upstream_bytes;
+        self.last_runtime_client_bytes = self.client_bytes;
+
+        RuntimeRates {
+            active_output_tokens_per_sec: self.active_output_tokens_per_sec,
+            active_upstream_bytes_per_sec: self.active_upstream_bytes_per_sec,
+            active_downstream_bytes_per_sec: self.active_downstream_bytes_per_sec,
+            active_flow_bytes_per_sec: self
+                .active_upstream_bytes_per_sec
+                .max(self.active_downstream_bytes_per_sec),
+        }
+    }
+
     pub(crate) fn end_reason(&self) -> Option<&str> {
         self.end_reason.as_deref()
     }
@@ -291,6 +385,15 @@ pub(crate) fn empty_stream_fields(log: &mut RequestLog) {
 
 fn elapsed_ms(started: &Instant) -> i64 {
     started.elapsed().as_millis() as i64
+}
+
+fn active_tokens_per_sec(tokens: i64, start_ms: Option<i64>, elapsed_ms: i64) -> Option<f64> {
+    if tokens <= 0 {
+        return None;
+    }
+    let start_ms = start_ms?;
+    let denom_ms = (elapsed_ms - start_ms).max(1);
+    Some(tokens as f64 * 1000.0 / denom_ms as f64)
 }
 
 fn update_max_gap(slot: &mut Option<i64>, gap: i64) {

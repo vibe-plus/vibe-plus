@@ -15,6 +15,7 @@ export type ProviderAuthPoolSummary = {
   available_credentials: bigint;
   rate_limited_credentials: bigint;
   open_circuit_credentials: bigint;
+  provider_circuit_open_remaining_secs: bigint | null;
   provider_circuit_state: string;
   provider_circuit_open: boolean;
   provider_last_error: string | null;

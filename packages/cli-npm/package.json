@@ -11,17 +11,12 @@
     "openai",
     "vibe"
   ],
-  "homepage": "https://github.com/vibe-plus/vibe-plus#readme",
-  "bugs": {
-    "url": "https://github.com/vibe-plus/vibe-plus/issues"
-  },
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/vibe-plus/vibe-plus"
-  },
+  "author": "cheezone <cheezone@163.com>",
   "bin": {
-    "vibe": "./bin/vibe.js"
+    "v": "./bin/vibe.js",
+    "vibe": "./bin/vibe.js",
+    "vibe-plus": "./bin/vibe.js"
   },
   "files": [
     "bin/",
@@ -35,12 +30,12 @@
     "verify": "node ./scripts/verify-package.mjs"
   },
   "optionalDependencies": {
-    "@vibe-plus/darwin-arm64": "0.0.1",
-    "@vibe-plus/darwin-x64": "0.0.1",
-    "@vibe-plus/linux-arm64": "0.0.1",
-    "@vibe-plus/linux-x64": "0.0.1",
-    "@vibe-plus/win32-arm64": "0.0.1",
-    "@vibe-plus/win32-x64": "0.0.1"
+    "@vibe-plus/cli-darwin-arm64": "0.0.1",
+    "@vibe-plus/cli-darwin-x64": "0.0.1",
+    "@vibe-plus/cli-linux-arm64": "0.0.1",
+    "@vibe-plus/cli-linux-x64": "0.0.1",
+    "@vibe-plus/cli-win32-arm64": "0.0.1",
+    "@vibe-plus/cli-win32-x64": "0.0.1"
   },
   "engines": {
     "node": ">=18.0.0"

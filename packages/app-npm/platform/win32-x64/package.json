@@ -1,0 +1,19 @@
+{
+  "name": "@vibe-plus/app-win32-x64",
+  "version": "0.0.1",
+  "description": "vibe+ App binary for win32-x64",
+  "license": "MIT",
+  "author": "cheezone",
+  "files": [
+    "bin/"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

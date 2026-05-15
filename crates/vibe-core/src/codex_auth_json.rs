@@ -118,7 +118,7 @@ pub fn credential_input_from_codex_tokens(
     CredentialInput {
         label,
         auth_ref: None,
-        // Plan / 档位由上游 JWT 与 wham/usage 快照体现；不在导入时写死 codex-pro，避免 UI 误显为「套餐名」。
+        // Plan/tier is represented by upstream JWT and wham/usage snapshots; do not hard-code codex-pro during import to avoid misleading UI plan labels.
         plan_type: None,
         notes: Some(notes),
         enabled: true,

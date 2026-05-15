@@ -11,6 +11,7 @@ use vibe_protocol::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     Provider::export_all()?;
+    ProviderSpeedtestResult::export_all()?;
     ModelAlias::export_all()?;
     ProviderKind::export_all()?;
     Route::export_all()?;
@@ -20,10 +21,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ModelPricing::export_all()?;
     Status::export_all()?;
     UsageSummary::export_all()?;
+    ClientStatus::export_all()?;
+    ClientTakeoverResult::export_all()?;
+    CodexAppProcess::export_all()?;
+    CodexAppStatus::export_all()?;
+    CodexAppActionResult::export_all()?;
     WsEvent::export_all()?;
+    ProvidersOverviewStreamStarted::export_all()?;
+    ProvidersOverviewProvidersChunk::export_all()?;
+    ProvidersOverviewHealthChunk::export_all()?;
+    ProvidersOverviewPoolsChunk::export_all()?;
+    ProvidersOverviewCredentialsChunk::export_all()?;
+    ProvidersOverviewCodexPlansChunk::export_all()?;
+    ProvidersOverviewStreamEnded::export_all()?;
+    RequestActivity::export_all()?;
+    UpstreamAttemptPhase::export_all()?;
+    UpstreamAttemptOutcome::export_all()?;
+    UpstreamAttemptActivity::export_all()?;
+    RequestRuntimeStats::export_all()?;
+    UpstreamAttemptLog::export_all()?;
     LogPage::export_all()?;
     Health::export_all()?;
     ProviderInput::export_all()?;
+    ProviderSpeedtestInput::export_all()?;
+    ProvidersOverview::export_all()?;
     CredentialPoolStatus::export_all()?;
     ProviderAuthPoolSummary::export_all()?;
     ProviderHealthSummary::export_all()?;

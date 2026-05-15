@@ -37,7 +37,7 @@ export type RequestLog = {
    */
   upstream_http_status: number | null;
   /**
-   * Upstream JSON/text error body（4xx 等场景尽量全量 UTF-8 有损存储）。
+   * Upstream JSON/text error body (lossy UTF-8, stored as fully as possible for 4xx and similar cases)。
    */
   upstream_error_preview: string | null;
   /**
@@ -53,15 +53,15 @@ export type RequestLog = {
    */
   request_headers: string | null;
   /**
-   * Inbound HTTP body（网关视角，UTF-8 有损全量）。
+   * Inbound HTTP body (gateway perspective, full lossy UTF-8)。
    */
   request_body: string | null;
   /**
-   * Upstream response body（非流式或本地缓冲的流式原始字节转为字符串，不全量截断）。
+   * Upstream response body (non-streaming or locally buffered streaming raw bytes converted to string, not fully truncated)。
    */
   response_body: string | null;
   /**
-   * Chat→Responses 侧：发给客户端的帧（如 Codex WS），与 `response_body` 里上游原始 Chat SSE 对照。
+   * Chat→Responses side: frames sent to the client, such as Codex WS, for comparison with upstream raw Chat SSE in `response_body`.
    */
   client_response_body: string | null;
   stream_kind: string | null;

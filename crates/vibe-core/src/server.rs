@@ -22,10 +22,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -33,11 +36,58 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use vibe_protocol::{
-    CodexPlanRefreshResult, Credential, CredentialInput, CredentialPlanSnapshot,
-    CredentialPoolStatus, DashboardStats, Health, HealthSummary, LogPage, Provider,
-    ProviderAuthPoolSummary, ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary,
-    ProviderInput, Status, UsageSummary, WsEvent,
+    AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexAppActionResult,
+    CodexAppProcess, CodexAppStatus, CodexPlanRefreshResult, Credential, CredentialInput,
+    CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats, Health, HealthSummary, LogPage,
+    Provider, ProviderAuthPoolSummary, ProviderBalanceSnapshot, ProviderCodexPlanItem,
+    ProviderHealth, ProviderHealthSummary, ProviderInput, ProviderSpeedtestInput,
+    ProviderSpeedtestResult, ProvidersOverview, ProvidersOverviewCodexPlansChunk,
+    ProvidersOverviewCredentialsChunk, ProvidersOverviewHealthChunk, ProvidersOverviewPoolsChunk,
+    ProvidersOverviewProvidersChunk, ProvidersOverviewStreamEnded, ProvidersOverviewStreamStarted,
+    Status, UpstreamAttemptLog, UsageSummary, WsEvent,
 };
+
+#[derive(Debug, Deserialize)]
+struct ProviderSyncInput {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderSyncPreview {
+    provider: Provider,
+    display_name: String,
+    avatar_url: Option<String>,
+    balance: Option<ProviderBalanceSnapshot>,
+    usage: Option<ProviderBalanceSnapshot>,
+    supported_protocols: Vec<String>,
+    platform_guess: Option<String>,
+    note: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SyncBranding {
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SyncFinancials {
+    balance: Option<ProviderBalanceSnapshot>,
+    usage: Option<ProviderBalanceSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum WsClientMessage {
+    Snapshot {
+        request_id: Option<String>,
+        topic: String,
+        hours: Option<i64>,
+        client: Option<String>,
+    },
+}
 
 pub fn router(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -46,6 +96,9 @@ pub fn router(state: AppState) -> Router {
         .allow_methods(Any);
 
     Router::new()
+        // Probing "/" / favicon on the API port is normal for browsers; avoid noisy 404s in DevTools.
+        .route("/", get(root_discovery))
+        .route("/favicon.ico", get(favicon_placeholder))
         // health / status
         .route("/health", get(health))
         .route("/status", get(status))
@@ -95,6 +148,7 @@ pub fn router(state: AppState) -> Router {
             "/_vp/providers/import-ccswitch",
             post(import_cc_switch_deeplink),
         )
+        .route("/_vp/providers/overview", get(provider_overview))
         .route("/_vp/clients/:client/status", get(client_status))
         .route("/_vp/clients/:client/doctor", get(client_doctor))
         .route("/_vp/clients/:client/takeover", post(client_takeover))
@@ -103,9 +157,17 @@ pub fn router(state: AppState) -> Router {
             "/_vp/providers/:id",
             put(update_provider).delete(delete_provider),
         )
+        .route("/_vp/providers/health", get(provider_health_list))
         .route("/_vp/providers/:id/health", get(provider_health))
         .route("/_vp/providers/:id/test", post(provider_test))
+        .route("/_vp/providers/:id/probe", post(provider_probe))
+        .route("/_vp/providers/:id/speedtest", post(provider_speedtest))
+        .route("/_vp/providers/:id/sync", post(provider_sync))
         .route("/_vp/providers/:id/pool", get(provider_pool_summary))
+        .route(
+            "/_vp/providers/:id/models/refresh",
+            post(refresh_provider_models),
+        )
         .route("/_vp/pools", get(provider_pool_list))
         .route("/_vp/routes", get(list_routes).post(create_route))
         .route("/_vp/routes/explain", get(explain_route))
@@ -114,7 +176,23 @@ pub fn router(state: AppState) -> Router {
             "/_vp/providers/:id/circuit/reset",
             post(provider_circuit_reset),
         )
+        // Smart intake: clipboard/paste detects credential candidates -> concurrently probe all providers -> one-click persistence
+        .route("/_vp/intake/probe", post(crate::intake::probe_handler))
+        .route("/_vp/intake/import", post(crate::intake::import_handler))
+        .route(
+            "/_vp/intake/preview-remote",
+            post(crate::intake::remote_preview_handler),
+        )
+        .route(
+            "/_vp/intake/import-remote",
+            post(crate::intake::remote_import_handler),
+        )
+        .route(
+            "/_vp/intake/vendor-probe",
+            post(crate::intake::vendor_probe_handler),
+        )
         // credentials
+        .route("/_vp/credentials", get(list_credentials_all))
         .route(
             "/_vp/providers/:id/credentials",
             get(list_credentials).post(create_credential),
@@ -127,6 +205,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/_vp/providers/:id/codex-plan",
             get(provider_codex_plan_list),
+        )
+        .route(
+            "/_vp/providers/codex-plan",
+            get(provider_codex_plan_list_all),
         )
         .route(
             "/_vp/providers/:id/codex-plan/refresh",
@@ -148,8 +230,11 @@ pub fn router(state: AppState) -> Router {
         .route("/_vp/health/providers", get(health_all_providers))
         // logs + usage + stats
         .route("/_vp/logs/:id", get(get_request_log))
+        .route("/_vp/logs/:id/attempts", get(list_request_attempts))
         .route("/_vp/logs/:id/stream-trace", get(get_log_stream_trace))
         .route("/_vp/logs", get(list_logs))
+        .route("/_vp/attempts/:id", get(get_upstream_attempt))
+        .route("/_vp/attempts", get(list_upstream_attempts))
         .route("/_vp/usage/summary", get(usage_summary))
         .route("/_vp/stats/dashboard", get(dashboard_stats))
         .route(
@@ -162,6 +247,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/_vp/codex-history/preview", get(get_codex_history_preview))
         .route("/_vp/codex-history/unify", post(post_codex_history_unify))
+        .route("/_vp/codex-app/status", get(get_codex_app_status))
+        .route("/_vp/codex-app/open", post(post_codex_app_open))
+        .route("/_vp/codex-app/quit", post(post_codex_app_quit))
+        .route("/_vp/codex-app/restart", post(post_codex_app_restart))
         .route("/_vp/codex-files", get(list_codex_files))
         .route(
             "/_vp/codex-files/file",
@@ -171,6 +260,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/_vp/codex-files/dir", post(create_codex_dir))
         .route("/_vp/codex-files/move", post(move_codex_file))
+        .route("/_vp/app-logs", get(list_app_logs))
         // websocket
         .route("/_vp/ws", any(ws_handler))
         .layer(cors)
@@ -193,6 +283,23 @@ pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 // Core endpoints
 // ---------------------------------------------------------------------------
+
+async fn root_discovery() -> Json<Value> {
+    Json(serde_json::json!({
+        "service": "vibe-plus-gateway",
+        "health": "/health",
+        "status": "/status",
+        "websocket": "/_vp/ws",
+        "control_api": "/_vp/",
+        "website_dev": "http://127.0.0.1:15876",
+        "note": "The gateway does not host the Web UI; during development run apps/website separately outside this port (see vite.config port).",
+    }))
+}
+
+/// Browsers request /favicon.ico; without a static site, return 204 to avoid console 404s.
+async fn favicon_placeholder() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
 
 async fn health() -> Json<Health> {
     Json(Health { ok: true })
@@ -229,6 +336,7 @@ async fn get_config(
     let cfg =
         tokio::task::spawn_blocking(move || crate::config::Config::load_or_init(&path)).await??;
     state.set_codex_summary_config(cfg.codex.summary.clone());
+    state.set_codex_route_status_enabled(cfg.codex.route_status_enabled);
     state.set_claude_config(cfg.claude.clone());
     Ok(Json(cfg))
 }
@@ -250,6 +358,7 @@ async fn put_config(
         );
     }
     state.set_codex_summary_config(saved.codex.summary.clone());
+    state.set_codex_route_status_enabled(saved.codex.route_status_enabled);
     state.set_claude_config(saved.claude.clone());
     Ok(Json(saved))
 }
@@ -265,7 +374,8 @@ async fn create_route(
     State(state): State<AppState>,
     Json(input): Json<vibe_protocol::RouteInput>,
 ) -> Result<Json<vibe_protocol::Route>, AppError> {
-    let route = run_blocking(state, move |s| s.db.route_insert(input)).await?;
+    let route = run_blocking(state.clone(), move |s| s.db.route_insert(input)).await?;
+    publish_routes_changed_soon(state);
     Ok(Json(route))
 }
 
@@ -274,7 +384,8 @@ async fn update_route(
     Path(id): Path<String>,
     Json(input): Json<vibe_protocol::RouteInput>,
 ) -> Result<Json<vibe_protocol::Route>, AppError> {
-    let route = run_blocking(state, move |s| s.db.route_update(&id, input)).await?;
+    let route = run_blocking(state.clone(), move |s| s.db.route_update(&id, input)).await?;
+    publish_routes_changed_soon(state);
     Ok(Json(route))
 }
 
@@ -282,8 +393,18 @@ async fn delete_route(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    run_blocking(state, move |s| s.db.route_delete(&id)).await?;
+    run_blocking(state.clone(), move |s| s.db.route_delete(&id)).await?;
+    publish_routes_changed_soon(state);
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn publish_routes_changed_soon(state: AppState) {
+    tokio::spawn(async move {
+        match run_blocking(state.clone(), |s| s.db.route_list()).await {
+            Ok(routes) => state.ws.publish(WsEvent::RoutesChanged { routes }),
+            Err(e) => tracing::warn!(?e, "build routes ws event failed"),
+        }
+    });
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,13 +486,13 @@ fn wire_name(wire: Wire) -> &'static str {
 // Model discovery
 // ---------------------------------------------------------------------------
 
-/// `/v1/models` — 所有启用的别名，OpenAI 格式（兜底 / 通用客户端）
+/// `/v1/models` — all enabled aliases in OpenAI format (fallback / generic clients)
 async fn list_models_all(State(state): State<AppState>) -> Response {
     model_list_openai(&state, None).await
 }
 
-/// `/claude/v1/models` — 仅 Anthropic 供应商，Anthropic SDK 格式
-/// Claude Code 的 Anthropic SDK 期望 `{data:[...], has_more, first_id, last_id}`
+/// `/claude/v1/models` — Anthropic providers only, in Anthropic SDK format
+/// Claude Code Anthropic SDK expects `{data:[...], has_more, first_id, last_id}`
 async fn list_models_claude(State(state): State<AppState>) -> Response {
     let providers = match state.db.provider_list() {
         Ok(v) => v,
@@ -385,11 +506,16 @@ async fn list_models_claude(State(state): State<AppState>) -> Response {
         .iter()
         .filter(|p| p.enabled && p.kind == vibe_protocol::ProviderKind::Anthropic)
     {
-        for alias in &p.model_aliases {
-            if seen.insert(alias.alias.clone()) {
+        let names: Vec<String> = if !p.remote_models.is_empty() {
+            p.remote_models.clone()
+        } else {
+            p.model_aliases.iter().map(|a| a.alias.clone()).collect()
+        };
+        for name in names {
+            if seen.insert(name.clone()) {
                 data.push(serde_json::json!({
-                    "id": alias.alias,
-                    "display_name": alias.alias,
+                    "id": name,
+                    "display_name": name,
                     "type": "model",
                     "created_at": "2025-01-01T00:00:00Z"
                 }));
@@ -418,8 +544,8 @@ async fn list_models_claude(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
-/// `/codex/v1/models` 和 `/opencode/v1/models`
-/// 仅 OpenAI-compat / OpenAI-Responses 供应商，OpenAI 格式
+/// `/codex/v1/models` and `/opencode/v1/models`
+/// OpenAI-compatible / OpenAI-Responses providers only, in OpenAI format
 async fn list_models_openai(State(state): State<AppState>) -> Response {
     use vibe_protocol::ProviderKind;
     model_list_openai(
@@ -445,12 +571,17 @@ async fn model_list_openai(
         .iter()
         .filter(|p| p.enabled && kinds.map_or(true, |ks| ks.contains(&p.kind)))
     {
-        for alias in &p.model_aliases {
-            if seen.insert(alias.alias.clone()) {
+        let names: Vec<String> = if !p.remote_models.is_empty() {
+            p.remote_models.clone()
+        } else {
+            p.model_aliases.iter().map(|a| a.alias.clone()).collect()
+        };
+        for name in names {
+            if seen.insert(name.clone()) {
                 data.push(serde_json::json!({
-                    "id": alias.alias,
-                    "slug": alias.alias,                    // Codex v0.129+
-                    "display_name": alias.alias,            // Codex v0.129+
+                    "id": name,
+                    "slug": name,                    // Codex v0.129+
+                    "display_name": name,            // Codex v0.129+
                     "supported_reasoning_levels": [],       // Codex v0.129+
                     "shell_type": "default",                // Codex v0.129+ (enum: default|local|unified_exec|disabled|shell_command)
                     "visibility": "list",                   // Codex v0.129+ (enum: list|hide|none)
@@ -710,7 +841,7 @@ impl CodexStatusInjection {
             frames.push(event);
         }
         if !self.suppress_status {
-            frames.push(codex_visual::status_message_done_event(
+            frames.extend(codex_visual::status_message_events(
                 &self.visual,
                 response_id,
                 self.ttfs_ms,
@@ -814,6 +945,31 @@ fn codex_sse_block_has_response_created(block: &str) -> bool {
     })
 }
 
+/// Extract `response.id` from a `response.created` frame JSON, so that injected
+/// status events use the upstream's actual response_id in Passthrough mode.
+fn extract_response_created_id(frame_json: &str) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(frame_json).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("response.created") {
+        return None;
+    }
+    v.pointer("/response/id")
+        .and_then(|id| id.as_str())
+        .map(str::to_string)
+}
+
+fn codex_sse_block_extract_response_id(block: &str) -> Option<String> {
+    for raw_line in block.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue;
+        };
+        if let Some(id) = extract_response_created_id(payload.trim()) {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// Inspect one SSE frame (delimiter `\n\n`) and decide whether it looks like **Chat Completions** JSON.
 ///
 /// Returns:
@@ -847,7 +1003,7 @@ fn classify_codex_upstream_sse_frame(block: &str) -> Option<bool> {
     }
 }
 
-/// Codex **`/codex/v1/responses` HTTP**：上游若是 Chat SSE，则在此处做 **SSE → Responses SSE**，并写入 `request_logs.client_response_body`。
+/// Codex **`/codex/v1/responses` HTTP**: if upstream is Chat SSE, convert **SSE -> Responses SSE** here and write `request_logs.client_response_body`.
 async fn codex_plain_http_maybe_chat_to_responses_sse(
     state: AppState,
     upstream: Response,
@@ -946,7 +1102,16 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(
             frame_json: &str,
         ) -> bool {
             append_codex_ws_client_trace(trace, frame_json);
-            let sse_line = format!("data: {}\n\n", frame_json);
+            // Include the SSE `event:` line so Codex parses it the same as
+            // upstream Passthrough events. Without it, frames default to the
+            // "message" event type and stricter SSE clients may drop them.
+            let event_type = serde_json::from_str::<serde_json::Value>(frame_json)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string));
+            let sse_line = match event_type {
+                Some(t) => format!("event: {t}\ndata: {frame_json}\n\n"),
+                None => format!("data: {frame_json}\n\n"),
+            };
             let bytes = sse_line.len();
             if tx.send(Ok(Bytes::from(sse_line))).await.is_ok() {
                 trace_stats.record_client_chunk(started, bytes);
@@ -997,20 +1162,21 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(
                         }
                     }
                     CodexHttpSseMode::Passthrough => {
-                        if let Some(summary) = summary_injection.before_forwarding_sse_block(
-                            event_block,
-                            started.elapsed().as_millis() as i64,
-                        ) {
-                            if !emit_c2r_frame(tx, trace, trace_stats, started, &summary).await {
-                                return false;
-                            }
-                        }
-                        if !emit_raw_frame(tx, trace, trace_stats, started, event_block).await {
+                        let block_to_forward = summary_injection
+                            .maybe_append_to_sse_block(
+                                event_block,
+                                started.elapsed().as_millis() as i64,
+                            )
+                            .unwrap_or_else(|| event_block.to_owned());
+                        if !emit_raw_frame(tx, trace, trace_stats, started, &block_to_forward).await
+                        {
                             return false;
                         }
                         if codex_sse_block_has_response_created(event_block) {
+                            let effective_id = codex_sse_block_extract_response_id(event_block)
+                                .unwrap_or_else(|| session_id.to_string());
                             if let Some(injection) = status_injection.as_mut() {
-                                for frame in injection.next_frames(session_id) {
+                                for frame in injection.next_frames(&effective_id) {
                                     trace_stats.mark_status_injected();
                                     if !emit_c2r_frame(tx, trace, trace_stats, started, &frame)
                                         .await
@@ -1023,22 +1189,16 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(
                         return true;
                     }
                     CodexHttpSseMode::C2r => {
-                        for ws_frame in codex_sse_block_to_ws_frames(
-                            event_block,
-                            session_id,
-                            item_id,
-                            accumulator,
-                            terminal_done,
+                        for ws_frame in summary_injection.maybe_append_to_frame_batch(
+                            codex_sse_block_to_ws_frames(
+                                event_block,
+                                session_id,
+                                item_id,
+                                accumulator,
+                                terminal_done,
+                            ),
+                            started.elapsed().as_millis() as i64,
                         ) {
-                            if let Some(summary) = summary_injection.before_forwarding_frame(
-                                &ws_frame,
-                                started.elapsed().as_millis() as i64,
-                            ) {
-                                if !emit_c2r_frame(tx, trace, trace_stats, started, &summary).await
-                                {
-                                    return false;
-                                }
-                            }
                             if !emit_c2r_frame(tx, trace, trace_stats, started, &ws_frame).await {
                                 return false;
                             }
@@ -1076,7 +1236,7 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(
                         status_injection = CodexStatusInjection::new(
                             visual.clone(),
                             request_started_instant.elapsed().as_millis() as i64,
-                            !should_show_status,
+                            !should_show_status || !state.codex_route_status_enabled(),
                         );
                     }
                     buf.push_str(&String::from_utf8_lossy(&bytes));
@@ -1183,7 +1343,7 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(
 }
 
 /// One SSE event block (text between `\n\n`) → Codex WebSocket text frames.
-/// 累积整段转发给 Codex 的 JSON-Lines trace，供 `client_response_body` 全量落库（不做截断）。
+/// Accumulate the full JSON-Lines trace forwarded to Codex so `client_response_body` can be fully persisted without truncation.
 fn append_codex_ws_client_trace(acc: &mut String, json_line: &str) {
     if !acc.is_empty() {
         acc.push('\n');
@@ -1205,19 +1365,14 @@ async fn persist_codex_client_response_body(
     }
     let db = state.db.clone();
     let id_for_warn = id.clone();
-    let store_bodies = state.config.log.bodies;
     let res = tokio::task::spawn_blocking(move || {
         if let Some(stats) = stats {
             let mut log = empty_patch_log(&id);
-            if store_bodies {
-                log.client_response_body = (!trace.is_empty()).then_some(trace);
-            }
+            log.client_response_body = (!trace.is_empty()).then_some(trace);
             stats.apply_to_log(&mut log);
             db.log_update_client_trace_and_stream_fields(&log)
-        } else if store_bodies {
-            db.log_set_client_response_body(&id, Some(&trace))
         } else {
-            Ok(())
+            db.log_set_client_response_body(&id, Some(&trace))
         }
     })
     .await;
@@ -1449,13 +1604,14 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
             .get::<VibeCodexClientKind>()
             .map(|x| x.0)
             .unwrap_or(codex_summary::CodexClientKind::Unknown);
-        let suppress_status = visual
-            .as_ref()
-            .map(|visual| {
-                !should_show_status
-                    || !should_emit_codex_route_status(&state, turn_id.as_deref(), visual)
-            })
-            .unwrap_or(false);
+        let suppress_status = !state.codex_route_status_enabled()
+            || visual
+                .as_ref()
+                .map(|visual| {
+                    !should_show_status
+                        || !should_emit_codex_route_status(&state, turn_id.as_deref(), visual)
+                })
+                .unwrap_or(false);
         let mut client_ws_trace = String::new();
         let mut trace_stats = StreamTraceStats::new("websocket", "responses_to_ws");
         let mut summary_injection = codex_summary::SummaryAccumulator::new_for_turn(
@@ -1538,34 +1694,17 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
                     let event_block = buf[..event_end].to_string();
                     buf.drain(..event_end + 2);
                     trace_stats.record_sse_block(&request_started_instant, &event_block);
-                    for event_str in codex_sse_block_to_ws_frames(
-                        &event_block,
-                        &session_id,
-                        &item_id,
-                        &mut accumulator,
-                        &mut terminal_done,
+                    for event_str in summary_injection.maybe_append_to_frame_batch(
+                        codex_sse_block_to_ws_frames(
+                            &event_block,
+                            &session_id,
+                            &item_id,
+                            &mut accumulator,
+                            &mut terminal_done,
+                        ),
+                        request_started_instant.elapsed().as_millis() as i64,
                     ) {
                         tracing::debug!(event = %&event_str[..event_str.len().min(200)], "codex ws → client event");
-                        if let Some(summary) = summary_injection.before_forwarding_frame(
-                            &event_str,
-                            request_started_instant.elapsed().as_millis() as i64,
-                        ) {
-                            append_codex_ws_client_trace(&mut client_ws_trace, &summary);
-                            if socket.send(Message::Text(summary.clone())).await.is_err() {
-                                trace_stats.finish("downstream_closed");
-                                persist_codex_client_response_body(
-                                    &state,
-                                    stream_log_row_id,
-                                    client_ws_trace,
-                                    Some(trace_stats),
-                                )
-                                .await;
-                                return;
-                            } else {
-                                trace_stats
-                                    .record_client_chunk(&request_started_instant, summary.len());
-                            }
-                        }
                         append_codex_ws_client_trace(&mut client_ws_trace, &event_str);
                         let is_created = codex_frame_is_response_created(&event_str);
                         if socket.send(Message::Text(event_str.clone())).await.is_err() {
@@ -1583,8 +1722,10 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
                                 .record_client_chunk(&request_started_instant, event_str.len());
                         }
                         if is_created {
+                            let effective_id = extract_response_created_id(&event_str)
+                                .unwrap_or_else(|| session_id.clone());
                             if let Some(injection) = status_injection.as_mut() {
-                                for injected in injection.next_frames(&session_id) {
+                                for injected in injection.next_frames(&effective_id) {
                                     tracing::debug!(event = %&injected[..injected.len().min(200)], "codex ws injected status → client event");
                                     append_codex_ws_client_trace(&mut client_ws_trace, &injected);
                                     trace_stats.mark_status_injected();
@@ -1619,34 +1760,17 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
                     let event_block = buf[..event_end].to_string();
                     buf.drain(..event_end + 2);
                     trace_stats.record_sse_block(&request_started_instant, &event_block);
-                    for event_str in codex_sse_block_to_ws_frames(
-                        &event_block,
-                        &session_id,
-                        &item_id,
-                        &mut accumulator,
-                        &mut terminal_done,
+                    for event_str in summary_injection.maybe_append_to_frame_batch(
+                        codex_sse_block_to_ws_frames(
+                            &event_block,
+                            &session_id,
+                            &item_id,
+                            &mut accumulator,
+                            &mut terminal_done,
+                        ),
+                        request_started_instant.elapsed().as_millis() as i64,
                     ) {
                         tracing::debug!(event = %&event_str[..event_str.len().min(200)], "codex ws flush → client event");
-                        if let Some(summary) = summary_injection.before_forwarding_frame(
-                            &event_str,
-                            request_started_instant.elapsed().as_millis() as i64,
-                        ) {
-                            append_codex_ws_client_trace(&mut client_ws_trace, &summary);
-                            if socket.send(Message::Text(summary.clone())).await.is_err() {
-                                trace_stats.finish("downstream_closed");
-                                persist_codex_client_response_body(
-                                    &state,
-                                    stream_log_row_id,
-                                    client_ws_trace,
-                                    Some(trace_stats),
-                                )
-                                .await;
-                                return;
-                            } else {
-                                trace_stats
-                                    .record_client_chunk(&request_started_instant, summary.len());
-                            }
-                        }
                         append_codex_ws_client_trace(&mut client_ws_trace, &event_str);
                         let is_created = codex_frame_is_response_created(&event_str);
                         if socket.send(Message::Text(event_str.clone())).await.is_err() {
@@ -1664,8 +1788,10 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
                                 .record_client_chunk(&request_started_instant, event_str.len());
                         }
                         if is_created {
+                            let effective_id = extract_response_created_id(&event_str)
+                                .unwrap_or_else(|| session_id.clone());
                             if let Some(injection) = status_injection.as_mut() {
-                                for injected in injection.next_frames(&session_id) {
+                                for injected in injection.next_frames(&effective_id) {
                                     tracing::debug!(event = %&injected[..injected.len().min(200)], "codex ws injected flush status → client event");
                                     append_codex_ws_client_trace(&mut client_ws_trace, &injected);
                                     trace_stats.mark_status_injected();
@@ -1720,8 +1846,8 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
                 }
             }
         } else {
-            // 6b. 非 SSE：上游仍可能返回完整 Chat JSON。Codex WS 只认带 `type` 的事件序列，
-            //    不能直接发裸 `response` 对象（见 transforms::chat_completion_non_stream_to_ws_events）。
+            // 6b. Non-SSE: upstream can still return full Chat JSON. Codex WS only accepts event sequences with `type`,
+            //     so do not send a raw `response` object directly (see transforms::chat_completion_non_stream_to_ws_events).
             if let Ok(bytes) = axum::body::to_bytes(body, 8 * 1024 * 1024).await {
                 trace_stats.record_upstream_chunk(&request_started_instant, bytes.len());
                 if bytes.windows(9).any(|w| w == b"\"choices\"") {
@@ -1736,33 +1862,14 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
                                 request_started_instant.elapsed().as_millis() as i64,
                                 suppress_status,
                             );
-                            for event_str in frames {
+                            for event_str in summary_injection.maybe_append_to_frame_batch(
+                                frames,
+                                request_started_instant.elapsed().as_millis() as i64,
+                            ) {
                                 tracing::debug!(
                                     event = %&event_str[..event_str.len().min(200)],
                                     "codex ws non-sse → client event"
                                 );
-                                if let Some(summary) = summary_injection.before_forwarding_frame(
-                                    &event_str,
-                                    request_started_instant.elapsed().as_millis() as i64,
-                                ) {
-                                    append_codex_ws_client_trace(&mut client_ws_trace, &summary);
-                                    if socket.send(Message::Text(summary.clone())).await.is_err() {
-                                        trace_stats.finish("downstream_closed");
-                                        persist_codex_client_response_body(
-                                            &state,
-                                            stream_log_row_id,
-                                            client_ws_trace,
-                                            Some(trace_stats),
-                                        )
-                                        .await;
-                                        return;
-                                    } else {
-                                        trace_stats.record_client_chunk(
-                                            &request_started_instant,
-                                            summary.len(),
-                                        );
-                                    }
-                                }
                                 append_codex_ws_client_trace(&mut client_ws_trace, &event_str);
                                 let is_created = codex_frame_is_response_created(&event_str);
                                 trace_stats.record_ws_text(&request_started_instant, &event_str);
@@ -1783,8 +1890,10 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
                                     );
                                 }
                                 if is_created {
+                                    let effective_id = extract_response_created_id(&event_str)
+                                        .unwrap_or_else(|| session_id.clone());
                                     if let Some(injection) = status_injection.as_mut() {
-                                        for injected in injection.next_frames(&session_id) {
+                                        for injected in injection.next_frames(&effective_id) {
                                             append_codex_ws_client_trace(
                                                 &mut client_ws_trace,
                                                 &injected,
@@ -1921,13 +2030,85 @@ async fn post_gemini(
     .await
 }
 
+async fn refresh_provider_models(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Provider>, AppError> {
+    let provider = run_blocking(state.clone(), move |s| s.db.provider_get(&id))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+    let refreshed = refresh_remote_models_for_provider(&state, &provider).await?;
+    publish_providers_overview_soon(state);
+    Ok(Json(refreshed))
+}
+
+pub(crate) async fn refresh_remote_models_for_provider_if_supported(
+    state: &AppState,
+    provider: &Provider,
+) -> anyhow::Result<Provider> {
+    match provider.kind {
+        vibe_protocol::ProviderKind::GeminiNative => Ok(provider.clone()),
+        _ => refresh_remote_models_for_provider(state, provider).await,
+    }
+}
+
+async fn refresh_remote_models_for_provider(
+    state: &AppState,
+    provider: &Provider,
+) -> anyhow::Result<Provider> {
+    let secret = if let Some(auth_ref) = provider.auth_ref.as_deref() {
+        Some(crate::secrets::resolve(auth_ref)?)
+    } else {
+        None
+    };
+    let base = provider.base_url.trim_end_matches('/');
+    let url = match provider.kind {
+        vibe_protocol::ProviderKind::OpenaiChat | vibe_protocol::ProviderKind::OpenaiResponses => {
+            format!("{base}/v1/models")
+        }
+        vibe_protocol::ProviderKind::Anthropic => format!("{base}/v1/models"),
+        vibe_protocol::ProviderKind::GeminiNative => {
+            anyhow::bail!("gemini-native model list refresh not supported yet")
+        }
+    };
+    let mut req = state.http.get(url);
+    if let Some(secret) = secret.as_deref() {
+        req = req.bearer_auth(secret);
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("model list refresh failed: HTTP {}", resp.status());
+    }
+    let v: serde_json::Value = resp.json().await?;
+    let mut names = Vec::<String>::new();
+    if let Some(arr) = v.get("data").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(id) = item.get("id").and_then(|x| x.as_str()) {
+                let s = id.trim();
+                if !s.is_empty() {
+                    names.push(s.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    let id = provider.id.clone();
+    let fetched_at = chrono::Utc::now().timestamp();
+    let updated = run_blocking(state.clone(), move |s| {
+        s.db.provider_update_remote_models(&id, names, fetched_at)
+    })
+    .await?;
+    Ok(updated)
+}
+
 // ---------------------------------------------------------------------------
 // Local import (scan installed tools → ready-to-use ProviderInput)
 // ---------------------------------------------------------------------------
 
 /// `GET /_vp/providers/import-local`
-/// 扫描本地已安装的 Claude Code / Codex CLI，返回可导入候选列表。
-/// 不写库，只读文件系统。
+/// Scan locally installed Claude Code / Codex CLI and return importable candidates.
+/// No database writes; filesystem reads only.
 async fn scan_local_providers() -> Json<Vec<local_import::LocalCandidate>> {
     Json(local_import::scan())
 }
@@ -1935,11 +2116,15 @@ async fn scan_local_providers() -> Json<Vec<local_import::LocalCandidate>> {
 fn provider_to_input(p: &Provider) -> ProviderInput {
     ProviderInput {
         name: p.name.clone(),
+        group_name: p.group_name.clone(),
+        avatar_url: p.avatar_url.clone(),
         kind: p.kind,
         base_url: p.base_url.clone(),
         auth_ref: p.auth_ref.clone(),
         enabled: p.enabled,
         priority: p.priority,
+        supports_websocket: p.supports_websocket,
+        passthrough_mode: p.passthrough_mode,
         model_aliases: p.model_aliases.clone(),
     }
 }
@@ -1951,7 +2136,7 @@ fn model_aliases_equal(a: &[vibe_protocol::ModelAlias], b: &[vibe_protocol::Mode
             .all(|(a, b)| a.alias == b.alias && a.upstream_model == b.upstream_model)
 }
 
-/// Re-import 同指纹时合并 token / 缓存身份，避免跳过导致无法刷新本机新 OAuth 材料。
+/// For re-imports with the same fingerprint, merge tokens / cached identity to avoid skipping fresh local OAuth material.
 fn merge_codex_credential_on_reimport(
     existing: &Credential,
     incoming: CredentialInput,
@@ -1981,14 +2166,14 @@ fn merge_codex_credential_on_reimport(
 }
 
 /// `POST /_vp/providers/import-local`
-/// body: `["claude", "codex"]`  — 指定要导入的 client 名称列表
+/// body: `["claude", "codex"]` — list of client names to import
 ///
-/// 对每个候选：
-///   1. 若已有相同 kind + base_url 的 provider：
-///      - Codex：合并本机 `auth*.json` 为凭证行（按指纹去重）
-///      - Claude：用本机 Claude Code 配置（settings / credentials / .env / 进程环境）刷新该上游的 `auth_ref`
-///      - 其它：跳过
-///   2. 否则插入 provider，再插入凭证（Codex：每个 auth*.json → 一行 oauth_*）
+/// For each candidate:
+///   1. If a provider with the same kind + base_url already exists:
+///      - Codex: merge local `auth*.json` into credential rows, deduplicated by fingerprint
+///      - Claude: refresh this upstream `auth_ref` from local Claude Code config (settings / credentials / .env / process environment)
+///      - Others: skip
+///   2. Otherwise insert provider, then credentials (Codex: each auth*.json -> one oauth_* row)
 async fn import_local_providers(
     State(state): State<AppState>,
     Json(clients): Json<Vec<String>>,
@@ -2005,7 +2190,7 @@ async fn import_local_providers(
         })
         .await?;
         if let Some(existing) = dup {
-            // 已有同 kind + base_url：Codex 合并凭证；Claude 刷新 provider 级 auth_ref。
+            // Existing same kind + base_url: Codex merges credentials; Claude refreshes provider-level auth_ref.
             if c.client.as_str() == "codex" {
                 let pid = existing.id.clone();
                 for cred in plan.credentials {
@@ -2142,6 +2327,7 @@ async fn import_local_providers(
         }
         created.push(p);
     }
+    publish_providers_overview_soon(state);
     Ok(Json(created))
 }
 
@@ -2162,7 +2348,7 @@ async fn upsert_import_plan(
         let mut input = provider_to_input(&existing);
         input.name = plan.provider.name;
         input.auth_ref = plan.provider.auth_ref;
-        input.enabled = plan.provider.enabled;
+        // Do NOT overwrite enabled from the plan — only the user can toggle providers on/off.
         input.priority = plan.provider.priority;
         input.model_aliases = plan.provider.model_aliases;
         let provider = run_blocking(state.clone(), {
@@ -2190,6 +2376,7 @@ async fn upsert_import_plan(
                 .await?;
             }
         }
+        publish_providers_overview_soon(state);
         return Ok(provider);
     }
 
@@ -2207,6 +2394,7 @@ async fn upsert_import_plan(
         })
         .await?;
     }
+    publish_providers_overview_soon(state);
     Ok(provider)
 }
 
@@ -2231,18 +2419,7 @@ async fn import_cc_switch_deeplink(
     Ok(Json(upsert_import_plan(state, plan).await?))
 }
 
-#[derive(Debug, serde::Serialize)]
-struct ClientStatusResponse {
-    client: String,
-    config_path: String,
-    config_exists: bool,
-    taken_over: bool,
-    expected_base_url: String,
-    configured_base_url: Option<String>,
-    auth_proxy_managed: Option<bool>,
-    model_overrides_present: Vec<String>,
-    notes: Vec<String>,
-}
+type ClientStatusResponse = ClientStatus;
 
 #[derive(Debug, serde::Serialize)]
 struct ClientDoctorResponse {
@@ -2258,13 +2435,7 @@ struct ClientDoctorCheck {
     detail: String,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct ClientTakeoverResponse {
-    client: String,
-    config_path: String,
-    backup_path: Option<String>,
-    status: ClientStatusResponse,
-}
+type ClientTakeoverResponse = ClientTakeoverResult;
 
 async fn client_status(
     State(state): State<AppState>,
@@ -2328,6 +2499,9 @@ async fn client_takeover(
     })
     .await?;
     let status = client_status_inner(&client, state.port)?;
+    state
+        .ws
+        .publish(WsEvent::ClientStatusChanged(status.clone()));
     Ok(Json(ClientTakeoverResponse {
         client: outcome.client,
         config_path: outcome.config_path,
@@ -2346,6 +2520,9 @@ async fn client_restore(
     })
     .await?;
     let status = client_status_inner(&client, state.port)?;
+    state
+        .ws
+        .publish(WsEvent::ClientStatusChanged(status.clone()));
     Ok(Json(ClientTakeoverResponse {
         client: outcome.client,
         config_path: outcome.config_path,
@@ -2355,19 +2532,10 @@ async fn client_restore(
 }
 
 fn client_status_inner(client: &str, port: u16) -> Result<ClientStatusResponse, AppError> {
-    let home = directories::UserDirs::new()
-        .ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?
-        .home_dir()
-        .to_path_buf();
     let base = format!("http://127.0.0.1:{port}");
     match client {
         "claude" => {
-            let path = std::env::var("CLAUDE_CONFIG_DIR")
-                .ok()
-                .map(PathBuf::from)
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or_else(|| home.join(".claude"))
-                .join("settings.json");
+            let path = crate::paths::claude_settings_path()?;
             let expected = format!("{base}/claude");
             let (configured, auth_proxy, overrides, notes) = read_claude_client_config(&path)?;
             Ok(ClientStatusResponse {
@@ -2383,11 +2551,7 @@ fn client_status_inner(client: &str, port: u16) -> Result<ClientStatusResponse, 
             })
         }
         "codex" => {
-            let path = if home.join(".codex/config.toml").exists() {
-                home.join(".codex/config.toml")
-            } else {
-                home.join(".config/codex/config.toml")
-            };
+            let path = crate::paths::codex_config_path()?;
             let expected = format!("{base}/codex/v1");
             let configured = read_codex_base_url(&path)?;
             Ok(ClientStatusResponse {
@@ -2403,7 +2567,7 @@ fn client_status_inner(client: &str, port: u16) -> Result<ClientStatusResponse, 
             })
         }
         "opencode" => {
-            let path = home.join(".config/opencode/opencode.json");
+            let path = crate::paths::opencode_config_path()?;
             let expected = format!("{base}/opencode/v1");
             let configured = read_opencode_base_url(&path)?;
             Ok(ClientStatusResponse {
@@ -2501,10 +2665,15 @@ async fn create_provider(
     State(state): State<AppState>,
     Json(input): Json<ProviderInput>,
 ) -> Result<Json<Provider>, AppError> {
+    let name = input.name.clone();
     let p = run_blocking(state.clone(), move |s| s.db.provider_insert(input)).await?;
-    state.ws.publish(WsEvent::Hello {
-        version: VERSION.into(),
-    });
+    emit_app_log(
+        &state,
+        AppLogLevel::Info,
+        "provider",
+        format!("Provider added: {name}"),
+    );
+    publish_providers_overview_soon(state);
     Ok(Json(p))
 }
 
@@ -2513,13 +2682,15 @@ async fn update_provider(
     Path(id): Path<String>,
     Json(input): Json<ProviderInput>,
 ) -> Result<Json<Provider>, AppError> {
+    let name = input.name.clone();
+    let enabled = input.enabled;
     let id_for_update = id.clone();
     let p = run_blocking(state.clone(), move |s| {
         s.db.provider_update(&id_for_update, input)
     })
     .await?;
-    // 绑定“开关”与熔断：切换后清空该 provider 及其 credential 的熔断状态，
-    // 避免 UI 显示 enabled 但请求仍被历史熔断阻断。
+    // Bind toggles to circuit state: after switching, clear circuit state for the provider and its credentials,
+    // avoiding UI enabled state while requests remain blocked by historical circuit breaks.
     let cred_ids = run_blocking(state.clone(), {
         let id2 = id.clone();
         move |s| {
@@ -2532,6 +2703,13 @@ async fn update_provider(
     for cid in cred_ids {
         state.cb.reset(&cid);
     }
+    let msg = if enabled {
+        format!("Provider enabled: {name}")
+    } else {
+        format!("Provider disabled: {name}")
+    };
+    emit_app_log(&state, AppLogLevel::Info, "provider", msg);
+    publish_providers_overview_soon(state);
     Ok(Json(p))
 }
 
@@ -2539,7 +2717,15 @@ async fn delete_provider(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    run_blocking(state, move |s| s.db.provider_delete(&id)).await?;
+    let id_clone = id.clone();
+    run_blocking(state.clone(), move |s| s.db.provider_delete(&id_clone)).await?;
+    emit_app_log(
+        &state,
+        AppLogLevel::Warn,
+        "provider",
+        format!("Provider deleted: {id}"),
+    );
+    publish_providers_overview_soon(state);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2662,6 +2848,675 @@ async fn provider_test(
     }))
 }
 
+const SPEEDTEST_DEFAULT_TIMEOUT_SECS: u64 = 8;
+const SPEEDTEST_MIN_TIMEOUT_SECS: u64 = 2;
+const SPEEDTEST_MAX_TIMEOUT_SECS: u64 = 30;
+
+fn sanitize_speedtest_timeout(timeout_secs: Option<u64>) -> u64 {
+    timeout_secs
+        .unwrap_or(SPEEDTEST_DEFAULT_TIMEOUT_SECS)
+        .clamp(SPEEDTEST_MIN_TIMEOUT_SECS, SPEEDTEST_MAX_TIMEOUT_SECS)
+}
+
+fn speedtest_error_result(
+    url: String,
+    checked_at: i64,
+    error: impl Into<String>,
+) -> ProviderSpeedtestResult {
+    ProviderSpeedtestResult {
+        url,
+        ok: false,
+        latency_ms: None,
+        status: None,
+        error: Some(error.into()),
+        checked_at,
+    }
+}
+
+async fn run_endpoint_speedtest(
+    raw_url: &str,
+    timeout_secs: Option<u64>,
+) -> ProviderSpeedtestResult {
+    let checked_at = chrono::Utc::now().timestamp();
+    let trimmed = raw_url.trim().to_string();
+    if trimmed.is_empty() {
+        return speedtest_error_result(trimmed, checked_at, "URL cannot be empty");
+    }
+
+    let parsed_url = match url::Url::parse(&trimmed) {
+        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
+        Ok(parsed) => {
+            return speedtest_error_result(
+                trimmed,
+                checked_at,
+                format!("Unsupported URL scheme: {}", parsed.scheme()),
+            );
+        }
+        Err(err) => {
+            return speedtest_error_result(trimmed, checked_at, format!("Invalid URL: {err}"))
+        }
+    };
+
+    let timeout = Duration::from_secs(sanitize_speedtest_timeout(timeout_secs));
+    let client = match reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(30))
+        .timeout(timeout)
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => return speedtest_error_result(trimmed, checked_at, err.to_string()),
+    };
+
+    // Same logic as CC Switch: warm up once and ignore the result, then time the second request.
+    let _ = client.get(parsed_url.clone()).timeout(timeout).send().await;
+
+    let start = Instant::now();
+    match client.get(parsed_url).timeout(timeout).send().await {
+        Ok(resp) => ProviderSpeedtestResult {
+            url: trimmed,
+            ok: true,
+            latency_ms: Some(start.elapsed().as_millis() as i64),
+            status: Some(resp.status().as_u16()),
+            error: None,
+            checked_at,
+        },
+        Err(err) => {
+            let error_message = if err.is_timeout() {
+                "Request timed out".to_string()
+            } else if err.is_connect() {
+                "Connection failed".to_string()
+            } else {
+                err.to_string()
+            };
+            ProviderSpeedtestResult {
+                url: trimmed,
+                ok: false,
+                latency_ms: None,
+                status: err.status().map(|s| s.as_u16()),
+                error: Some(error_message),
+                checked_at,
+            }
+        }
+    }
+}
+
+async fn provider_speedtest(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ProviderSpeedtestInput>,
+) -> Result<Json<Provider>, AppError> {
+    let provider = run_blocking(state.clone(), {
+        let id = id.clone();
+        move |s| {
+            s.db.provider_get(&id)?
+                .ok_or_else(|| anyhow::anyhow!("provider not found"))
+        }
+    })
+    .await?;
+
+    let result = run_endpoint_speedtest(&provider.base_url, input.timeout_secs).await;
+    let provider_id = provider.id.clone();
+    let updated = run_blocking(state.clone(), move |s| {
+        s.db.provider_update_speedtest(&provider_id, result)
+    })
+    .await?;
+    publish_providers_overview_soon(state);
+    Ok(Json(updated))
+}
+
+async fn provider_probe(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ProviderSpeedtestInput>,
+) -> Result<Json<Provider>, AppError> {
+    let provider = run_blocking(state.clone(), {
+        let id = id.clone();
+        move |s| {
+            s.db.provider_get(&id)?
+                .ok_or_else(|| anyhow::anyhow!("provider not found"))
+        }
+    })
+    .await?;
+
+    let result = run_protocol_probe(&state, &provider, input.timeout_secs).await;
+    let provider_id = provider.id.clone();
+    let updated = run_blocking(state.clone(), move |s| {
+        s.db.provider_update_speedtest(&provider_id, result)
+    })
+    .await?;
+    publish_providers_overview_soon(state);
+    Ok(Json(updated))
+}
+
+async fn run_protocol_probe(
+    state: &AppState,
+    provider: &Provider,
+    timeout_secs: Option<u64>,
+) -> ProviderSpeedtestResult {
+    let checked_at = chrono::Utc::now().timestamp();
+    let timeout = Duration::from_secs(sanitize_speedtest_timeout(timeout_secs));
+    let model = probe_model(provider);
+    let secret = match probe_secret(state, provider).await {
+        Ok(secret) => secret,
+        Err(err) => {
+            return speedtest_error_result(provider.base_url.clone(), checked_at, err.to_string());
+        }
+    };
+    let (wire, body, upstream_path, url) = probe_request(provider, &model);
+    let adapter = crate::providers::select(provider);
+    let req = match adapter.build(
+        provider,
+        secret.as_deref(),
+        &state.http,
+        wire,
+        &body,
+        upstream_path.as_deref(),
+    ) {
+        Ok(req) => req,
+        Err(err) => return speedtest_error_result(url, checked_at, err.to_string()),
+    };
+
+    let start = Instant::now();
+    let resp = match req.timeout(timeout).send().await {
+        Ok(resp) => resp,
+        Err(err) => {
+            let error_message = if err.is_timeout() {
+                "Request timed out".to_string()
+            } else if err.is_connect() {
+                "Connection failed".to_string()
+            } else {
+                err.to_string()
+            };
+            return ProviderSpeedtestResult {
+                url,
+                ok: false,
+                latency_ms: None,
+                status: err.status().map(|s| s.as_u16()),
+                error: Some(error_message),
+                checked_at,
+            };
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let preview = resp
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(220)
+            .collect::<String>();
+        return ProviderSpeedtestResult {
+            url,
+            ok: false,
+            latency_ms: Some(start.elapsed().as_millis() as i64),
+            status: Some(status.as_u16()),
+            error: Some(if preview.trim().is_empty() {
+                format!("HTTP {}", status.as_u16())
+            } else {
+                format!("HTTP {}: {}", status.as_u16(), preview)
+            }),
+            checked_at,
+        };
+    }
+
+    let mut stream = resp.bytes_stream();
+    match tokio::time::timeout(timeout, stream.next()).await {
+        Ok(Some(Ok(chunk))) if !chunk.is_empty() => ProviderSpeedtestResult {
+            url,
+            ok: true,
+            latency_ms: Some(start.elapsed().as_millis() as i64),
+            status: Some(status.as_u16()),
+            error: None,
+            checked_at,
+        },
+        Ok(Some(Ok(_))) => ProviderSpeedtestResult {
+            url,
+            ok: true,
+            latency_ms: Some(start.elapsed().as_millis() as i64),
+            status: Some(status.as_u16()),
+            error: None,
+            checked_at,
+        },
+        Ok(Some(Err(err))) => ProviderSpeedtestResult {
+            url,
+            ok: false,
+            latency_ms: Some(start.elapsed().as_millis() as i64),
+            status: Some(status.as_u16()),
+            error: Some(format!("stream read failed: {err}")),
+            checked_at,
+        },
+        Ok(None) => ProviderSpeedtestResult {
+            url,
+            ok: false,
+            latency_ms: Some(start.elapsed().as_millis() as i64),
+            status: Some(status.as_u16()),
+            error: Some("No response data received".into()),
+            checked_at,
+        },
+        Err(_) => ProviderSpeedtestResult {
+            url,
+            ok: false,
+            latency_ms: None,
+            status: Some(status.as_u16()),
+            error: Some("Request timed out".into()),
+            checked_at,
+        },
+    }
+}
+
+async fn provider_sync(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ProviderSyncInput>,
+) -> Result<Json<ProviderSyncPreview>, AppError> {
+    let provider = run_blocking(state.clone(), {
+        let id2 = id.clone();
+        move |s| {
+            s.db.provider_get(&id2)?
+                .ok_or_else(|| anyhow::anyhow!("provider not found"))
+        }
+    })
+    .await?;
+
+    let scope = input.scope.unwrap_or_else(|| "all".into());
+    let mut updated_input = provider_to_input(&provider);
+    let mut branding = SyncBranding::default();
+    let mut financials = SyncFinancials::default();
+    let mut note_parts: Vec<String> = Vec::new();
+
+    if matches!(scope.as_str(), "all" | "brand") {
+        if let Ok(found) = sync_fetch_branding(&state.http, &provider.base_url).await {
+            if let Some(name) = found.display_name.clone() {
+                updated_input.name = name.clone();
+            }
+            if let Some(url) = found.avatar_url.clone() {
+                updated_input.avatar_url = Some(url);
+            }
+            branding = found;
+            note_parts.push("brand".into());
+        }
+    }
+
+    let supported_protocols = if matches!(scope.as_str(), "all" | "protocol") {
+        note_parts.push("protocol".into());
+        sync_detect_supported_protocols(&state, &provider).await
+    } else {
+        vec![provider_kind_to_api_label(provider.kind).to_string()]
+    };
+
+    if matches!(scope.as_str(), "all" | "usage") {
+        if let Ok(secret) = probe_secret(&state, &provider).await {
+            if let Some(secret) = secret {
+                financials = sync_fetch_financials(&state.http, &provider, &secret).await;
+                note_parts.push("usage".into());
+            }
+        }
+    }
+
+    let mut updated = if matches!(scope.as_str(), "all" | "models") {
+        note_parts.push("models".into());
+        refresh_remote_models_for_provider_if_supported(&state, &provider)
+            .await
+            .unwrap_or(provider.clone())
+    } else {
+        provider.clone()
+    };
+
+    updated_input.model_aliases = updated.model_aliases.clone();
+    updated = run_blocking(state.clone(), {
+        let id3 = id.clone();
+        let input3 = updated_input.clone();
+        move |s| s.db.provider_update(&id3, input3)
+    })
+    .await?;
+
+    Ok(Json(ProviderSyncPreview {
+        display_name: branding
+            .display_name
+            .clone()
+            .unwrap_or_else(|| updated.name.clone()),
+        avatar_url: branding
+            .avatar_url
+            .clone()
+            .or_else(|| updated.avatar_url.clone()),
+        balance: financials.balance,
+        usage: financials.usage,
+        supported_protocols,
+        platform_guess: sync_guess_platform(&branding, &provider.base_url),
+        note: if note_parts.is_empty() {
+            "synced".into()
+        } else {
+            note_parts.join(", ")
+        },
+        provider: updated,
+    }))
+}
+
+async fn sync_detect_supported_protocols(state: &AppState, provider: &Provider) -> Vec<String> {
+    let mut out = Vec::new();
+    for kind in [
+        vibe_protocol::ProviderKind::OpenaiResponses,
+        vibe_protocol::ProviderKind::OpenaiChat,
+        vibe_protocol::ProviderKind::Anthropic,
+        vibe_protocol::ProviderKind::GeminiNative,
+    ] {
+        let mut candidate = provider.clone();
+        candidate.kind = kind;
+        let result = run_protocol_probe(state, &candidate, Some(5)).await;
+        if result.ok || matches!(result.status, Some(400) | Some(401) | Some(403)) {
+            out.push(provider_kind_to_api_label(kind).to_string());
+        }
+    }
+    if out.is_empty() {
+        out.push(provider_kind_to_api_label(provider.kind).to_string());
+    }
+    out
+}
+
+fn provider_kind_to_api_label(kind: vibe_protocol::ProviderKind) -> &'static str {
+    match kind {
+        vibe_protocol::ProviderKind::OpenaiResponses => "openai-responses",
+        vibe_protocol::ProviderKind::OpenaiChat => "openai-chat",
+        vibe_protocol::ProviderKind::Anthropic => "anthropic",
+        vibe_protocol::ProviderKind::GeminiNative => "gemini-native",
+    }
+}
+
+async fn sync_fetch_branding(
+    http: &reqwest::Client,
+    raw_url: &str,
+) -> anyhow::Result<SyncBranding> {
+    let url = reqwest::Url::parse(raw_url)?;
+    let resp = tokio::time::timeout(
+        Duration::from_secs(6),
+        http.get(url.clone())
+            .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml")
+            .send(),
+    )
+    .await??;
+    if !resp.status().is_success() {
+        anyhow::bail!("branding fetch status {}", resp.status());
+    }
+    let body = resp.text().await?;
+    let doc = Html::parse_document(&body);
+    let meta_selector = Selector::parse("meta").unwrap();
+    let title_selector = Selector::parse("title").unwrap();
+    let link_selector = Selector::parse("link").unwrap();
+    let mut meta_by_key = HashMap::<String, String>::new();
+    for meta in doc.select(&meta_selector) {
+        let value = meta.value();
+        let content = value.attr("content").unwrap_or("").trim();
+        if content.is_empty() {
+            continue;
+        }
+        for key in [value.attr("property"), value.attr("name")]
+            .into_iter()
+            .flatten()
+        {
+            let key = key.trim().to_ascii_lowercase();
+            if !key.is_empty() {
+                meta_by_key
+                    .entry(key)
+                    .or_insert_with(|| content.to_string());
+            }
+        }
+    }
+    let title = doc
+        .select(&title_selector)
+        .next()
+        .map(|n| n.text().collect::<String>().trim().to_string())
+        .filter(|s| !s.is_empty());
+    let display_name = [
+        "og:site_name",
+        "application-name",
+        "apple-mobile-web-app-title",
+        "og:title",
+        "twitter:title",
+    ]
+    .iter()
+    .find_map(|k| meta_by_key.get(*k).cloned())
+    .or_else(|| {
+        title.clone().map(|t| {
+            t.split(['|', '-', '—', '·'])
+                .next()
+                .unwrap_or(&t)
+                .trim()
+                .to_string()
+        })
+    });
+    let avatar_url = ["og:image", "twitter:image", "msapplication-tileimage"]
+        .iter()
+        .find_map(|k| {
+            meta_by_key
+                .get(*k)
+                .and_then(|v| url.join(v).ok().map(|u| u.to_string()))
+        })
+        .or_else(|| {
+            for link in doc.select(&link_selector) {
+                let rel = link.value().attr("rel").unwrap_or("").to_ascii_lowercase();
+                if !(rel.contains("icon") || rel.contains("apple-touch-icon")) {
+                    continue;
+                }
+                if let Some(href) = link.value().attr("href") {
+                    if let Ok(joined) = url.join(href) {
+                        return Some(joined.to_string());
+                    }
+                }
+            }
+            url.join("/favicon.ico").ok().map(|u| u.to_string())
+        });
+    Ok(SyncBranding {
+        display_name,
+        avatar_url,
+        title,
+    })
+}
+
+fn sync_guess_platform(branding: &SyncBranding, base_url: &str) -> Option<String> {
+    let title = branding.title.as_deref().unwrap_or("");
+    let avatar = branding.avatar_url.as_deref().unwrap_or("");
+    if title.contains("AI API Gateway") && avatar.contains("/logo.png") {
+        return Some("sub2api-like".into());
+    }
+    let base = base_url.to_ascii_lowercase();
+    if base.contains("newapi") || base.contains("freeapi") {
+        return Some("newapi-like".into());
+    }
+    None
+}
+
+async fn sync_fetch_financials(
+    http: &reqwest::Client,
+    provider: &Provider,
+    secret: &str,
+) -> SyncFinancials {
+    if !matches!(
+        provider.kind,
+        vibe_protocol::ProviderKind::OpenaiChat | vibe_protocol::ProviderKind::OpenaiResponses
+    ) {
+        return SyncFinancials::default();
+    }
+    let base = provider
+        .base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_string();
+    let mut out = SyncFinancials::default();
+    let headers = |req: reqwest::RequestBuilder| req.bearer_auth(secret);
+    if let Ok(Some(v)) =
+        send_sync_credit(headers(http.get(format!("{base}/api/user/credit_grants")))).await
+    {
+        out.balance = Some(v);
+    }
+    if let Ok(Some(v)) =
+        send_sync_usage(headers(http.get(format!("{base}/dashboard/billing/usage")))).await
+    {
+        out.usage = Some(v);
+    }
+    out
+}
+
+async fn send_sync_credit(
+    req: reqwest::RequestBuilder,
+) -> anyhow::Result<Option<ProviderBalanceSnapshot>> {
+    let resp = tokio::time::timeout(Duration::from_secs(6), req.send()).await??;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let value = resp.json::<serde_json::Value>().await?;
+    let total = value
+        .pointer("/total_granted")
+        .and_then(|v| v.as_f64())
+        .map(|n| n.to_string());
+    let used = value
+        .pointer("/total_used")
+        .and_then(|v| v.as_f64())
+        .map(|n| n.to_string());
+    let remaining = value
+        .pointer("/total_available")
+        .and_then(|v| v.as_f64())
+        .map(|n| n.to_string());
+    if total.is_none() && used.is_none() && remaining.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ProviderBalanceSnapshot {
+        currency: "USD".into(),
+        balance: remaining.clone(),
+        remaining,
+        used,
+        total,
+        period: None,
+        note: Some("credit grants".into()),
+    }))
+}
+
+async fn send_sync_usage(
+    req: reqwest::RequestBuilder,
+) -> anyhow::Result<Option<ProviderBalanceSnapshot>> {
+    let resp = tokio::time::timeout(Duration::from_secs(6), req.send()).await??;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let value = resp.json::<serde_json::Value>().await?;
+    let used = value
+        .get("total_usage")
+        .and_then(|v| v.as_f64())
+        .map(|n| n.to_string());
+    if used.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ProviderBalanceSnapshot {
+        currency: "USD".into(),
+        balance: None,
+        remaining: None,
+        used,
+        total: None,
+        period: Some("current window".into()),
+        note: Some("usage".into()),
+    }))
+}
+
+async fn probe_secret(state: &AppState, provider: &Provider) -> anyhow::Result<Option<String>> {
+    let credentials = state.db.credential_list_for_provider(&provider.id)?;
+    if let Some(cred) = credentials.into_iter().find(|cred| cred.enabled) {
+        if let Some(token) = cred.oauth_access_token.filter(|s| !s.trim().is_empty()) {
+            return Ok(Some(token));
+        }
+        if let Some(auth_ref) = cred.auth_ref.filter(|s| !s.trim().is_empty()) {
+            return Ok(Some(crate::secrets::resolve(&auth_ref)?));
+        }
+    }
+    match provider
+        .auth_ref
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(auth_ref) => Ok(Some(crate::secrets::resolve(auth_ref)?)),
+        None => Ok(None),
+    }
+}
+
+fn probe_model(provider: &Provider) -> String {
+    provider
+        .model_aliases
+        .first()
+        .map(|a| a.upstream_model.clone())
+        .or_else(|| provider.remote_models.first().cloned())
+        .unwrap_or_else(|| match provider.kind {
+            vibe_protocol::ProviderKind::Anthropic => "claude-sonnet-4-5".into(),
+            vibe_protocol::ProviderKind::GeminiNative => "gemini-2.5-pro".into(),
+            vibe_protocol::ProviderKind::OpenaiChat => "gpt-5.4".into(),
+            vibe_protocol::ProviderKind::OpenaiResponses => "gpt-5.3-codex".into(),
+        })
+}
+
+fn probe_request(provider: &Provider, model: &str) -> (Wire, Vec<u8>, Option<String>, String) {
+    let base = provider.base_url.trim_end_matches('/');
+    match provider.kind {
+        vibe_protocol::ProviderKind::Anthropic => {
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+                "stream": true
+            });
+            (
+                Wire::Anthropic,
+                serde_json::to_vec(&body).unwrap_or_default(),
+                None,
+                format!("{base}/v1/messages"),
+            )
+        }
+        vibe_protocol::ProviderKind::GeminiNative => {
+            let path = format!("/v1beta/models/{model}:streamGenerateContent");
+            let body = serde_json::json!({
+                "contents": [{"role": "user", "parts": [{"text": "ping"}]}]
+            });
+            (
+                Wire::GeminiNative,
+                serde_json::to_vec(&body).unwrap_or_default(),
+                Some(path.clone()),
+                format!("{base}{path}"),
+            )
+        }
+        vibe_protocol::ProviderKind::OpenaiChat => {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "stream": true,
+                "max_tokens": 1
+            });
+            (
+                Wire::OpenaiChat,
+                serde_json::to_vec(&body).unwrap_or_default(),
+                None,
+                format!("{base}/v1/chat/completions"),
+            )
+        }
+        vibe_protocol::ProviderKind::OpenaiResponses => {
+            let body = serde_json::json!({
+                "model": model,
+                "input": [{"role": "user", "content": "ping"}],
+                "stream": true,
+                "max_output_tokens": 16,
+                "store": false
+            });
+            let path = if provider.base_url.contains("chatgpt.com/backend-api") {
+                "/responses"
+            } else {
+                "/v1/responses"
+            };
+            (
+                Wire::OpenaiResponses,
+                serde_json::to_vec(&body).unwrap_or_default(),
+                None,
+                format!("{base}{path}"),
+            )
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provider health
 // ---------------------------------------------------------------------------
@@ -2707,6 +3562,42 @@ fn effective_circuit_for_provider(
     (worst.as_str().to_string(), max_failures, is_healthy)
 }
 
+fn build_provider_health_summary(
+    state: &AppState,
+    provider_id: &str,
+    row: vibe_db::DbHealth,
+    cred_ids: &[String],
+    rolling_hours: i64,
+    rolling: Option<vibe_protocol::ProviderStat>,
+) -> ProviderHealthSummary {
+    let (circuit_state, consecutive_failures, is_healthy) =
+        effective_circuit_for_provider(state, provider_id, cred_ids);
+    let success_rate = if row.total_requests > 0 {
+        row.total_successes as f64 / row.total_requests as f64
+    } else {
+        1.0
+    };
+    ProviderHealthSummary {
+        cumulative: ProviderHealth {
+            provider_id: row.provider_id,
+            is_healthy,
+            circuit_state,
+            consecutive_failures,
+            total_requests: row.total_requests,
+            total_successes: row.total_successes,
+            total_failures: row.total_failures,
+            success_rate,
+            last_success_at: row.last_success_at,
+            last_failure_at: row.last_failure_at,
+            last_error: row.last_error,
+            avg_latency_ms: row.avg_latency_ms,
+            updated_at: row.updated_at,
+        },
+        rolling_hours,
+        rolling,
+    }
+}
+
 fn credential_is_rate_limited(c: &Credential, now_secs: i64) -> bool {
     let req_exhausted = c.rl_requests_remaining == Some(0)
         && c.rl_requests_reset_at
@@ -2722,6 +3613,7 @@ fn build_provider_pool_summary(
     provider: &Provider,
     credentials: Vec<Credential>,
     rolling_stats: &[vibe_db::CredentialRollingStat],
+    plan_snapshots: &std::collections::HashMap<String, CredentialPlanSnapshot>,
     rolling_hours: i64,
 ) -> ProviderAuthPoolSummary {
     let now = chrono::Utc::now().timestamp();
@@ -2750,14 +3642,24 @@ fn build_provider_pool_summary(
         cred_ids.push(c.id.clone());
         let circuit_state = state.cb.state_of(&c.id).as_str().to_string();
         let circuit_open = circuit_state == CbState::Open.as_str();
+        let circuit_open_remaining_secs = state.cb.open_remaining_secs(&c.id).map(|v| v as i64);
         if circuit_open {
             open_circuit_credentials += 1;
         }
-        let is_rate_limited = credential_is_rate_limited(&c, now);
+        let plan_exhausted = plan_snapshots.get(&c.id).is_some_and(|snap| {
+            let primary = snap
+                .codex_primary_used_percent
+                .or(snap.codex_5h_used_percent)
+                .or(snap.codex_7d_used_percent)
+                .unwrap_or(0.0);
+            primary >= 99.95
+        });
+        let is_rate_limited = credential_is_rate_limited(&c, now) || plan_exhausted;
         if is_rate_limited {
             rate_limited_credentials += 1;
         }
-        if c.enabled && !circuit_open && !is_rate_limited {
+        let credential_available = c.enabled && !circuit_open && !is_rate_limited;
+        if credential_available {
             available_credentials += 1;
         }
         let stat = stat_map.get(c.id.as_str());
@@ -2772,6 +3674,7 @@ fn build_provider_pool_summary(
             },
             circuit_state,
             circuit_open,
+            circuit_open_remaining_secs,
             consecutive_failures: state.cb.consecutive_failures(&c.id) as i32,
             is_rate_limited,
             rl_requests_remaining: c.rl_requests_remaining,
@@ -2791,6 +3694,11 @@ fn build_provider_pool_summary(
     let (provider_circuit_state, _, _) =
         effective_circuit_for_provider(state, &provider.id, &cred_ids);
     let provider_circuit_open = provider_circuit_state == CbState::Open.as_str();
+    let provider_circuit_open_remaining_secs = cred_ids
+        .iter()
+        .filter_map(|cid| state.cb.open_remaining_secs(cid))
+        .max()
+        .map(|v| v as i64);
 
     ProviderAuthPoolSummary {
         provider_id: provider.id.clone(),
@@ -2802,6 +3710,7 @@ fn build_provider_pool_summary(
         available_credentials,
         rate_limited_credentials,
         open_circuit_credentials,
+        provider_circuit_open_remaining_secs,
         provider_circuit_state,
         provider_circuit_open,
         provider_last_error,
@@ -2815,7 +3724,7 @@ async fn provider_pool_summary(
     Query(q): Query<RollingHoursQuery>,
 ) -> Result<Json<ProviderAuthPoolSummary>, AppError> {
     let hours = q.hours.clamp(1, 24 * 30);
-    let (provider, creds, rolling_stats) = run_blocking(state.clone(), {
+    let (provider, creds, rolling_stats, plan_snapshots) = run_blocking(state.clone(), {
         let provider_id = id.clone();
         move |s| {
             let p =
@@ -2823,14 +3732,17 @@ async fn provider_pool_summary(
                     .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
             let creds = s.db.credential_list_for_provider(&provider_id)?;
             let stat = s.db.credential_stats_for_provider(&provider_id, hours)?;
+            let plan_credential_ids = creds.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+            let plan_snapshots = s.db.plan_snapshot_latest_map(&plan_credential_ids)?;
             Ok::<
                 (
                     Provider,
                     Vec<Credential>,
                     Vec<vibe_db::CredentialRollingStat>,
+                    std::collections::HashMap<String, CredentialPlanSnapshot>,
                 ),
                 anyhow::Error,
-            >((p, creds, stat))
+            >((p, creds, stat, plan_snapshots))
         }
     })
     .await?;
@@ -2839,6 +3751,7 @@ async fn provider_pool_summary(
         &provider,
         creds,
         &rolling_stats,
+        &plan_snapshots,
         hours,
     )))
 }
@@ -2852,12 +3765,19 @@ async fn provider_pool_list(
     let mut out = Vec::new();
     for p in providers {
         let provider_id = p.id.clone();
-        let (creds, rolling_stats) = run_blocking(state.clone(), move |s| {
+        let (creds, rolling_stats, plan_snapshots) = run_blocking(state.clone(), move |s| {
             let creds = s.db.credential_list_for_provider(&provider_id)?;
             let stat = s.db.credential_stats_for_provider(&provider_id, hours)?;
-            Ok::<(Vec<Credential>, Vec<vibe_db::CredentialRollingStat>), anyhow::Error>((
-                creds, stat,
-            ))
+            let plan_credential_ids = creds.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+            let plan_snapshots = s.db.plan_snapshot_latest_map(&plan_credential_ids)?;
+            Ok::<
+                (
+                    Vec<Credential>,
+                    Vec<vibe_db::CredentialRollingStat>,
+                    std::collections::HashMap<String, CredentialPlanSnapshot>,
+                ),
+                anyhow::Error,
+            >((creds, stat, plan_snapshots))
         })
         .await?;
         out.push(build_provider_pool_summary(
@@ -2865,11 +3785,205 @@ async fn provider_pool_list(
             &p,
             creds,
             &rolling_stats,
+            &plan_snapshots,
             hours,
         ));
     }
     out.sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
     Ok(Json(out))
+}
+
+async fn provider_overview(
+    State(state): State<AppState>,
+    Query(q): Query<RollingHoursQuery>,
+) -> Result<Json<ProvidersOverview>, AppError> {
+    let hours = q.hours.clamp(1, 24 * 30);
+    Ok(Json(build_providers_overview(state, hours).await?))
+}
+
+async fn build_providers_overview(
+    state: AppState,
+    hours: i64,
+) -> anyhow::Result<ProvidersOverview> {
+    let (
+        providers,
+        health_rows,
+        mut credentials_all,
+        rolling_provider_stats,
+        rolling_credential_stats,
+        plan_snapshots,
+    ) = run_blocking(state.clone(), move |s| {
+        let providers = s.db.provider_list()?;
+        let health_rows = s.db.health_list()?;
+        let credentials = s.db.credential_list_all()?;
+        let rolling_provider_stats = s.db.per_provider_stats(hours)?;
+        let rolling_credential_stats = s.db.credential_stats_all(hours)?;
+        let plan_credential_ids = credentials.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        let plan_snapshots = s.db.plan_snapshot_latest_map(&plan_credential_ids)?;
+        Ok::<_, anyhow::Error>((
+            providers,
+            health_rows,
+            credentials,
+            rolling_provider_stats,
+            rolling_credential_stats,
+            plan_snapshots,
+        ))
+    })
+    .await?;
+
+    crate::oauth_identity::credentials_attach_oauth_identities(&mut credentials_all);
+
+    let mut health_by_provider: HashMap<String, vibe_db::DbHealth> = health_rows
+        .into_iter()
+        .map(|r| (r.provider_id.clone(), r))
+        .collect();
+    let mut credentials_by_provider: HashMap<String, Vec<Credential>> = HashMap::new();
+    let mut credential_ids_by_provider: HashMap<String, Vec<String>> = HashMap::new();
+    for c in credentials_all {
+        credential_ids_by_provider
+            .entry(c.provider_id.clone())
+            .or_default()
+            .push(c.id.clone());
+        credentials_by_provider
+            .entry(c.provider_id.clone())
+            .or_default()
+            .push(c);
+    }
+
+    let mut rolling_by_provider: HashMap<String, vibe_protocol::ProviderStat> =
+        rolling_provider_stats
+            .into_iter()
+            .map(|s| (s.provider_id.clone(), s))
+            .collect();
+    let mut rolling_by_credential: HashMap<String, vibe_db::CredentialRollingStat> =
+        rolling_credential_stats
+            .into_iter()
+            .map(|s| (s.credential_id.clone(), s))
+            .collect();
+    let official_provider_ids: HashSet<String> = providers
+        .iter()
+        .filter(|p| crate::router::provider_is_chatgpt_codex_official(p))
+        .map(|p| p.id.clone())
+        .collect();
+    let mut health = Vec::with_capacity(providers.len());
+    let mut pools = Vec::with_capacity(providers.len());
+    let mut codex_plans: HashMap<String, Vec<ProviderCodexPlanItem>> = HashMap::new();
+
+    for p in &providers {
+        let creds = credentials_by_provider
+            .get(&p.id)
+            .cloned()
+            .unwrap_or_default();
+        let cred_ids = credential_ids_by_provider
+            .get(&p.id)
+            .cloned()
+            .unwrap_or_default();
+        let row = health_by_provider
+            .remove(&p.id)
+            .unwrap_or_else(|| vibe_db::DbHealth {
+                provider_id: p.id.clone(),
+                is_healthy: true,
+                consecutive_failures: 0,
+                total_requests: 0,
+                total_successes: 0,
+                total_failures: 0,
+                last_success_at: None,
+                last_failure_at: None,
+                last_error: None,
+                avg_latency_ms: None,
+                updated_at: 0,
+            });
+        health.push(build_provider_health_summary(
+            &state,
+            &p.id,
+            row,
+            &cred_ids,
+            hours,
+            rolling_by_provider.remove(&p.id),
+        ));
+
+        let credential_stats = creds
+            .iter()
+            .filter_map(|c| rolling_by_credential.remove(&c.id))
+            .collect::<Vec<_>>();
+        pools.push(build_provider_pool_summary(
+            &state,
+            p,
+            creds.clone(),
+            &credential_stats,
+            &plan_snapshots,
+            hours,
+        ));
+
+        if official_provider_ids.contains(&p.id) {
+            codex_plans.insert(
+                p.id.clone(),
+                creds
+                    .into_iter()
+                    .map(|c| ProviderCodexPlanItem {
+                        credential_id: c.id.clone(),
+                        label: c.label,
+                        plan: plan_snapshots.get(&c.id).cloned(),
+                    })
+                    .collect(),
+            );
+        }
+    }
+    pools.sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
+
+    Ok(ProvidersOverview {
+        rolling_hours: hours,
+        providers,
+        health,
+        pools,
+        credentials: credentials_by_provider,
+        codex_plans,
+    })
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn emit_app_log(state: &AppState, level: AppLogLevel, category: &str, message: String) {
+    let ev = AppLogEvent {
+        ts: now_secs(),
+        level,
+        category: category.to_string(),
+        message,
+        detail: None,
+    };
+    state.ws.publish(WsEvent::AppLog(ev.clone()));
+    let state2 = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = state2.db.app_log_insert(&ev);
+    });
+}
+
+fn publish_providers_overview_soon(state: AppState) {
+    if state
+        .providers_overview_publish_pending
+        .swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        for hours in [1, default_rolling_hours()] {
+            match build_providers_overview(state.clone(), hours).await {
+                Ok(overview) => state
+                    .ws
+                    .publish(WsEvent::ProvidersOverviewChanged(overview)),
+                Err(e) => tracing::warn!(?e, hours, "build providers overview ws event failed"),
+            }
+        }
+        state
+            .providers_overview_publish_pending
+            .store(false, Ordering::Relaxed);
+    });
 }
 
 async fn provider_health(
@@ -2945,6 +4059,83 @@ async fn provider_health(
     }))
 }
 
+async fn provider_health_list(
+    State(state): State<AppState>,
+    Query(q): Query<RollingHoursQuery>,
+) -> Result<Json<Vec<ProviderHealthSummary>>, AppError> {
+    let hours = q.hours.clamp(1, 24 * 30);
+    let providers = run_blocking(state.clone(), |s| s.db.provider_list()).await?;
+    let rows = run_blocking(state.clone(), |s| s.db.health_list()).await?;
+    let creds_all = run_blocking(state.clone(), |s| s.db.credential_list_all()).await?;
+    let rolling_stats =
+        run_blocking(state.clone(), move |s| s.db.per_provider_stats(hours)).await?;
+
+    let mut row_by_provider: std::collections::HashMap<String, vibe_db::DbHealth> = rows
+        .into_iter()
+        .map(|r| (r.provider_id.clone(), r))
+        .collect();
+    let mut cred_ids_by_provider: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for c in creds_all {
+        cred_ids_by_provider
+            .entry(c.provider_id)
+            .or_default()
+            .push(c.id);
+    }
+    let mut rolling_by_provider = rolling_stats
+        .into_iter()
+        .map(|s| (s.provider_id.clone(), s))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut out = Vec::with_capacity(providers.len());
+    for p in providers {
+        let row = row_by_provider
+            .remove(&p.id)
+            .unwrap_or_else(|| vibe_db::DbHealth {
+                provider_id: p.id.clone(),
+                is_healthy: true,
+                consecutive_failures: 0,
+                total_requests: 0,
+                total_successes: 0,
+                total_failures: 0,
+                last_success_at: None,
+                last_failure_at: None,
+                last_error: None,
+                avg_latency_ms: None,
+                updated_at: 0,
+            });
+        let cred_ids = cred_ids_by_provider.get(&p.id).cloned().unwrap_or_default();
+        let (circuit_state, consecutive_failures, is_healthy) =
+            effective_circuit_for_provider(&state, &p.id, &cred_ids);
+        let success_rate = if row.total_requests > 0 {
+            row.total_successes as f64 / row.total_requests as f64
+        } else {
+            1.0
+        };
+        out.push(ProviderHealthSummary {
+            cumulative: ProviderHealth {
+                provider_id: row.provider_id,
+                is_healthy,
+                circuit_state,
+                consecutive_failures,
+                total_requests: row.total_requests,
+                total_successes: row.total_successes,
+                total_failures: row.total_failures,
+                success_rate,
+                last_success_at: row.last_success_at,
+                last_failure_at: row.last_failure_at,
+                last_error: row.last_error,
+                avg_latency_ms: row.avg_latency_ms,
+                updated_at: row.updated_at,
+            },
+            rolling_hours: hours,
+            rolling: rolling_by_provider.remove(&p.id),
+        });
+    }
+
+    Ok(Json(out))
+}
+
 async fn provider_circuit_reset(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2957,7 +4148,14 @@ async fn provider_circuit_reset(
         }
     })
     .await?;
-    state.cb.reset(&id);
+    if state.cb.reset(&id).is_some() {
+        emit_app_log(
+            &state,
+            AppLogLevel::Info,
+            "circuit",
+            format!("Circuit reset: {id}"),
+        );
+    }
     for cid in &cred_ids {
         state.cb.reset(cid);
     }
@@ -2988,7 +4186,7 @@ async fn provider_circuit_reset(
 
     let (circuit_state, consecutive_failures, is_healthy) =
         effective_circuit_for_provider(&state, &id, &cred_ids);
-    Ok(Json(ProviderHealth {
+    let out = ProviderHealth {
         provider_id: db_row.provider_id,
         is_healthy,
         circuit_state,
@@ -3002,7 +4200,9 @@ async fn provider_circuit_reset(
         last_error: db_row.last_error,
         avg_latency_ms: db_row.avg_latency_ms,
         updated_at: db_row.updated_at,
-    }))
+    };
+    publish_providers_overview_soon(state);
+    Ok(Json(out))
 }
 
 async fn health_all_providers(
@@ -3102,20 +4302,41 @@ async fn list_credentials(
     Ok(Json(v))
 }
 
+async fn list_credentials_all(
+    State(state): State<AppState>,
+) -> Result<Json<std::collections::HashMap<String, Vec<Credential>>>, AppError> {
+    let mut creds = run_blocking(state, move |s| s.db.credential_list_all()).await?;
+    crate::oauth_identity::credentials_attach_oauth_identities(&mut creds);
+    let mut out: std::collections::HashMap<String, Vec<Credential>> =
+        std::collections::HashMap::new();
+    for cred in creds {
+        out.entry(cred.provider_id.clone()).or_default().push(cred);
+    }
+    Ok(Json(out))
+}
+
 async fn create_credential(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
     Json(input): Json<CredentialInput>,
 ) -> Result<Json<Credential>, AppError> {
+    let label = input.label.clone();
     let fp = crate::auth_fingerprint::credential_fingerprint(
         input.auth_ref.as_deref(),
         input.oauth_access_token.as_deref(),
     );
-    let mut c = run_blocking(state, move |s| {
+    let mut c = run_blocking(state.clone(), move |s| {
         s.db.credential_insert(&provider_id, input, Some(fp))
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
+    emit_app_log(
+        &state,
+        AppLogLevel::Info,
+        "credential",
+        format!("Credential added: {label}"),
+    );
+    publish_providers_overview_soon(state);
     Ok(Json(c))
 }
 
@@ -3135,12 +4356,23 @@ async fn update_credential(
     Path(id): Path<String>,
     Json(input): Json<CredentialInput>,
 ) -> Result<Json<Credential>, AppError> {
+    let label = input.label.clone();
     let fp = crate::auth_fingerprint::credential_fingerprint(
         input.auth_ref.as_deref(),
         input.oauth_access_token.as_deref(),
     );
-    let mut c = run_blocking(state, move |s| s.db.credential_update(&id, input, Some(fp))).await?;
+    let mut c = run_blocking(state.clone(), move |s| {
+        s.db.credential_update(&id, input, Some(fp))
+    })
+    .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
+    emit_app_log(
+        &state,
+        AppLogLevel::Info,
+        "credential",
+        format!("Credential updated: {label}"),
+    );
+    publish_providers_overview_soon(state);
     Ok(Json(c))
 }
 
@@ -3204,6 +4436,7 @@ async fn credential_plan_refresh(
     })
     .await?;
     let snap = snap_opt.ok_or_else(|| anyhow::anyhow!("plan snapshot missing after refresh"))?;
+    publish_providers_overview_soon(state);
     Ok(Json(snap))
 }
 
@@ -3229,6 +4462,49 @@ async fn provider_codex_plan_list(
                 plan,
             });
         }
+        Ok(out)
+    })
+    .await?;
+    Ok(Json(items))
+}
+
+async fn provider_codex_plan_list_all(
+    State(state): State<AppState>,
+) -> Result<Json<std::collections::HashMap<String, Vec<ProviderCodexPlanItem>>>, AppError> {
+    let items = run_blocking(state.clone(), move |s| {
+        let providers = s.db.provider_list()?;
+        let official_provider_ids = providers
+            .into_iter()
+            .filter(crate::router::provider_is_chatgpt_codex_official)
+            .map(|p| p.id)
+            .collect::<std::collections::HashSet<_>>();
+        if official_provider_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let creds = s.db.credential_list_all()?;
+        let credential_ids = creds
+            .iter()
+            .filter(|c| official_provider_ids.contains(&c.provider_id))
+            .map(|c| c.id.clone())
+            .collect::<Vec<_>>();
+        let plans = s.db.plan_snapshot_latest_map(&credential_ids)?;
+        let mut out: std::collections::HashMap<String, Vec<ProviderCodexPlanItem>> =
+            std::collections::HashMap::new();
+
+        for c in creds {
+            if !official_provider_ids.contains(&c.provider_id) {
+                continue;
+            }
+            out.entry(c.provider_id.clone())
+                .or_default()
+                .push(ProviderCodexPlanItem {
+                    credential_id: c.id.clone(),
+                    label: c.label,
+                    plan: plans.get(&c.id).cloned(),
+                });
+        }
+
         Ok(out)
     })
     .await?;
@@ -3268,6 +4544,7 @@ async fn provider_codex_plan_refresh_all(
         }
     }
 
+    publish_providers_overview_soon(state);
     Ok(Json(CodexPlanRefreshResult {
         attempted,
         ok,
@@ -3279,7 +4556,15 @@ async fn delete_credential(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    run_blocking(state, move |s| s.db.credential_delete(&id)).await?;
+    let id_clone = id.clone();
+    run_blocking(state.clone(), move |s| s.db.credential_delete(&id_clone)).await?;
+    emit_app_log(
+        &state,
+        AppLogLevel::Warn,
+        "credential",
+        format!("Credential deleted: {id}"),
+    );
+    publish_providers_overview_soon(state);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3288,8 +4573,18 @@ async fn enable_credential(
     Path(id): Path<String>,
 ) -> Result<Json<Credential>, AppError> {
     state.cb.reset(&id);
-    let mut c = run_blocking(state, move |s| s.db.credential_set_enabled(&id, true)).await?;
+    let mut c = run_blocking(state.clone(), move |s| {
+        s.db.credential_set_enabled(&id, true)
+    })
+    .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
+    emit_app_log(
+        &state,
+        AppLogLevel::Info,
+        "credential",
+        format!("Credential enabled: {}", c.label),
+    );
+    publish_providers_overview_soon(state);
     Ok(Json(c))
 }
 
@@ -3298,8 +4593,18 @@ async fn disable_credential(
     Path(id): Path<String>,
 ) -> Result<Json<Credential>, AppError> {
     state.cb.reset(&id);
-    let mut c = run_blocking(state, move |s| s.db.credential_set_enabled(&id, false)).await?;
+    let mut c = run_blocking(state.clone(), move |s| {
+        s.db.credential_set_enabled(&id, false)
+    })
+    .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
+    emit_app_log(
+        &state,
+        AppLogLevel::Warn,
+        "credential",
+        format!("Credential disabled: {}", c.label),
+    );
+    publish_providers_overview_soon(state);
     Ok(Json(c))
 }
 
@@ -3307,8 +4612,36 @@ async fn credential_circuit_reset(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    state.cb.reset(&id);
+    if state.cb.reset(&id).is_some() {
+        emit_app_log(
+            &state,
+            AppLogLevel::Info,
+            "circuit",
+            format!("Circuit reset: {id}"),
+        );
+    }
+    publish_providers_overview_soon(state);
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// App logs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct AppLogQuery {
+    limit: Option<i64>,
+    since: Option<i64>,
+}
+
+async fn list_app_logs(
+    State(state): State<AppState>,
+    Query(q): Query<AppLogQuery>,
+) -> Result<Json<Vec<AppLogEvent>>, AppError> {
+    let limit = q.limit.unwrap_or(200).clamp(1, 500);
+    let since = q.since;
+    let logs = run_blocking(state, move |s| s.db.app_log_list(limit, since)).await?;
+    Ok(Json(logs))
 }
 
 // ---------------------------------------------------------------------------
@@ -3325,6 +4658,12 @@ struct LogQuery {
     status: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AttemptQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
 async fn get_request_log(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -3334,6 +4673,35 @@ async fn get_request_log(
         Some(log) => Json(log).into_response(),
         None => (StatusCode::NOT_FOUND, "log not found").into_response(),
     })
+}
+
+async fn get_upstream_attempt(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let attempt = run_blocking(state, move |s| s.db.upstream_attempt_get(&id)).await?;
+    Ok(match attempt {
+        Some(attempt) => Json(attempt).into_response(),
+        None => (StatusCode::NOT_FOUND, "attempt not found").into_response(),
+    })
+}
+
+async fn list_request_attempts(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<UpstreamAttemptLog>>, AppError> {
+    let attempts = run_blocking(state, move |s| s.db.upstream_attempts_for_request(&id)).await?;
+    Ok(Json(attempts))
+}
+
+async fn list_upstream_attempts(
+    State(state): State<AppState>,
+    Query(q): Query<AttemptQuery>,
+) -> Result<Json<Vec<UpstreamAttemptLog>>, AppError> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let attempts = run_blocking(state, move |s| s.db.upstream_attempt_list(limit, offset)).await?;
+    Ok(Json(attempts))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3473,6 +4841,10 @@ async fn dashboard_stats(
     Query(q): Query<UsageQuery>,
 ) -> Result<Json<DashboardStats>, AppError> {
     let hours = q.hours.unwrap_or(24).clamp(1, 24 * 30);
+    Ok(Json(build_dashboard_stats(state, hours).await?))
+}
+
+async fn build_dashboard_stats(state: AppState, hours: i64) -> anyhow::Result<DashboardStats> {
     let stats = run_blocking(state, move |s| {
         let now = chrono::Utc::now().timestamp();
         let since_window = now - hours * 3600;
@@ -3533,7 +4905,28 @@ async fn dashboard_stats(
         })
     })
     .await?;
-    Ok(Json(stats))
+    Ok(stats)
+}
+
+pub(crate) fn publish_dashboard_stats_soon(state: AppState) {
+    if state
+        .dashboard_stats_publish_pending
+        .swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        for hours in [1, 24] {
+            match build_dashboard_stats(state.clone(), hours).await {
+                Ok(stats) => state.ws.publish(WsEvent::DashboardStatsChanged(stats)),
+                Err(e) => tracing::warn!(?e, hours, "build dashboard stats ws event failed"),
+            }
+        }
+        state
+            .dashboard_stats_publish_pending
+            .store(false, Ordering::Relaxed);
+    });
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3553,6 +4946,7 @@ struct ToolConfigRawUpdateInput {
 fn resolve_tool_config_path(tool: &str) -> anyhow::Result<PathBuf> {
     match tool {
         "codex" => Ok(crate::codex_config::codex_config_path()),
+        "claude" => crate::paths::claude_settings_path(),
         _ => anyhow::bail!("unsupported tool: {tool}"),
     }
 }
@@ -3609,6 +5003,9 @@ async fn put_tool_config_raw(
 
     if tool == "codex" && toml::from_str::<toml::Value>(&input.raw_text).is_err() {
         return (StatusCode::BAD_REQUEST, "invalid TOML in codex config").into_response();
+    }
+    if tool == "claude" && serde_json::from_str::<serde_json::Value>(&input.raw_text).is_err() {
+        return (StatusCode::BAD_REQUEST, "invalid JSON in claude settings").into_response();
     }
 
     let write_result = tokio::task::spawn_blocking({
@@ -3689,6 +5086,171 @@ async fn post_codex_history_unify(
     input.apply = true;
     let summary = tokio::task::spawn_blocking(move || crate::codex_history::unify(input)).await??;
     Ok(Json(summary))
+}
+
+type CodexAppStatusResponse = CodexAppStatus;
+type CodexAppActionResponse = CodexAppActionResult;
+
+async fn get_codex_app_status() -> Result<Json<CodexAppStatusResponse>, AppError> {
+    let status = tokio::task::spawn_blocking(codex_app_status).await??;
+    Ok(Json(status))
+}
+
+async fn post_codex_app_open(
+    State(state): State<AppState>,
+) -> Result<Json<CodexAppActionResponse>, AppError> {
+    let response = tokio::task::spawn_blocking(|| -> anyhow::Result<CodexAppActionResponse> {
+        open_codex_app()?;
+        std::thread::sleep(Duration::from_millis(450));
+        Ok(CodexAppActionResponse {
+            action: "open".into(),
+            status: codex_app_status()?,
+        })
+    })
+    .await??;
+    state
+        .ws
+        .publish(WsEvent::CodexAppStatusChanged(response.status.clone()));
+    Ok(Json(response))
+}
+
+async fn post_codex_app_quit(
+    State(state): State<AppState>,
+) -> Result<Json<CodexAppActionResponse>, AppError> {
+    let response = tokio::task::spawn_blocking(|| -> anyhow::Result<CodexAppActionResponse> {
+        quit_codex_app()?;
+        std::thread::sleep(Duration::from_millis(450));
+        Ok(CodexAppActionResponse {
+            action: "quit".into(),
+            status: codex_app_status()?,
+        })
+    })
+    .await??;
+    state
+        .ws
+        .publish(WsEvent::CodexAppStatusChanged(response.status.clone()));
+    Ok(Json(response))
+}
+
+async fn post_codex_app_restart(
+    State(state): State<AppState>,
+) -> Result<Json<CodexAppActionResponse>, AppError> {
+    let response = tokio::task::spawn_blocking(|| -> anyhow::Result<CodexAppActionResponse> {
+        quit_codex_app()?;
+        std::thread::sleep(Duration::from_millis(900));
+        open_codex_app()?;
+        std::thread::sleep(Duration::from_millis(450));
+        Ok(CodexAppActionResponse {
+            action: "restart".into(),
+            status: codex_app_status()?,
+        })
+    })
+    .await??;
+    state
+        .ws
+        .publish(WsEvent::CodexAppStatusChanged(response.status.clone()));
+    Ok(Json(response))
+}
+
+fn codex_app_path() -> PathBuf {
+    PathBuf::from("/Applications/Codex.app")
+}
+
+#[cfg(target_os = "macos")]
+fn codex_app_status() -> anyhow::Result<CodexAppStatusResponse> {
+    let app_path = codex_app_path();
+    let output = std::process::Command::new("ps")
+        .args(["ax", "-o", "pid=,args="])
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut processes = Vec::new();
+    let mut main_pid = None;
+    for line in stdout.lines() {
+        let Some((pid_raw, command)) = line.trim().split_once(' ') else {
+            continue;
+        };
+        if !command.contains("/Applications/Codex.app") {
+            continue;
+        }
+        let Ok(pid) = pid_raw.parse::<u32>() else {
+            continue;
+        };
+        let role = classify_codex_app_process(command);
+        if role == "main" {
+            main_pid = Some(pid);
+        }
+        processes.push(CodexAppProcess {
+            pid,
+            role: role.into(),
+            command: command.into(),
+        });
+    }
+    processes.sort_by_key(|p| (p.role != "main", p.pid));
+    Ok(CodexAppStatusResponse {
+        app_path: app_path.display().to_string(),
+        installed: app_path.exists(),
+        running: main_pid.is_some(),
+        main_pid,
+        process_count: processes.len(),
+        processes,
+    })
+}
+
+fn classify_codex_app_process(command: &str) -> &'static str {
+    if command.starts_with("/Applications/Codex.app/Contents/MacOS/Codex") {
+        "main"
+    } else if command.contains("chrome_crashpad_handler") {
+        "crashpad"
+    } else if command.contains(" app-server") {
+        "app-server"
+    } else if command.contains("Helper (Renderer)") || command.contains("--type=renderer") {
+        "renderer"
+    } else if command.contains("Helper") {
+        "helper"
+    } else {
+        "support"
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn codex_app_status() -> anyhow::Result<CodexAppStatusResponse> {
+    let app_path = codex_app_path();
+    Ok(CodexAppStatusResponse {
+        app_path: app_path.display().to_string(),
+        installed: app_path.exists(),
+        running: false,
+        main_pid: None,
+        process_count: 0,
+        processes: Vec::new(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn open_codex_app() -> anyhow::Result<()> {
+    let status = std::process::Command::new("open")
+        .args(["-a", "Codex"])
+        .status()?;
+    anyhow::ensure!(status.success(), "failed to open Codex.app");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_codex_app() -> anyhow::Result<()> {
+    anyhow::bail!("Codex App control is currently implemented for macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn quit_codex_app() -> anyhow::Result<()> {
+    let status = std::process::Command::new("osascript")
+        .args(["-e", r#"tell application "Codex" to quit"#])
+        .status()?;
+    anyhow::ensure!(status.success(), "failed to quit Codex.app");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quit_codex_app() -> anyhow::Result<()> {
+    anyhow::bail!("Codex App control is currently implemented for macOS")
 }
 
 #[derive(Debug, Deserialize)]
@@ -4020,7 +5582,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Resp
 async fn ws_session(socket: WebSocket, state: AppState) {
     let (mut tx, mut rx) = socket.split();
     let mut sub = state.ws.subscribe();
-    let mut status_tick = tokio::time::interval(Duration::from_secs(5));
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<WsEvent>(32);
     let hello = WsEvent::Hello {
         version: VERSION.into(),
     };
@@ -4034,15 +5596,13 @@ async fn ws_session(socket: WebSocket, state: AppState) {
     }
     loop {
         tokio::select! {
-            _ = status_tick.tick() => {
-                if let Ok(snapshot) = compute_status(state.clone()).await {
-                    if let Ok(j) = serde_json::to_string(&WsEvent::StatusChanged(snapshot)) {
-                        if tx.send(Message::Text(j)).await.is_err() { break; }
-                    }
-                }
-            }
             ev = sub.recv() => {
                 let Ok(ev) = ev else { break };
+                let Ok(j) = serde_json::to_string(&ev) else { continue };
+                if tx.send(Message::Text(j)).await.is_err() { break; }
+            }
+            ev = outbound_rx.recv() => {
+                let Some(ev) = ev else { continue };
                 let Ok(j) = serde_json::to_string(&ev) else { continue };
                 if tx.send(Message::Text(j)).await.is_err() { break; }
             }
@@ -4051,11 +5611,147 @@ async fn ws_session(socket: WebSocket, state: AppState) {
                     None => break,
                     Some(Err(_)) => break,
                     Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Text(text))) => {
+                        handle_ws_client_text(state.clone(), outbound_tx.clone(), text.to_string()).await;
+                    }
                     _ => {}
                 }
             }
         }
     }
+}
+
+async fn handle_ws_client_text(state: AppState, outbound: mpsc::Sender<WsEvent>, text: String) {
+    let Ok(message) = serde_json::from_str::<WsClientMessage>(&text) else {
+        return;
+    };
+    match message {
+        WsClientMessage::Snapshot {
+            request_id,
+            topic,
+            hours,
+            client,
+        } => {
+            let request_id = request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            tokio::spawn(async move {
+                match topic.as_str() {
+                    "status" => {
+                        if let Ok(snapshot) = compute_status(state.clone()).await {
+                            let _ = outbound.send(WsEvent::StatusChanged(snapshot)).await;
+                        }
+                    }
+                    "dashboard-stats" => {
+                        let hours = hours.unwrap_or(24).clamp(1, 24 * 30);
+                        if let Ok(stats) = build_dashboard_stats(state.clone(), hours).await {
+                            let _ = outbound.send(WsEvent::DashboardStatsChanged(stats)).await;
+                        }
+                    }
+                    "providers-overview" => {
+                        let hours = hours.unwrap_or(default_rolling_hours()).clamp(1, 24 * 30);
+                        stream_providers_overview(state.clone(), outbound, request_id, hours).await;
+                    }
+                    "routes" => {
+                        if let Ok(routes) = run_blocking(state.clone(), |s| s.db.route_list()).await
+                        {
+                            let _ = outbound.send(WsEvent::RoutesChanged { routes }).await;
+                        }
+                    }
+                    "codex-app-status" => {
+                        if let Ok(Ok(status)) = tokio::task::spawn_blocking(codex_app_status).await
+                        {
+                            let _ = outbound.send(WsEvent::CodexAppStatusChanged(status)).await;
+                        }
+                    }
+                    "client-status" => {
+                        if let Some(client) = client {
+                            if let Ok(status) = client_status_inner(&client, state.port) {
+                                let _ = outbound.send(WsEvent::ClientStatusChanged(status)).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+    }
+}
+
+async fn stream_providers_overview(
+    state: AppState,
+    outbound: mpsc::Sender<WsEvent>,
+    request_id: String,
+    hours: i64,
+) {
+    let Ok(overview) = build_providers_overview(state, hours).await else {
+        return;
+    };
+    let _ = outbound
+        .send(WsEvent::ProvidersOverviewStreamStarted(
+            ProvidersOverviewStreamStarted {
+                request_id: request_id.clone(),
+                rolling_hours: hours,
+            },
+        ))
+        .await;
+    let _ = outbound
+        .send(WsEvent::ProvidersOverviewProvidersChunk(
+            ProvidersOverviewProvidersChunk {
+                request_id: request_id.clone(),
+                rolling_hours: hours,
+                providers: overview.providers,
+            },
+        ))
+        .await;
+    let _ = outbound
+        .send(WsEvent::ProvidersOverviewHealthChunk(
+            ProvidersOverviewHealthChunk {
+                request_id: request_id.clone(),
+                rolling_hours: hours,
+                health: overview.health,
+            },
+        ))
+        .await;
+    let _ = outbound
+        .send(WsEvent::ProvidersOverviewPoolsChunk(
+            ProvidersOverviewPoolsChunk {
+                request_id: request_id.clone(),
+                rolling_hours: hours,
+                pools: overview.pools,
+            },
+        ))
+        .await;
+    for (provider_id, credentials) in overview.credentials {
+        let _ = outbound
+            .send(WsEvent::ProvidersOverviewCredentialsChunk(
+                ProvidersOverviewCredentialsChunk {
+                    request_id: request_id.clone(),
+                    rolling_hours: hours,
+                    provider_id,
+                    credentials,
+                },
+            ))
+            .await;
+    }
+    for (provider_id, codex_plans) in overview.codex_plans {
+        let _ = outbound
+            .send(WsEvent::ProvidersOverviewCodexPlansChunk(
+                ProvidersOverviewCodexPlansChunk {
+                    request_id: request_id.clone(),
+                    rolling_hours: hours,
+                    provider_id,
+                    codex_plans,
+                },
+            ))
+            .await;
+    }
+    let _ = outbound
+        .send(WsEvent::ProvidersOverviewStreamEnded(
+            ProvidersOverviewStreamEnded {
+                request_id,
+                rolling_hours: hours,
+            },
+        ))
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -4098,11 +5794,15 @@ mod request_body_limit_tests {
         let provider = db
             .provider_insert(ProviderInput {
                 name: "dummy responses".into(),
+                group_name: None,
+                avatar_url: None,
                 kind: ProviderKind::OpenaiResponses,
                 base_url: "http://127.0.0.1:9".into(),
                 auth_ref: None,
                 enabled: true,
                 priority: 100,
+                supports_websocket: None,
+                passthrough_mode: true,
                 model_aliases: vec![ModelAlias {
                     alias: "gpt-test".into(),
                     upstream_model: "gpt-test".into(),
@@ -4140,5 +5840,37 @@ mod request_body_limit_tests {
             .expect("response");
 
         assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn codex_app_process_roles_are_specific() {
+        assert_eq!(
+            classify_codex_app_process("/Applications/Codex.app/Contents/MacOS/Codex"),
+            "main"
+        );
+        assert_eq!(
+            classify_codex_app_process(
+                "/Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process"
+            ),
+            "helper"
+        );
+        assert_eq!(
+            classify_codex_app_process(
+                "/Applications/Codex.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex Helper (Renderer) --type=renderer"
+            ),
+            "renderer"
+        );
+        assert_eq!(
+            classify_codex_app_process(
+                "/Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled"
+            ),
+            "app-server"
+        );
+        assert_eq!(
+            classify_codex_app_process(
+                "/Applications/Codex.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler"
+            ),
+            "crashpad"
+        );
     }
 }

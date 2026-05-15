@@ -9,6 +9,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.resolve(root, "..", "..");
 const requireBinaries = process.argv.includes("--require-binaries");
 const platforms = [
   ["darwin-arm64", "@vibe-plus/darwin-arm64", "darwin", "arm64", "vibe"],
@@ -83,6 +84,25 @@ async function main() {
     assert(
       wrapper.optionalDependencies?.[packageName] === wrapper.version,
       `missing optional dependency ${packageName}@${wrapper.version}`,
+    );
+  }
+
+  const releaseWorkflow = await readFile(
+    path.join(repoRoot, ".github", "workflows", "release.yml"),
+    "utf8",
+  );
+  for (const [directory, packageName] of platforms) {
+    assert(
+      releaseWorkflow.includes(`npm_plat: ${directory}`),
+      `release workflow missing npm_plat: ${directory}`,
+    );
+    assert(
+      releaseWorkflow.includes(`"packages/cli-npm/platform/${directory}/package.json"`),
+      `release workflow does not stamp ${directory}`,
+    );
+    assert(
+      releaseWorkflow.includes(`"${packageName}"`),
+      `release workflow missing optional dependency ${packageName}`,
     );
   }
 

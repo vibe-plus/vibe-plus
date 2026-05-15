@@ -56,6 +56,14 @@ pub trait Adapter {
 
     /// Picks the upstream model id from the requested model + provider aliases.
     fn pick_upstream_model(&self, provider: &Provider, requested: &str) -> String {
+        if provider.passthrough_mode {
+            for a in &provider.model_aliases {
+                if a.alias == requested {
+                    return a.upstream_model.clone();
+                }
+            }
+            return requested.to_string();
+        }
         for a in &provider.model_aliases {
             if a.alias == requested {
                 return a.upstream_model.clone();

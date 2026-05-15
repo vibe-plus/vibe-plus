@@ -1,0 +1,19 @@
+{
+  "name": "@vibe-plus/app-darwin-arm64",
+  "version": "0.0.1",
+  "description": "vibe+ App binary for darwin-arm64",
+  "license": "MIT",
+  "author": "cheezone",
+  "files": [
+    "bin/"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

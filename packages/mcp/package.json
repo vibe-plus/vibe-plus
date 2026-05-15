@@ -1,0 +1,22 @@
+{
+  "name": "@vibe-plus/mcp",
+  "version": "0.0.0",
+  "private": true,
+  "author": "cheezone <cheezone@163.com>",
+  "bin": {
+    "vibe-plus-mcp": "./src/index.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "serve": "bun run ./src/index.ts",
+    "check": "bunx tsc -p ./tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "typescript": "^6.0.3"
+  }
+}

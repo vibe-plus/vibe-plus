@@ -1,0 +1,37 @@
+{
+  "name": "@vibe-plus/app",
+  "version": "0.0.1",
+  "description": "vibe+ native desktop app",
+  "keywords": [
+    "ai",
+    "anthropic",
+    "claude",
+    "codex",
+    "gateway",
+    "openai"
+  ],
+  "license": "MIT",
+  "author": "cheezone",
+  "bin": {
+    "vibe-app": "./bin/vibe-app.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "optionalDependencies": {
+    "@vibe-plus/app-darwin-arm64": "0.0.1",
+    "@vibe-plus/app-darwin-x64": "0.0.1",
+    "@vibe-plus/app-linux-arm64": "0.0.1",
+    "@vibe-plus/app-linux-x64": "0.0.1",
+    "@vibe-plus/app-win32-arm64": "0.0.1",
+    "@vibe-plus/app-win32-x64": "0.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

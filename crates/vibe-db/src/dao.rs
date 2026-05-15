@@ -6,6 +6,60 @@ use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
 use vibe_protocol::*;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ProviderConfig {
+    #[serde(default = "default_passthrough_mode")]
+    passthrough_mode: bool,
+    #[serde(default)]
+    group_name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    supports_websocket: Option<bool>,
+    #[serde(default)]
+    remote_models: Vec<String>,
+    #[serde(default)]
+    remote_models_fetched_at: Option<i64>,
+    #[serde(default)]
+    last_speedtest: Option<ProviderSpeedtestResult>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            passthrough_mode: default_passthrough_mode(),
+            group_name: None,
+            avatar_url: None,
+            supports_websocket: None,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
+        }
+    }
+}
+
+fn default_passthrough_mode() -> bool {
+    true
+}
+
+fn normalize_opt_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn provider_config_from_provider(p: &Provider) -> ProviderConfig {
+    ProviderConfig {
+        passthrough_mode: p.passthrough_mode,
+        group_name: p.group_name.clone(),
+        avatar_url: p.avatar_url.clone(),
+        supports_websocket: p.supports_websocket,
+        remote_models: p.remote_models.clone(),
+        remote_models_fetched_at: p.remote_models_fetched_at,
+        last_speedtest: p.last_speedtest.clone(),
+    }
+}
+
 fn now_secs() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -47,6 +101,52 @@ fn _route_tier_from_str(s: &str) -> Result<RouteTier> {
     })
 }
 
+fn upstream_attempt_phase_to_str(p: UpstreamAttemptPhase) -> &'static str {
+    match p {
+        UpstreamAttemptPhase::Connecting => "connecting",
+        UpstreamAttemptPhase::Streaming => "streaming",
+        UpstreamAttemptPhase::Completed => "completed",
+        UpstreamAttemptPhase::Failed => "failed",
+        UpstreamAttemptPhase::Abandoned => "abandoned",
+    }
+}
+
+fn upstream_attempt_phase_from_str(s: &str) -> Result<UpstreamAttemptPhase> {
+    Ok(match s {
+        "connecting" => UpstreamAttemptPhase::Connecting,
+        "streaming" => UpstreamAttemptPhase::Streaming,
+        "completed" => UpstreamAttemptPhase::Completed,
+        "failed" => UpstreamAttemptPhase::Failed,
+        "abandoned" => UpstreamAttemptPhase::Abandoned,
+        other => anyhow::bail!("unknown upstream attempt phase: {other}"),
+    })
+}
+
+fn upstream_attempt_outcome_to_str(o: UpstreamAttemptOutcome) -> &'static str {
+    match o {
+        UpstreamAttemptOutcome::Success => "success",
+        UpstreamAttemptOutcome::RetryableError => "retryable-error",
+        UpstreamAttemptOutcome::ClientError => "client-error",
+        UpstreamAttemptOutcome::RateLimit => "rate-limit",
+        UpstreamAttemptOutcome::TransportError => "transport-error",
+        UpstreamAttemptOutcome::FallbackAbandon => "fallback-abandon",
+        UpstreamAttemptOutcome::CircuitSkip => "circuit-skip",
+    }
+}
+
+fn upstream_attempt_outcome_from_str(s: &str) -> Result<UpstreamAttemptOutcome> {
+    Ok(match s {
+        "success" => UpstreamAttemptOutcome::Success,
+        "retryable-error" => UpstreamAttemptOutcome::RetryableError,
+        "client-error" => UpstreamAttemptOutcome::ClientError,
+        "rate-limit" => UpstreamAttemptOutcome::RateLimit,
+        "transport-error" => UpstreamAttemptOutcome::TransportError,
+        "fallback-abandon" => UpstreamAttemptOutcome::FallbackAbandon,
+        "circuit-skip" => UpstreamAttemptOutcome::CircuitSkip,
+        other => anyhow::bail!("unknown upstream attempt outcome: {other}"),
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct CredentialRollingStat {
     pub credential_id: String,
@@ -63,7 +163,7 @@ impl Db {
         self.with(|c| {
             let mut stmt = c.prepare(
                 "SELECT id, name, kind, base_url, auth_ref, enabled, priority,
-                        model_aliases_json, created_at, updated_at
+                        model_aliases_json, config_json, created_at, updated_at
                  FROM providers ORDER BY priority ASC, created_at ASC",
             )?;
             let rows = stmt.query_map([], row_to_provider)?;
@@ -79,7 +179,7 @@ impl Db {
         self.with(|c| {
             let mut stmt = c.prepare(
                 "SELECT id, name, kind, base_url, auth_ref, enabled, priority,
-                        model_aliases_json, created_at, updated_at
+                        model_aliases_json, config_json, created_at, updated_at
                  FROM providers WHERE id = ?1",
             )?;
             let r = stmt.query_row(params![id], row_to_provider).optional()?;
@@ -106,11 +206,20 @@ impl Db {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
         let aliases_json = serde_json::to_string(&input.model_aliases)?;
+        let config_json = serde_json::to_string(&ProviderConfig {
+            passthrough_mode: input.passthrough_mode,
+            group_name: normalize_opt_string(input.group_name),
+            avatar_url: normalize_opt_string(input.avatar_url),
+            supports_websocket: input.supports_websocket,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
+        })?;
         self.with(|c| {
             c.execute(
                 "INSERT INTO providers (id, name, kind, base_url, auth_ref, enabled, priority,
-                                        model_aliases_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                        model_aliases_json, config_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     id,
                     input.name,
@@ -120,6 +229,7 @@ impl Db {
                     input.enabled as i32,
                     input.priority,
                     aliases_json,
+                    config_json,
                     now,
                     now,
                 ],
@@ -133,11 +243,25 @@ impl Db {
     pub fn provider_update(&self, id: &str, input: ProviderInput) -> Result<Provider> {
         let now = now_secs();
         let aliases_json = serde_json::to_string(&input.model_aliases)?;
+        let existing = self.provider_get(id)?;
+        let existing_cfg = existing
+            .as_ref()
+            .map(provider_config_from_provider)
+            .unwrap_or_default();
+        let config_json = serde_json::to_string(&ProviderConfig {
+            passthrough_mode: input.passthrough_mode,
+            group_name: normalize_opt_string(input.group_name),
+            avatar_url: normalize_opt_string(input.avatar_url),
+            supports_websocket: input.supports_websocket,
+            remote_models: existing_cfg.remote_models,
+            remote_models_fetched_at: existing_cfg.remote_models_fetched_at,
+            last_speedtest: existing_cfg.last_speedtest,
+        })?;
         let updated = self.with(|c| {
             let n = c.execute(
                 "UPDATE providers
                  SET name = ?2, kind = ?3, base_url = ?4, auth_ref = ?5,
-                     enabled = ?6, priority = ?7, model_aliases_json = ?8, updated_at = ?9
+                     enabled = ?6, priority = ?7, model_aliases_json = ?8, config_json = ?9, updated_at = ?10
                  WHERE id = ?1",
                 params![
                     id,
@@ -148,6 +272,7 @@ impl Db {
                     input.enabled as i32,
                     input.priority,
                     aliases_json,
+                    config_json,
                     now,
                 ],
             )?;
@@ -168,6 +293,92 @@ impl Db {
             }
             Ok(())
         })
+    }
+
+    pub fn provider_update_remote_models(
+        &self,
+        id: &str,
+        remote_models: Vec<String>,
+        fetched_at: i64,
+    ) -> Result<Provider> {
+        let provider = self.provider_get(id)?.context("provider missing")?;
+        let config_json = serde_json::to_string(&ProviderConfig {
+            remote_models,
+            remote_models_fetched_at: Some(fetched_at),
+            ..provider_config_from_provider(&provider)
+        })?;
+        self.with(|c| {
+            c.execute(
+                "UPDATE providers SET config_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, config_json, now_secs()],
+            )?;
+            Ok(())
+        })?;
+        self.provider_get(id)?
+            .context("updated provider missing on read-back")
+    }
+
+    pub fn provider_update_speedtest(
+        &self,
+        id: &str,
+        result: ProviderSpeedtestResult,
+    ) -> Result<Provider> {
+        let provider = self.provider_get(id)?.context("provider missing")?;
+        let config_json = serde_json::to_string(&ProviderConfig {
+            last_speedtest: Some(result),
+            ..provider_config_from_provider(&provider)
+        })?;
+        self.with(|c| {
+            c.execute(
+                "UPDATE providers SET config_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, config_json, now_secs()],
+            )?;
+            Ok(())
+        })?;
+        self.provider_get(id)?
+            .context("updated provider missing on read-back")
+    }
+
+    pub fn provider_update_websocket_support(
+        &self,
+        id: &str,
+        supports_websocket: Option<bool>,
+    ) -> Result<Provider> {
+        let provider = self.provider_get(id)?.context("provider missing")?;
+        let config_json = serde_json::to_string(&ProviderConfig {
+            supports_websocket,
+            ..provider_config_from_provider(&provider)
+        })?;
+        self.with(|c| {
+            c.execute(
+                "UPDATE providers SET config_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, config_json, now_secs()],
+            )?;
+            Ok(())
+        })?;
+        self.provider_get(id)?
+            .context("updated provider missing on read-back")
+    }
+
+    pub fn provider_update_group_name(
+        &self,
+        id: &str,
+        group_name: Option<String>,
+    ) -> Result<Provider> {
+        let provider = self.provider_get(id)?.context("provider missing")?;
+        let config_json = serde_json::to_string(&ProviderConfig {
+            group_name: normalize_opt_string(group_name),
+            ..provider_config_from_provider(&provider)
+        })?;
+        self.with(|c| {
+            c.execute(
+                "UPDATE providers SET config_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, config_json, now_secs()],
+            )?;
+            Ok(())
+        })?;
+        self.provider_get(id)?
+            .context("updated provider missing on read-back")
     }
 
     // --- routes -------------------------------------------------------------
@@ -293,7 +504,62 @@ impl Db {
                            ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
                            ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39,
                            ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51,
-                           ?52, ?53, ?54, ?55)",
+                           ?52, ?53, ?54, ?55)
+                 ON CONFLICT(id) DO UPDATE SET
+                    started_at = excluded.started_at,
+                    app = excluded.app,
+                    provider_id = excluded.provider_id,
+                    requested_model = excluded.requested_model,
+                    upstream_model = excluded.upstream_model,
+                    status_code = excluded.status_code,
+                    error = excluded.error,
+                    latency_ms = excluded.latency_ms,
+                    first_token_ms = excluded.first_token_ms,
+                    input_tokens = excluded.input_tokens,
+                    output_tokens = excluded.output_tokens,
+                    cache_read_tokens = excluded.cache_read_tokens,
+                    cache_creation_tokens = excluded.cache_creation_tokens,
+                    estimated_cost_usd = excluded.estimated_cost_usd,
+                    wire = excluded.wire,
+                    route_prefix = excluded.route_prefix,
+                    credential_id = excluded.credential_id,
+                    cb_key = excluded.cb_key,
+                    upstream_http_status = excluded.upstream_http_status,
+                    upstream_error_preview = excluded.upstream_error_preview,
+                    dedupe_key = excluded.dedupe_key,
+                    client_transport = excluded.client_transport,
+                    request_headers = excluded.request_headers,
+                    request_body = excluded.request_body,
+                    response_body = excluded.response_body,
+                    client_response_body = excluded.client_response_body,
+                    stream_kind = excluded.stream_kind,
+                    stream_terminal_seen = excluded.stream_terminal_seen,
+                    stream_end_reason = excluded.stream_end_reason,
+                    stream_error_detail = excluded.stream_error_detail,
+                    upstream_first_byte_ms = excluded.upstream_first_byte_ms,
+                    client_first_write_ms = excluded.client_first_write_ms,
+                    last_upstream_event_ms = excluded.last_upstream_event_ms,
+                    last_client_write_ms = excluded.last_client_write_ms,
+                    upstream_chunk_count = excluded.upstream_chunk_count,
+                    upstream_bytes = excluded.upstream_bytes,
+                    client_chunk_count = excluded.client_chunk_count,
+                    client_bytes = excluded.client_bytes,
+                    sse_event_count = excluded.sse_event_count,
+                    sse_data_count = excluded.sse_data_count,
+                    sse_comment_count = excluded.sse_comment_count,
+                    sse_keepalive_count = excluded.sse_keepalive_count,
+                    sse_done_count = excluded.sse_done_count,
+                    parse_error_count = excluded.parse_error_count,
+                    first_keepalive_ms = excluded.first_keepalive_ms,
+                    last_keepalive_ms = excluded.last_keepalive_ms,
+                    max_gap_between_upstream_events_ms = excluded.max_gap_between_upstream_events_ms,
+                    max_gap_between_data_events_ms = excluded.max_gap_between_data_events_ms,
+                    keepalive_after_last_data_count = excluded.keepalive_after_last_data_count,
+                    last_data_event_ms = excluded.last_data_event_ms,
+                    bridge_mode = excluded.bridge_mode,
+                    status_injected = excluded.status_injected,
+                    terminal_injected = excluded.terminal_injected,
+                    upstream_terminal_type = excluded.upstream_terminal_type",
                 params![
                     log.id,
                     log.started_at,
@@ -446,21 +712,27 @@ impl Db {
 
     pub fn log_list(&self, limit: i64, offset: i64) -> Result<LogPage> {
         self.with(|c| {
-            let total: i64 = c.query_row("SELECT count(*) FROM request_logs", [], |r| r.get(0))?;
+            let fetch = limit + 1;
             let mut stmt = c.prepare(&format!(
                 "SELECT {} FROM request_logs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2",
                 Self::LOG_COLS_LIST
             ))?;
-            let rows = stmt.query_map(params![limit, offset], row_to_log_list)?;
+            let rows = stmt.query_map(params![fetch, offset], row_to_log_list)?;
             let mut items = Vec::new();
             for r in rows {
                 items.push(r?);
             }
+            let has_more = items.len() > limit as usize;
+            if has_more {
+                items.pop();
+            }
+            let total = offset + items.len() as i64;
             Ok(LogPage {
                 items,
                 total,
                 limit,
                 offset,
+                has_more,
             })
         })
     }
@@ -550,14 +822,10 @@ impl Db {
             } else {
                 format!("WHERE {}", conditions.join(" AND "))
             };
-            let total: i64 = c.query_row(
-                &format!("SELECT count(*) FROM request_logs {where_clause}"),
-                [],
-                |r| r.get(0),
-            )?;
+            let fetch = limit + 1;
             let mut stmt = c.prepare(&format!(
                 "SELECT {} FROM request_logs {where_clause}
-                 ORDER BY started_at DESC LIMIT {limit} OFFSET {offset}",
+                 ORDER BY started_at DESC LIMIT {fetch} OFFSET {offset}",
                 Self::LOG_COLS_LIST
             ))?;
             let rows = stmt.query_map([], row_to_log_list)?;
@@ -565,11 +833,17 @@ impl Db {
             for r in rows {
                 items.push(r?);
             }
+            let has_more = items.len() > limit as usize;
+            if has_more {
+                items.pop();
+            }
+            let total = offset + items.len() as i64;
             Ok(LogPage {
                 items,
                 total,
                 limit,
                 offset,
+                has_more,
             })
         })
     }
@@ -586,12 +860,212 @@ impl Db {
         })
     }
 
+    pub fn upstream_attempt_insert(&self, attempt: &UpstreamAttemptLog) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO upstream_attempt_logs (
+                    attempt_id, request_id, attempt_index, started_at, ended_at,
+                    provider_id, credential_id, wire, route_prefix, requested_model, upstream_model,
+                    phase, outcome, status_code, upstream_http_status, error_summary,
+                    latency_ms, first_token_ms, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens,
+                    upstream_first_byte_ms, client_first_write_ms,
+                    last_upstream_event_ms, last_client_write_ms,
+                    upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
+                    sse_event_count, sse_data_count, sse_comment_count, sse_keepalive_count,
+                    sse_done_count, parse_error_count,
+                    first_keepalive_ms, last_keepalive_ms,
+                    max_gap_between_upstream_events_ms, max_gap_between_data_events_ms,
+                    keepalive_after_last_data_count, last_data_event_ms,
+                    bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
+                    active_upstream_decode_tps_peak, active_downstream_emit_tps_peak,
+                    request_headers, request_body, response_headers, response_body
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5,
+                    ?6, ?7, ?8, ?9, ?10, ?11,
+                    ?12, ?13, ?14, ?15, ?16,
+                    ?17, ?18, ?19, ?20,
+                    ?21, ?22,
+                    ?23, ?24,
+                    ?25, ?26,
+                    ?27, ?28, ?29, ?30,
+                    ?31, ?32, ?33, ?34,
+                    ?35, ?36,
+                    ?37, ?38,
+                    ?39, ?40,
+                    ?41, ?42,
+                    ?43, ?44, ?45, ?46,
+                    ?47, ?48, ?49, ?50, ?51, ?52
+                 )",
+                params![
+                    attempt.attempt_id,
+                    attempt.request_id,
+                    attempt.attempt_index,
+                    attempt.started_at,
+                    attempt.ended_at,
+                    attempt.provider_id,
+                    attempt.credential_id,
+                    attempt.wire,
+                    attempt.route_prefix,
+                    attempt.requested_model,
+                    attempt.upstream_model,
+                    upstream_attempt_phase_to_str(attempt.phase.clone()),
+                    upstream_attempt_outcome_to_str(attempt.outcome.clone()),
+                    attempt.status_code,
+                    attempt.upstream_http_status,
+                    attempt.error_summary,
+                    attempt.latency_ms,
+                    attempt.first_token_ms,
+                    attempt.input_tokens,
+                    attempt.output_tokens,
+                    attempt.cache_read_tokens,
+                    attempt.cache_creation_tokens,
+                    attempt.upstream_first_byte_ms,
+                    attempt.client_first_write_ms,
+                    attempt.last_upstream_event_ms,
+                    attempt.last_client_write_ms,
+                    attempt.upstream_chunk_count,
+                    attempt.upstream_bytes,
+                    attempt.client_chunk_count,
+                    attempt.client_bytes,
+                    attempt.sse_event_count,
+                    attempt.sse_data_count,
+                    attempt.sse_comment_count,
+                    attempt.sse_keepalive_count,
+                    attempt.sse_done_count,
+                    attempt.parse_error_count,
+                    attempt.first_keepalive_ms,
+                    attempt.last_keepalive_ms,
+                    attempt.max_gap_between_upstream_events_ms,
+                    attempt.max_gap_between_data_events_ms,
+                    attempt.keepalive_after_last_data_count,
+                    attempt.last_data_event_ms,
+                    attempt.bridge_mode,
+                    i32::from(attempt.status_injected),
+                    i32::from(attempt.terminal_injected),
+                    attempt.upstream_terminal_type,
+                    attempt.active_upstream_decode_tps_peak,
+                    attempt.active_downstream_emit_tps_peak,
+                    attempt.request_headers,
+                    attempt.request_body,
+                    attempt.response_headers,
+                    attempt.response_body,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn upstream_attempt_get(&self, attempt_id: &str) -> Result<Option<UpstreamAttemptLog>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {} FROM upstream_attempt_logs WHERE attempt_id = ?1",
+                Self::ATTEMPT_COLS
+            ))?;
+            let mut rows = stmt.query_map(params![attempt_id], row_to_attempt)?;
+            Ok(rows.next().transpose()?)
+        })
+    }
+
+    pub fn upstream_attempts_for_request(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<UpstreamAttemptLog>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {} FROM upstream_attempt_logs WHERE request_id = ?1 ORDER BY attempt_index ASC",
+                Self::ATTEMPT_COLS
+            ))?;
+            let rows = stmt.query_map(params![request_id], row_to_attempt)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn upstream_attempt_list(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<UpstreamAttemptLog>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {} FROM upstream_attempt_logs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2",
+                Self::ATTEMPT_COLS
+            ))?;
+            let rows = stmt.query_map(params![limit, offset], row_to_attempt)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn app_log_insert(&self, ev: &AppLogEvent) -> Result<()> {
+        let level = match ev.level {
+            AppLogLevel::Debug => "debug",
+            AppLogLevel::Info => "info",
+            AppLogLevel::Warn => "warn",
+            AppLogLevel::Error => "error",
+        };
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO app_logs (ts, level, category, message, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![ev.ts, level, ev.category, ev.message, ev.detail],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn app_log_list(&self, limit: i64, since: Option<i64>) -> Result<Vec<AppLogEvent>> {
+        self.with(|c| {
+            let since_clause = since
+                .map(|t| format!("WHERE ts >= {t}"))
+                .unwrap_or_default();
+            let mut stmt = c.prepare(&format!(
+                "SELECT ts, level, category, message, detail FROM app_logs {since_clause}
+                 ORDER BY ts DESC, id DESC LIMIT ?1"
+            ))?;
+            let rows = stmt.query_map(params![limit], |r| {
+                let level_str: String = r.get(1)?;
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    level_str,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (ts, level_str, category, message, detail) = row?;
+                let level = match level_str.as_str() {
+                    "warn" => AppLogLevel::Warn,
+                    "error" => AppLogLevel::Error,
+                    "debug" => AppLogLevel::Debug,
+                    _ => AppLogLevel::Info,
+                };
+                out.push(AppLogEvent {
+                    ts,
+                    level,
+                    category,
+                    message,
+                    detail,
+                });
+            }
+            Ok(out)
+        })
+    }
+
     /// Per-model request count and token totals for the last N hours.
     pub fn top_models(&self, hours: i64, limit: i64) -> Result<Vec<vibe_protocol::ModelStat>> {
         let since = now_secs() - hours * 3600;
         self.with(|c| {
             let mut stmt = c.prepare(
-                "SELECT COALESCE(upstream_model, requested_model, 'unknown') as model,
+                "SELECT COALESCE(NULLIF(TRIM(upstream_model), ''), NULLIF(TRIM(requested_model), ''), 'unknown') as model,
                         count(*) as reqs,
                         COALESCE(sum(input_tokens), 0),
                         COALESCE(sum(output_tokens), 0)
@@ -810,6 +1284,39 @@ impl Db {
                  GROUP BY l.credential_id",
             )?;
             let rows = stmt.query_map(params![since, provider_id], |r| {
+                let avg_lat: f64 = r.get(4)?;
+                Ok(CredentialRollingStat {
+                    credential_id: r.get(0)?,
+                    requests: r.get(1)?,
+                    successes: r.get(2)?,
+                    failures: r.get(3)?,
+                    avg_latency_ms: Some(avg_lat as i64),
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Rolling-window stats grouped by credential across all providers.
+    pub fn credential_stats_all(&self, hours: i64) -> Result<Vec<CredentialRollingStat>> {
+        let since = now_secs() - hours * 3600;
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT l.credential_id,
+                        count(*) as total,
+                        sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as ok,
+                        sum(CASE WHEN l.status_code IS NULL OR l.status_code >= 400 THEN 1 ELSE 0 END) as err,
+                        COALESCE(avg(l.latency_ms), 0) as avg_lat
+                 FROM request_logs l
+                 WHERE l.started_at >= ?1
+                   AND l.credential_id IS NOT NULL
+                 GROUP BY l.credential_id",
+            )?;
+            let rows = stmt.query_map(params![since], |r| {
                 let avg_lat: f64 = r.get(4)?;
                 Ok(CredentialRollingStat {
                     credential_id: r.get(0)?,
@@ -1122,6 +1629,24 @@ impl Db {
          keepalive_after_last_data_count, last_data_event_ms,
          bridge_mode, status_injected, terminal_injected, upstream_terminal_type";
 
+    const ATTEMPT_COLS: &'static str =
+        "attempt_id, request_id, attempt_index, started_at, ended_at,
+         provider_id, credential_id, wire, route_prefix, requested_model, upstream_model,
+         phase, outcome, status_code, upstream_http_status, error_summary,
+         latency_ms, first_token_ms, input_tokens, output_tokens,
+         cache_read_tokens, cache_creation_tokens,
+         upstream_first_byte_ms, client_first_write_ms,
+         last_upstream_event_ms, last_client_write_ms,
+         upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
+         sse_event_count, sse_data_count, sse_comment_count, sse_keepalive_count,
+         sse_done_count, parse_error_count,
+         first_keepalive_ms, last_keepalive_ms,
+         max_gap_between_upstream_events_ms, max_gap_between_data_events_ms,
+         keepalive_after_last_data_count, last_data_event_ms,
+         bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
+         active_upstream_decode_tps_peak, active_downstream_emit_tps_peak,
+         request_headers, request_body, response_headers, response_body";
+
     pub fn credential_list_for_provider(
         &self,
         provider_id: &str,
@@ -1323,6 +1848,7 @@ impl Db {
     }
 
     /// Update rate-limit counters extracted from upstream response headers.
+    #[allow(clippy::too_many_arguments)]
     pub fn credential_update_rate_limit(
         &self,
         id: &str,
@@ -1408,9 +1934,13 @@ pub struct DbHealth {
 fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
     let kind_s: String = r.get(2)?;
     let aliases_json: String = r.get(7)?;
+    let config_json: String = r.get(8)?;
+    let cfg: ProviderConfig = serde_json::from_str(&config_json).unwrap_or_default();
     Ok(Provider {
         id: r.get(0)?,
         name: r.get(1)?,
+        group_name: cfg.group_name,
+        avatar_url: cfg.avatar_url,
         kind: provider_kind_from_str(&kind_s).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into())
         })?,
@@ -1418,9 +1948,14 @@ fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
         auth_ref: r.get(4)?,
         enabled: r.get::<_, i64>(5)? != 0,
         priority: r.get(6)?,
+        supports_websocket: cfg.supports_websocket,
+        passthrough_mode: cfg.passthrough_mode,
+        remote_models: cfg.remote_models,
+        remote_models_fetched_at: cfg.remote_models_fetched_at,
+        last_speedtest: cfg.last_speedtest,
         model_aliases: serde_json::from_str(&aliases_json).unwrap_or_default(),
-        created_at: r.get(8)?,
-        updated_at: r.get(9)?,
+        created_at: r.get(9)?,
+        updated_at: r.get(10)?,
     })
 }
 
@@ -1512,6 +2047,69 @@ fn row_to_plan_snapshot(
         codex_secondary_used_percent: r.get(8)?,
         summary: r.get(9)?,
         source: r.get(10)?,
+    })
+}
+
+fn row_to_attempt(r: &rusqlite::Row) -> rusqlite::Result<UpstreamAttemptLog> {
+    let phase_s: String = r.get(11)?;
+    let outcome_s: String = r.get(12)?;
+    Ok(UpstreamAttemptLog {
+        attempt_id: r.get(0)?,
+        request_id: r.get(1)?,
+        attempt_index: r.get(2)?,
+        started_at: r.get(3)?,
+        ended_at: r.get(4)?,
+        provider_id: r.get(5)?,
+        credential_id: r.get(6)?,
+        wire: r.get(7)?,
+        route_prefix: r.get(8)?,
+        requested_model: r.get(9)?,
+        upstream_model: r.get(10)?,
+        phase: upstream_attempt_phase_from_str(&phase_s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, e.into())
+        })?,
+        outcome: upstream_attempt_outcome_from_str(&outcome_s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, e.into())
+        })?,
+        status_code: r.get(13)?,
+        upstream_http_status: r.get(14)?,
+        error_summary: r.get(15)?,
+        latency_ms: r.get(16)?,
+        first_token_ms: r.get(17)?,
+        input_tokens: r.get(18)?,
+        output_tokens: r.get(19)?,
+        cache_read_tokens: r.get(20)?,
+        cache_creation_tokens: r.get(21)?,
+        upstream_first_byte_ms: r.get(22)?,
+        client_first_write_ms: r.get(23)?,
+        last_upstream_event_ms: r.get(24)?,
+        last_client_write_ms: r.get(25)?,
+        upstream_chunk_count: r.get(26)?,
+        upstream_bytes: r.get(27)?,
+        client_chunk_count: r.get(28)?,
+        client_bytes: r.get(29)?,
+        sse_event_count: r.get(30)?,
+        sse_data_count: r.get(31)?,
+        sse_comment_count: r.get(32)?,
+        sse_keepalive_count: r.get(33)?,
+        sse_done_count: r.get(34)?,
+        parse_error_count: r.get(35)?,
+        first_keepalive_ms: r.get(36)?,
+        last_keepalive_ms: r.get(37)?,
+        max_gap_between_upstream_events_ms: r.get(38)?,
+        max_gap_between_data_events_ms: r.get(39)?,
+        keepalive_after_last_data_count: r.get(40)?,
+        last_data_event_ms: r.get(41)?,
+        bridge_mode: r.get(42)?,
+        status_injected: r.get::<_, i32>(43)? != 0,
+        terminal_injected: r.get::<_, i32>(44)? != 0,
+        upstream_terminal_type: r.get(45)?,
+        active_upstream_decode_tps_peak: r.get(46)?,
+        active_downstream_emit_tps_peak: r.get(47)?,
+        request_headers: r.get(48)?,
+        request_body: r.get(49)?,
+        response_headers: r.get(50)?,
+        response_body: r.get(51)?,
     })
 }
 
@@ -1646,11 +2244,15 @@ mod tests {
     fn sample_input() -> ProviderInput {
         ProviderInput {
             name: "anthropic-prod".into(),
+            group_name: Some("prod".into()),
             kind: ProviderKind::Anthropic,
+            avatar_url: None,
             base_url: "https://api.anthropic.com".into(),
             auth_ref: Some("keyring:anthropic-prod".into()),
             enabled: true,
             priority: 100,
+            supports_websocket: None,
+            passthrough_mode: true,
             model_aliases: vec![ModelAlias {
                 alias: "high".into(),
                 upstream_model: "claude-sonnet-4-6".into(),

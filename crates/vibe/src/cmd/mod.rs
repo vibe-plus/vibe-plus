@@ -1,13 +1,14 @@
 pub mod autostart;
+pub mod ui;
 pub mod client;
 pub mod codex_history;
 pub mod config;
 pub mod doctor;
 pub mod logs;
+pub mod mcp;
 pub mod pair;
 pub mod provider;
 pub mod route;
-pub mod run;
 pub mod start;
 pub mod status;
 pub mod statusline;

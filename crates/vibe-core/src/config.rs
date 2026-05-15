@@ -46,7 +46,7 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogConfig {
-    /// When true, request/response bodies are stored in memory for `/_vp/logs/:id/body`.
+    /// Raw request/response bodies are persisted for log inspection. Kept for config compatibility.
     /// Off by default for privacy.
     pub bodies: bool,
     /// When true, sensitive inbound headers such as Authorization and x-api-key are redacted.
@@ -55,10 +55,22 @@ pub struct LogConfig {
     pub redact_sensitive_headers: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexConfig {
     #[serde(default)]
     pub summary: CodexSummaryConfig,
+    /// When true, inject the TTFS + upstream routing line near the start of the assistant turn (begin slot).
+    #[serde(default = "default_true")]
+    pub route_status_enabled: bool,
+}
+
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self {
+            summary: CodexSummaryConfig::default(),
+            route_status_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -218,8 +230,14 @@ pub struct CodexSummaryConfig {
     pub show_cache: bool,
     #[serde(default)]
     pub show_latency: bool,
+    #[serde(default)]
+    pub show_first_token: bool,
     #[serde(default = "default_speed_decimal_places")]
     pub speed_decimal_places: u8,
+    #[serde(default = "default_summary_separator")]
+    pub separator: String,
+    #[serde(default)]
+    pub label_overrides: CodexSummaryLabelOverrides,
     #[serde(default)]
     pub clients: CodexSummaryClientsConfig,
 }
@@ -240,6 +258,10 @@ pub struct CodexSummaryClientConfig {
     pub enabled: bool,
     #[serde(default)]
     pub style: CodexSummaryStyle,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub suffix: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -256,6 +278,22 @@ pub enum CodexSummaryStyle {
     AsciiPlain,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CodexSummaryLabelOverrides {
+    #[serde(default)]
+    pub speed: Option<String>,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub cache: Option<String>,
+    #[serde(default)]
+    pub latency: Option<String>,
+    #[serde(default)]
+    pub first_token: Option<String>,
+}
+
 impl Default for CodexSummaryConfig {
     fn default() -> Self {
         Self {
@@ -265,7 +303,10 @@ impl Default for CodexSummaryConfig {
             show_output: true,
             show_cache: true,
             show_latency: false,
+            show_first_token: false,
             speed_decimal_places: default_speed_decimal_places(),
+            separator: default_summary_separator(),
+            label_overrides: CodexSummaryLabelOverrides::default(),
             clients: CodexSummaryClientsConfig::default(),
         }
     }
@@ -286,6 +327,8 @@ impl Default for CodexSummaryClientConfig {
         Self {
             enabled: true,
             style: CodexSummaryStyle::InlineChips,
+            prefix: None,
+            suffix: None,
         }
     }
 }
@@ -490,6 +533,10 @@ fn default_speed_decimal_places() -> u8 {
     1
 }
 
+fn default_summary_separator() -> String {
+    " · ".to_string()
+}
+
 fn default_long_context_threshold_tokens() -> u32 {
     60_000
 }
@@ -502,6 +549,8 @@ fn default_app_summary_client() -> CodexSummaryClientConfig {
     CodexSummaryClientConfig {
         enabled: true,
         style: CodexSummaryStyle::FormulaCompact,
+        prefix: None,
+        suffix: None,
     }
 }
 
@@ -509,6 +558,8 @@ fn default_cli_summary_client() -> CodexSummaryClientConfig {
     CodexSummaryClientConfig {
         enabled: true,
         style: CodexSummaryStyle::PlainCompact,
+        prefix: None,
+        suffix: None,
     }
 }
 
@@ -516,6 +567,8 @@ fn default_unknown_summary_client() -> CodexSummaryClientConfig {
     CodexSummaryClientConfig {
         enabled: false,
         style: CodexSummaryStyle::InlineChips,
+        prefix: None,
+        suffix: None,
     }
 }
 
@@ -523,6 +576,8 @@ fn default_disabled_app_summary_client() -> CodexSummaryClientConfig {
     CodexSummaryClientConfig {
         enabled: false,
         style: CodexSummaryStyle::FormulaCompact,
+        prefix: None,
+        suffix: None,
     }
 }
 
@@ -534,7 +589,10 @@ fn default_claude_summary_config() -> CodexSummaryConfig {
         show_output: true,
         show_cache: true,
         show_latency: false,
+        show_first_token: false,
         speed_decimal_places: default_speed_decimal_places(),
+        separator: default_summary_separator(),
+        label_overrides: CodexSummaryLabelOverrides::default(),
         clients: CodexSummaryClientsConfig {
             app: default_disabled_app_summary_client(),
             cli: default_cli_summary_client(),
@@ -552,7 +610,7 @@ impl Default for Config {
             },
             failover: FailoverConfig::default(),
             log: LogConfig {
-                bodies: false,
+                bodies: true,
                 redact_sensitive_headers: true,
             },
             codex: CodexConfig::default(),
@@ -580,11 +638,12 @@ open_timeout_secs = 30
 inject_cache = true
 
 [log]
-bodies = false
+bodies = true
 "#,
         )
         .unwrap();
 
+        assert!(cfg.codex.route_status_enabled);
         assert!(cfg.codex.summary.enabled);
         assert_eq!(
             cfg.codex.summary.clients.app.style,
@@ -619,8 +678,11 @@ open_timeout_secs = 30
 inject_cache = true
 
 [log]
-bodies = false
+bodies = true
 redact_sensitive_headers = true
+
+[codex]
+route_status_enabled = false
 
 [codex.summary]
 enabled = true
@@ -658,7 +720,7 @@ style = "formula_compact"
 
 [claude.summary.clients.cli]
 enabled = true
-style = "chinese_light"
+style = "english_light"
 
 [claude.summary.clients.unknown]
 enabled = false
@@ -667,8 +729,10 @@ style = "ascii_plain"
         )
         .unwrap();
 
+        assert!(!cfg.codex.route_status_enabled);
         let out = toml::to_string_pretty(&cfg).unwrap();
         let reparsed: Config = toml::from_str(&out).unwrap();
+        assert!(!reparsed.codex.route_status_enabled);
         assert!(!reparsed.codex.summary.show_input);
         assert!(reparsed.codex.summary.show_latency);
         assert_eq!(reparsed.codex.summary.speed_decimal_places, 2);
@@ -711,7 +775,7 @@ open_timeout_secs = 30
 inject_cache = true
 
 [log]
-bodies = false
+bodies = true
 
 [claude.summary]
 show_latency = true
@@ -740,7 +804,7 @@ open_timeout_secs = 30
 inject_cache = true
 
 [log]
-bodies = false
+bodies = true
 
 [claude.native]
 manage_settings_json = true

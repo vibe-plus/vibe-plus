@@ -23,7 +23,7 @@
 //!   - `usage.prompt_tokens`        → `usage.input_tokens`
 
 use bytes::Bytes;
-use serde_json::Map;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 
@@ -278,8 +278,8 @@ fn is_vibe_codex_summary_chips_text(text: &str) -> bool {
 }
 
 fn is_vibe_codex_summary_chinese_text(text: &str) -> bool {
-    text.starts_with("本轮：")
-        && ["速度 ", "输入 ", "输出 ", "缓存 ", "耗时 "]
+    text.starts_with("This turn: ")
+        && ["speed ", "in ", "out ", "cache ", "lat "]
             .iter()
             .any(|label| text.contains(label))
 }
@@ -456,9 +456,9 @@ pub fn responses_to_chat(body: &[u8]) -> Bytes {
 
     // tools: Responses API format → Chat Completions / OpenAI-compat body.
     //
-    // DeepSeek/OpenAI-compat Chat 接口通常仅接受 `tools[].type=function`，
-    // 非 function（web_search/image_generation/namespace...）会 400。
-    // 因此在 Responses->Chat 变换时仅保留 function 工具。
+    // DeepSeek/OpenAI-compatible Chat endpoints usually accept only `tools[].type=function`,
+    // and non-function tools (web_search/image_generation/namespace...) can return 400.
+    // Therefore Responses->Chat conversion keeps only function tools.
     if let Some(tools_val) = obj.get("tools").and_then(|v| v.as_array()) {
         let converted: Vec<serde_json::Value> = tools_val
             .iter()
@@ -602,7 +602,7 @@ struct StreamingToolFragment {
     arguments: String,
 }
 
-/// 聚合 Chat Completions 流式「文本 + `delta.tool_calls` 片段」，供 C2R 在 `finish_reason` 时生成 `function_call` 事件。
+/// Aggregate Chat Completions streaming text plus `delta.tool_calls` fragments so C2R can emit `function_call` events at `finish_reason`.
 #[derive(Default)]
 pub struct ChatCompletionsC2rAccumulator {
     pub text: String,
@@ -708,7 +708,7 @@ impl ChatCompletionsC2rAccumulator {
         }
     }
 
-    /// 非流式 Chat Completions 的 `choices[0].message.tool_calls`。
+    /// Non-streaming Chat Completions `choices[0].message.tool_calls`.
     fn absorb_chat_message_tool_calls(&mut self, message: &serde_json::Value) {
         if let Some(arr) = message.get("tool_calls").and_then(|x| x.as_array()) {
             merge_tool_call_json_objects(&mut self.tool_calls_by_index, arr);
@@ -968,10 +968,10 @@ fn assistant_message_content_from_completion(v: &serde_json::Value) -> String {
     }
 }
 
-/// 将 **非流式** Chat Completions JSON 转为 Codex WebSocket 文本帧序列。
+/// Convert non-streaming Chat Completions JSON into Codex WebSocket text-frame sequences.
 ///
-/// Codex 客户端要求每条 WS 消息都是带 `"type"` 的事件；原先输出的裸 `response` 对象没有 `type`，
-/// 会被 codex-rs 丢弃并永远等不到 `response.completed`（最终报 `stream closed before response.completed`）。
+/// Codex clients require each WS message to be an event with `"type"`; the previous raw `response` object had no `type`,
+/// so codex-rs dropped it and waited forever for `response.completed`, eventually reporting `stream closed before response.completed`.
 pub fn chat_completion_non_stream_to_ws_events(
     body: &[u8],
     session_id: &str,
@@ -1146,13 +1146,10 @@ pub fn chat_body_to_responses(body: &[u8], session_id: &str, item_id: &str) -> B
 
 /// Prepend a completed assistant message to a non-streaming Responses JSON body.
 pub fn prepend_response_message(body: &[u8], item_id: &str, text: &str) -> Bytes {
-    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(mut v) = serde_json::from_slice::<Value>(body) else {
         return Bytes::copy_from_slice(body);
     };
-    let Some(obj) = v.as_object_mut() else {
-        return Bytes::copy_from_slice(body);
-    };
-    let Some(output) = obj.get_mut("output").and_then(|x| x.as_array_mut()) else {
+    let Some(output) = v.get_mut("output").and_then(|x| x.as_array_mut()) else {
         return Bytes::copy_from_slice(body);
     };
     output.insert(
@@ -1167,6 +1164,54 @@ pub fn prepend_response_message(body: &[u8], item_id: &str, text: &str) -> Bytes
             }]
         }),
     );
+    serde_json::to_vec(&v)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| Bytes::copy_from_slice(body))
+}
+
+/// Append text to the last assistant message in a non-streaming Responses JSON body.
+pub fn append_response_message_text(body: &[u8], text: &str) -> Bytes {
+    let Ok(mut v) = serde_json::from_slice::<Value>(body) else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(output) = v.get_mut("output").and_then(|x| x.as_array_mut()) else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(message) = output
+        .iter_mut()
+        .rev()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+    else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(content) = message.get_mut("content").and_then(|x| x.as_array_mut()) else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(part) = content
+        .iter_mut()
+        .rev()
+        .find(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
+    else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(existing) = part
+        .get_mut("text")
+        .and_then(|x| x.as_str())
+        .map(str::to_owned)
+    else {
+        return Bytes::copy_from_slice(body);
+    };
+    let separator = if existing.trim().is_empty() {
+        ""
+    } else {
+        "\n\n"
+    };
+    if let Some(obj) = part.as_object_mut() {
+        obj.insert(
+            "text".into(),
+            Value::String(format!("{existing}{separator}{text}")),
+        );
+    }
     serde_json::to_vec(&v)
         .map(Bytes::from)
         .unwrap_or_else(|_| Bytes::copy_from_slice(body))
@@ -1259,11 +1304,11 @@ pub fn codex_response_failed_event(response_id: &str, http_status: u16, body: &s
     .to_string()
 }
 
-/// 代理侧检测到的问题（流被截断、体无法解析等）。
+/// Problems detected by the proxy side, such as truncated streams or unparsable bodies.
 ///
-/// **不要**把这类错误映射成 `server_is_overloaded`：`codex-rs` 会把它显示为
-/// 「Selected model is at capacity」，与真实含义不符。应使用未被 `is_server_overloaded_error`
-/// 识别的 `code`，让客户端走 `Retryable` 分支并展示 `message`。
+/// Do not map these errors to `server_is_overloaded`: codex-rs displays that as
+/// "Selected model is at capacity", which is misleading. Use a `code` not recognized by `is_server_overloaded_error`
+/// so the client takes the `Retryable` branch and displays `message`.
 pub fn codex_response_proxy_fault_event(
     response_id: &str,
     wire_code: &str,
@@ -1466,7 +1511,7 @@ mod tests {
             "_↯ speed `31.8/s` · in `42.1k`_",
             "`speed 31.8/s` · `in 42.1k`",
             "_speed 31.8/s · in 42.1k_",
-            "_本轮：速度 31.8/s · 输入 42.1k_",
+            "_This turn: speed 31.8/s · in 42.1k_",
             "speed 31.8/s | in 42.1k",
         ];
 
@@ -1767,6 +1812,23 @@ mod tests {
         assert_eq!(output[0]["id"], "vibe-route");
         assert_eq!(output[0]["content"][0]["text"], "$$\\small Vibe+$$");
         assert_eq!(output[1]["id"], "msg-1");
+    }
+
+    #[test]
+    fn append_response_message_text_appends_to_last_message() {
+        let body = serde_json::json!({
+            "id": "resp-1",
+            "object": "response",
+            "output": [{
+                "id": "msg-1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "real"}]
+            }]
+        });
+        let out = append_response_message_text(&serde_json::to_vec(&body).unwrap(), "summary");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["output"][0]["content"][0]["text"], "real\n\nsummary");
     }
 
     #[test]

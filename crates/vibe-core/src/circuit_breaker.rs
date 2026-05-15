@@ -11,6 +11,18 @@ use std::time::{Duration, Instant};
 
 use crate::config::FailoverConfig;
 
+/// Returned by mutating circuit-breaker methods when the circuit state actually changes.
+/// Callers can use this to emit observability events without the breaker needing WsHub access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CircuitStateChange {
+    /// Circuit just opened from Closed or re-opened from HalfOpen.
+    Opened { consecutive_failures: u32 },
+    /// Circuit closed: recovered after enough successes in HalfOpen.
+    Closed,
+    /// Circuit was manually reset to Closed by an operator.
+    ManualReset,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Closed,
@@ -83,7 +95,7 @@ impl CircuitBreakers {
         }
     }
 
-    pub fn record_success(&self, provider_id: &str) {
+    pub fn record_success(&self, provider_id: &str) -> Option<CircuitStateChange> {
         let mut map = self.inner.lock().unwrap();
         let b = map
             .entry(provider_id.to_string())
@@ -96,14 +108,16 @@ impl CircuitBreakers {
                     b.state = State::Closed;
                     b.consecutive_successes = 0;
                     tracing::info!(provider_id, "circuit closed (recovered)");
+                    return Some(CircuitStateChange::Closed);
                 }
             }
             State::Closed => {}
             State::Open => {} // shouldn't happen
         }
+        None
     }
 
-    pub fn record_failure(&self, provider_id: &str) {
+    pub fn record_failure(&self, provider_id: &str) -> Option<CircuitStateChange> {
         let mut map = self.inner.lock().unwrap();
         let b = map
             .entry(provider_id.to_string())
@@ -115,20 +129,25 @@ impl CircuitBreakers {
                 if b.consecutive_failures >= self.cfg.failure_threshold {
                     b.state = State::Open;
                     b.opened_at = Some(Instant::now());
-                    tracing::warn!(
-                        provider_id,
-                        consecutive_failures = b.consecutive_failures,
-                        "circuit opened"
-                    );
+                    let n = b.consecutive_failures;
+                    tracing::warn!(provider_id, consecutive_failures = n, "circuit opened");
+                    return Some(CircuitStateChange::Opened {
+                        consecutive_failures: n,
+                    });
                 }
             }
             State::HalfOpen => {
                 b.state = State::Open;
                 b.opened_at = Some(Instant::now());
+                let n = b.consecutive_failures;
                 tracing::warn!(provider_id, "circuit re-opened (half-open probe failed)");
+                return Some(CircuitStateChange::Opened {
+                    consecutive_failures: n,
+                });
             }
             State::Open => {}
         }
+        None
     }
 
     pub fn state_of(&self, provider_id: &str) -> State {
@@ -151,6 +170,21 @@ impl CircuitBreakers {
         false
     }
 
+    pub fn open_remaining_secs(&self, provider_id: &str) -> Option<u64> {
+        let map = self.inner.lock().unwrap();
+        let b = map.get(provider_id)?;
+        if b.state != State::Open {
+            return None;
+        }
+        let elapsed = b.opened_at.map(|t| t.elapsed()).unwrap_or(Duration::MAX);
+        let timeout = Duration::from_secs(self.cfg.open_timeout_secs);
+        if elapsed >= timeout {
+            Some(0)
+        } else {
+            Some((timeout - elapsed).as_secs())
+        }
+    }
+
     pub fn consecutive_failures(&self, provider_id: &str) -> u32 {
         let map = self.inner.lock().unwrap();
         map.get(provider_id)
@@ -158,18 +192,49 @@ impl CircuitBreakers {
             .unwrap_or(0)
     }
 
-    /// 手动重置熔断状态（用于 UI 运维操作）。
-    /// 将状态强制置为 Closed，并清空失败/成功计数与打开时间。
-    pub fn reset(&self, provider_id: &str) {
+    /// Manually reset circuit-breaker state for UI operations.
+    /// Returns `Some(ManualReset)` if the circuit was previously non-Closed.
+    pub fn reset(&self, provider_id: &str) -> Option<CircuitStateChange> {
         let mut map = self.inner.lock().unwrap();
         let b = map
             .entry(provider_id.to_string())
             .or_insert_with(Breaker::new);
+        let was_open = b.state != State::Closed;
         b.state = State::Closed;
         b.consecutive_failures = 0;
         b.consecutive_successes = 0;
         b.opened_at = None;
         tracing::info!(provider_id, "circuit manually reset to closed");
+        if was_open {
+            Some(CircuitStateChange::ManualReset)
+        } else {
+            None
+        }
+    }
+
+    /// Force the circuit open immediately for fatal auth failures like 401,
+    /// without waiting for the normal consecutive-failure threshold.
+    /// Returns `Some(Opened)`.
+    pub fn force_open(&self, provider_id: &str) -> CircuitStateChange {
+        let mut map = self.inner.lock().unwrap();
+        let b = map
+            .entry(provider_id.to_string())
+            .or_insert_with(Breaker::new);
+        b.state = State::Open;
+        b.opened_at = Some(Instant::now());
+        b.consecutive_successes = 0;
+        if b.consecutive_failures == 0 {
+            b.consecutive_failures = 1;
+        }
+        let n = b.consecutive_failures;
+        tracing::warn!(
+            provider_id,
+            consecutive_failures = n,
+            "circuit force-opened"
+        );
+        CircuitStateChange::Opened {
+            consecutive_failures: n,
+        }
     }
 }
 

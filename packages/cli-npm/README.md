@@ -35,7 +35,3 @@ source or use a future standalone installer for those platforms.
 ```sh
 vibe update
 ```
-
-## Source
-
-https://github.com/vibe-plus/vibe-plus

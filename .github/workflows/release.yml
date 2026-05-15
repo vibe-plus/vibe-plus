@@ -44,7 +44,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-15 # arm runner
+            os: macos-15
             npm_plat: darwin-arm64
           - target: x86_64-apple-darwin
             os: macos-13
@@ -148,15 +148,18 @@ jobs:
           node <<'NODE'
           const fs = require("node:fs");
           const version = process.env.VERSION;
-          const platformPackages = [
-            "@vibe-plus/darwin-arm64",
-            "@vibe-plus/darwin-x64",
-            "@vibe-plus/linux-x64",
-            "@vibe-plus/linux-arm64",
-            "@vibe-plus/win32-x64",
-            "@vibe-plus/win32-arm64",
+
+          const cliPlatformPackages = [
+            "@vibe-plus/cli-darwin-arm64",
+            "@vibe-plus/cli-darwin-x64",
+            "@vibe-plus/cli-linux-x64",
+            "@vibe-plus/cli-linux-arm64",
+            "@vibe-plus/cli-win32-x64",
+            "@vibe-plus/cli-win32-arm64",
           ];
+
           const files = [
+            "packages/vibeplus/package.json",
             "packages/cli-npm/package.json",
             "packages/cli-npm/platform/darwin-arm64/package.json",
             "packages/cli-npm/platform/darwin-x64/package.json",
@@ -171,7 +174,7 @@ jobs:
             pkg.version = version;
             if (pkg.name === "@vibe-plus/cli") {
               pkg.optionalDependencies = Object.fromEntries(
-                platformPackages.map((name) => [name, version]),
+                cliPlatformPackages.map((name) => [name, version]),
               );
             }
             fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
@@ -198,9 +201,21 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish npm wrapper
+      - name: Publish @vibe-plus/cli
         run: |
           cd packages/cli-npm
+          PKG=$(node -p "require('./package.json').name")
+          if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
+            echo "$PKG@$VERSION already exists, skipping"
+          else
+            npm publish --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish vibeplus (onboarding CLI)
+        run: |
+          cd packages/vibeplus
           PKG=$(node -p "require('./package.json').name")
           if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
             echo "$PKG@$VERSION already exists, skipping"

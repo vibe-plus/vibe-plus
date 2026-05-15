@@ -124,30 +124,53 @@ pub fn route_signature(ctx: &CodexVisualContext) -> String {
     )
 }
 
-pub fn status_message_done_event(
+/// High synthetic output_index for the Vibe+ status item, chosen to avoid
+/// conflicting with any real response items (which start at 0 and increment).
+const STATUS_OUTPUT_INDEX: u32 = 9999;
+
+/// Returns the pair of Responses-API events that render the Vibe+ route status.
+///
+/// Sends `response.output_item.added` then `response.output_item.done` at a
+/// synthetic index that does not collide with the upstream's real output items.
+/// Sending `.done` without a preceding `.added` is a protocol violation that
+/// causes codex-rs to enter a bad state, close the WebSocket, and report
+/// "stream closed before response.completed".
+pub fn status_message_events(
     ctx: &CodexVisualContext,
     response_id: &str,
     ttfs_ms: i64,
-) -> String {
+) -> Vec<String> {
     let item_id = format!(
         "vibe_route_{}",
         response_id.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
     );
-    serde_json::json!({
-        "type": "response.output_item.done",
+    let text = status_message_text(ctx, ttfs_ms);
+    let item = serde_json::json!({
+        "id": item_id,
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}]
+    });
+    let added = serde_json::json!({
+        "type": "response.output_item.added",
         "response_id": response_id,
-        "output_index": 0,
+        "output_index": STATUS_OUTPUT_INDEX,
         "item": {
             "id": item_id,
             "type": "message",
             "role": "assistant",
-            "content": [{
-                "type": "output_text",
-                "text": status_message_text(ctx, ttfs_ms)
-            }]
+            "content": []
         }
     })
-    .to_string()
+    .to_string();
+    let done = serde_json::json!({
+        "type": "response.output_item.done",
+        "response_id": response_id,
+        "output_index": STATUS_OUTPUT_INDEX,
+        "item": item
+    })
+    .to_string();
+    vec![added, done]
 }
 
 pub fn coding_plan_rate_limit_event(ctx: &CodexVisualContext) -> Option<String> {

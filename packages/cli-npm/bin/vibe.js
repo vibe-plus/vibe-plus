@@ -8,12 +8,12 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const packageMap = {
-  "darwin-arm64": "@vibe-plus/darwin-arm64",
-  "darwin-x64": "@vibe-plus/darwin-x64",
-  "linux-x64": "@vibe-plus/linux-x64",
-  "linux-arm64": "@vibe-plus/linux-arm64",
-  "win32-x64": "@vibe-plus/win32-x64",
-  "win32-arm64": "@vibe-plus/win32-arm64",
+  "darwin-arm64": "@vibe-plus/cli-darwin-arm64",
+  "darwin-x64": "@vibe-plus/cli-darwin-x64",
+  "linux-x64": "@vibe-plus/cli-linux-x64",
+  "linux-arm64": "@vibe-plus/cli-linux-arm64",
+  "win32-x64": "@vibe-plus/cli-win32-x64",
+  "win32-arm64": "@vibe-plus/cli-win32-arm64",
 };
 
 function getPlatformPackage() {

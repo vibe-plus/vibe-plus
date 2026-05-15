@@ -110,8 +110,8 @@ pub fn default_aliases(kind: ProviderKind) -> Vec<ModelAlias> {
             ma("o3-mini", "o3-mini"),
             ma("o4-mini", "o4-mini"),
         ],
-        // Codex Responses：官方模型列表来自各 provider 的 `/models`（ChatGPT：`…/codex/models`）。
-        // 此处仅提供与当前 codex-rs 一致的常见 slug，导入时可再由用户删减。
+        // Codex Responses: the official model list comes from each provider `/models` endpoint (ChatGPT: `…/codex/models`).
+        // Only common slugs aligned with current codex-rs are provided here; users can trim them after import.
         ProviderKind::OpenaiResponses => vec![
             ma("gpt-5.3-codex", "gpt-5.3-codex"),
             ma("gpt-5.4", "gpt-5.4"),

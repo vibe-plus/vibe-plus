@@ -13,6 +13,7 @@ export type CredentialPoolStatus = {
   auth_mode: string;
   circuit_state: string;
   circuit_open: boolean;
+  circuit_open_remaining_secs: bigint | null;
   consecutive_failures: number;
   is_rate_limited: boolean;
   rl_requests_remaining: bigint | null;

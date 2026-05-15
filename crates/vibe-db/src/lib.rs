@@ -59,6 +59,11 @@ impl Db {
             M::up(include_str!(
                 "../migrations/011_request_log_stream_trace.sql"
             )),
+            M::up(include_str!("../migrations/012_upstream_attempt_logs.sql")),
+            M::up(include_str!(
+                "../migrations/013_upstream_attempt_log_detail.sql"
+            )),
+            M::up(include_str!("../migrations/014_app_logs.sql")),
         ])
     }
 

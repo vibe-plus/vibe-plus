@@ -291,7 +291,7 @@ fn scan_claude() -> Option<LocalCandidate> {
         auth_ref,
         token_ok,
         source_path,
-        default_aliases: model_defaults::default_aliases(ProviderKind::Anthropic),
+        default_aliases: vec![],
         extra_credentials: vec![],
     })
 }
@@ -362,7 +362,7 @@ fn scan_codex() -> Option<LocalCandidate> {
         auth_ref: None,
         token_ok: primary_ok,
         source_path: first.display().to_string(),
-        default_aliases: model_defaults::default_aliases(ProviderKind::OpenaiResponses),
+        default_aliases: vec![],
         extra_credentials,
     })
 }
@@ -600,7 +600,7 @@ fn detect_ccs_provider_kind(
     ProviderKind::OpenaiChat
 }
 
-fn ccs_model_aliases(env: &serde_json::Map<String, Value>, kind: ProviderKind) -> Vec<ModelAlias> {
+fn ccs_model_aliases(env: &serde_json::Map<String, Value>, _kind: ProviderKind) -> Vec<ModelAlias> {
     let mut out = Vec::new();
     for (key, alias) in [
         ("ANTHROPIC_MODEL", "default"),
@@ -627,7 +627,7 @@ fn ccs_model_aliases(env: &serde_json::Map<String, Value>, kind: ProviderKind) -
     }
 
     if out.is_empty() {
-        model_defaults::default_aliases(kind)
+        vec![]
     } else {
         out
     }
@@ -650,12 +650,16 @@ fn ccs_candidate_to_plan(c: &LocalCandidate) -> ImportPlan {
     ImportPlan {
         provider: ProviderInput {
             name: c.name.clone(),
+            group_name: None,
             kind: c.kind,
             base_url: c.base_url.clone(),
+            avatar_url: None,
             auth_ref: c.auth_ref.clone(),
             enabled: true,
             priority: 10,
-            model_aliases: c.default_aliases.clone(),
+            supports_websocket: None,
+            passthrough_mode: true,
+            model_aliases: vec![],
         },
         credentials: vec![],
     }
@@ -935,7 +939,6 @@ fn cc_switch_request_to_plan(request: &CcSwitchProviderRequest) -> anyhow::Resul
         "gemini" => ProviderKind::GeminiNative,
         _ => detect_ccs_provider_kind(&base_url, request.model.as_deref(), request.app == "claude"),
     };
-    let model_aliases = cc_switch_model_aliases(request, kind);
     let auth_ref = request
         .api_key
         .as_deref()
@@ -945,12 +948,16 @@ fn cc_switch_request_to_plan(request: &CcSwitchProviderRequest) -> anyhow::Resul
     Ok(ImportPlan {
         provider: ProviderInput {
             name,
+            group_name: None,
             kind,
             base_url,
+            avatar_url: None,
             auth_ref,
             enabled: true,
             priority: 10,
-            model_aliases,
+            supports_websocket: None,
+            passthrough_mode: true,
+            model_aliases: vec![],
         },
         credentials: vec![],
     })
@@ -966,54 +973,6 @@ fn primary_endpoint(request: &CcSwitchProviderRequest) -> anyhow::Result<String>
         return Ok("https://api.anthropic.com".to_string());
     }
     anyhow::bail!("CC Switch provider import missing endpoint")
-}
-
-fn cc_switch_model_aliases(
-    request: &CcSwitchProviderRequest,
-    kind: ProviderKind,
-) -> Vec<ModelAlias> {
-    let mut out = Vec::new();
-    if let Some(model) = request
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        push_alias_once(&mut out, "default", model);
-        push_alias_once(&mut out, model, model);
-    }
-    if let Some(model) = request
-        .haiku_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        push_alias_once(&mut out, "haiku", model);
-        push_alias_once(&mut out, model, model);
-    }
-    if let Some(model) = request
-        .sonnet_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        push_alias_once(&mut out, "sonnet", model);
-        push_alias_once(&mut out, model, model);
-    }
-    if let Some(model) = request
-        .opus_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        push_alias_once(&mut out, "opus", model);
-        push_alias_once(&mut out, model, model);
-    }
-    if out.is_empty() {
-        model_defaults::default_aliases(kind)
-    } else {
-        out
-    }
 }
 
 fn decode_base64_url_param(raw: &str) -> anyhow::Result<Vec<u8>> {
@@ -1086,12 +1045,16 @@ fn codex_candidate_to_plan(c: &LocalCandidate) -> anyhow::Result<ImportPlan> {
     Ok(ImportPlan {
         provider: ProviderInput {
             name: c.name.clone(),
+            group_name: None,
             kind: c.kind.clone(),
             base_url: c.base_url.clone(),
+            avatar_url: None,
             auth_ref: None,
             enabled: true,
             priority: 10,
-            model_aliases: c.default_aliases.clone(),
+            supports_websocket: None,
+            passthrough_mode: true,
+            model_aliases: vec![],
         },
         credentials,
     })
@@ -1101,12 +1064,16 @@ fn claude_candidate_to_plan(c: &LocalCandidate) -> ImportPlan {
     ImportPlan {
         provider: ProviderInput {
             name: c.name.clone(),
+            group_name: None,
             kind: c.kind.clone(),
             base_url: c.base_url.clone(),
+            avatar_url: None,
             auth_ref: c.auth_ref.clone(),
             enabled: true,
             priority: 10,
-            model_aliases: c.default_aliases.clone(),
+            supports_websocket: None,
+            passthrough_mode: true,
+            model_aliases: vec![],
         },
         credentials: vec![],
     }
@@ -1124,12 +1091,16 @@ pub fn candidate_to_plan(c: &LocalCandidate) -> anyhow::Result<ImportPlan> {
 pub fn candidate_to_input(c: &LocalCandidate) -> ProviderInput {
     ProviderInput {
         name: c.name.clone(),
+        group_name: None,
         kind: c.kind.clone(),
         base_url: c.base_url.clone(),
+        avatar_url: None,
         auth_ref: c.auth_ref.clone(),
         enabled: true,
         priority: 10,
-        model_aliases: c.default_aliases.clone(),
+        supports_websocket: None,
+        passthrough_mode: true,
+        model_aliases: vec![],
     }
 }
 

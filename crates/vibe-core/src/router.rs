@@ -1,8 +1,9 @@
 //! Picks providers for an incoming request.
 //!
-//! `candidates` returns all matching providers ordered by priority (ascending),
-//! used by the retry loop in `forward`. `pick` delegates to `candidates` and
-//! returns the first match, kept for tests.
+//! `candidates` returns all matching providers in database order. The forwarding
+//! layer randomizes healthy/authenticated candidates per request so provider
+//! priority no longer controls load balancing. `pick` delegates to `candidates`
+//! and returns the first match, kept for tests.
 //!
 //! Selection strategy:
 //! 1. **ChatGPT Codex (OAuth) official endpoint** — `openai-responses` whose
@@ -11,7 +12,9 @@
 //!    not need a local alias table to mirror every new official model name.
 //! 2. Otherwise, alias match → upstream model from the alias table; if the alias
 //!    list is empty → pass through requested model as-is.
-//! Providers are sorted by `priority` (lower = higher priority).
+//! 3. **Route `target_provider_id`** — still narrows/retargets the model, but does
+//!    not force a provider to the front; load balancing stays random in `forward`.
+//! Provider `priority` is deliberately ignored for request distribution.
 
 use crate::providers::Wire;
 use anyhow::{Context, Result};
@@ -32,7 +35,7 @@ pub fn provider_is_chatgpt_codex_official(p: &Provider) -> bool {
     }
 }
 
-/// Returns every enabled provider that matches `wire`, sorted by `priority`.
+/// Returns every enabled provider that matches `wire` in database order.
 /// Each entry has its upstream model resolved from the alias table if possible.
 pub fn candidates(providers: &[Provider], wire: Wire, requested_model: &str) -> Vec<Pick> {
     let kinds: &[ProviderKind] = match wire {
@@ -47,48 +50,34 @@ pub fn candidates(providers: &[Provider], wire: Wire, requested_model: &str) -> 
         Wire::GeminiNative => &[ProviderKind::GeminiNative],
     };
 
-    let mut result: Vec<(i32, Pick)> = providers
+    providers
         .iter()
         .filter(|p| p.enabled && kinds.contains(&p.kind))
         .filter_map(|p| {
             if provider_is_chatgpt_codex_official(p) {
-                return Some((
-                    p.priority,
-                    Pick {
-                        provider: p.clone(),
-                        upstream_model: requested_model.to_string(),
-                    },
-                ));
+                return Some(Pick {
+                    provider: p.clone(),
+                    upstream_model: requested_model.to_string(),
+                });
             }
             if p.model_aliases.is_empty() {
                 // Pass-through provider: accepts any model.
-                Some((
-                    p.priority,
-                    Pick {
-                        provider: p.clone(),
-                        upstream_model: requested_model.to_string(),
-                    },
-                ))
+                Some(Pick {
+                    provider: p.clone(),
+                    upstream_model: requested_model.to_string(),
+                })
             } else {
                 // Alias-configured provider: only match if an alias entry matches.
                 p.model_aliases
                     .iter()
                     .find(|a| a.alias == requested_model || a.upstream_model == requested_model)
-                    .map(|a| {
-                        (
-                            p.priority,
-                            Pick {
-                                provider: p.clone(),
-                                upstream_model: a.upstream_model.clone(),
-                            },
-                        )
+                    .map(|a| Pick {
+                        provider: p.clone(),
+                        upstream_model: a.upstream_model.clone(),
                     })
             }
         })
-        .collect();
-
-    result.sort_by_key(|(priority, _)| *priority);
-    result.into_iter().map(|(_, pick)| pick).collect()
+        .collect()
 }
 
 pub fn matching_route<'a>(routes: &'a [Route], requested_model: &str) -> Option<&'a Route> {
@@ -105,10 +94,10 @@ pub fn candidates_with_routes(
         return (None, candidates(providers, wire, requested_model));
     };
     let routed_model = route.target_model.as_deref().unwrap_or(requested_model);
-    let mut picks = candidates(providers, wire, routed_model);
-    if let Some(provider_id) = route.target_provider_id.as_deref() {
-        picks.retain(|p| p.provider.id == provider_id);
-    }
+    // `target_provider_id` is a route hint from the old priority/failover model.
+    // Keep the model rewrite behavior, but do not let it override randomized
+    // load balancing in the forwarding layer.
+    let picks = candidates(providers, wire, routed_model);
     (Some(route.clone()), picks)
 }
 
@@ -123,17 +112,24 @@ pub fn pick(providers: &[Provider], wire: Wire, requested_model: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vibe_protocol::{ModelAlias, ProviderKind};
+    use vibe_protocol::{ModelAlias, ProviderKind, Route, RouteTier};
 
     fn sample_codex_provider() -> Provider {
         Provider {
             id: "codex-1".into(),
             name: "Codex".into(),
+            group_name: None,
+            avatar_url: None,
             kind: ProviderKind::OpenaiResponses,
             base_url: "https://chatgpt.com/backend-api/codex".into(),
             auth_ref: None,
             enabled: true,
             priority: 10,
+            supports_websocket: Some(true),
+            passthrough_mode: true,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
             model_aliases: vec![ModelAlias {
                 alias: "gpt-5.4".into(),
                 upstream_model: "gpt-5.4".into(),
@@ -149,11 +145,18 @@ mod tests {
         let steal = Provider {
             id: "ds".into(),
             name: "deepseek".into(),
+            group_name: None,
+            avatar_url: None,
             kind: ProviderKind::OpenaiChat,
             base_url: "https://api.deepseek.com".into(),
             auth_ref: None,
             enabled: true,
             priority: 40,
+            supports_websocket: None,
+            passthrough_mode: true,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
             model_aliases: vec![ModelAlias {
                 alias: "gpt-5.5".into(),
                 upstream_model: "deepseek-chat".into(),
@@ -169,15 +172,134 @@ mod tests {
     }
 
     #[test]
+    fn candidates_with_routes_keeps_provider_order_and_ignores_target_provider_priority_hint() {
+        let pri_a = Provider {
+            id: "a".into(),
+            name: "A".into(),
+            group_name: None,
+            avatar_url: None,
+            kind: ProviderKind::OpenaiResponses,
+            base_url: "https://api.openai.com/v1".into(),
+            auth_ref: None,
+            enabled: true,
+            priority: 5,
+            supports_websocket: None,
+            passthrough_mode: true,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
+            model_aliases: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+        let pri_b = Provider {
+            id: "b".into(),
+            name: "B".into(),
+            group_name: None,
+            avatar_url: None,
+            kind: ProviderKind::OpenaiResponses,
+            base_url: "https://example.com".into(),
+            auth_ref: None,
+            enabled: true,
+            priority: 10,
+            supports_websocket: None,
+            passthrough_mode: true,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
+            model_aliases: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+        let r = Route {
+            id: "r1".into(),
+            name: "r".into(),
+            match_model: "gpt-x".into(),
+            target_provider_id: Some("b".into()),
+            target_model: None,
+            tier: RouteTier::Default,
+            priority: 0,
+        };
+        let list = vec![pri_a.clone(), pri_b.clone()];
+        let (_, picks) = candidates_with_routes(&list, &[r], Wire::OpenaiResponses, "gpt-x");
+        assert_eq!(picks.len(), 2);
+        assert_eq!(picks[0].provider.id, "a");
+        assert_eq!(picks[1].provider.id, "b");
+    }
+
+    #[test]
+    fn candidates_with_routes_unknown_target_provider_keeps_full_candidate_order() {
+        let pri_a = Provider {
+            id: "a".into(),
+            name: "A".into(),
+            group_name: None,
+            avatar_url: None,
+            kind: ProviderKind::OpenaiResponses,
+            base_url: "https://api.openai.com/v1".into(),
+            auth_ref: None,
+            enabled: true,
+            priority: 5,
+            supports_websocket: None,
+            passthrough_mode: true,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
+            model_aliases: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+        let pri_b = Provider {
+            id: "b".into(),
+            name: "B".into(),
+            group_name: None,
+            avatar_url: None,
+            kind: ProviderKind::OpenaiResponses,
+            base_url: "https://example.com".into(),
+            auth_ref: None,
+            enabled: true,
+            priority: 10,
+            supports_websocket: None,
+            passthrough_mode: true,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
+            model_aliases: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+        let r = Route {
+            id: "r1".into(),
+            name: "r".into(),
+            match_model: "gpt-x".into(),
+            target_provider_id: Some("no-such-provider".into()),
+            target_model: None,
+            tier: RouteTier::Default,
+            priority: 0,
+        };
+        let list = vec![pri_a.clone(), pri_b.clone()];
+        let (_, picks) = candidates_with_routes(&list, &[r], Wire::OpenaiResponses, "gpt-x");
+        assert_eq!(picks.len(), 2);
+        assert_eq!(picks[0].provider.id, "a");
+        assert_eq!(picks[1].provider.id, "b");
+    }
+
+    #[test]
     fn non_codex_still_requires_alias_when_aliases_nonempty() {
         let ds = Provider {
             id: "ds".into(),
             name: "deepseek".into(),
+            group_name: None,
+            avatar_url: None,
             kind: ProviderKind::OpenaiChat,
             base_url: "https://api.deepseek.com".into(),
             auth_ref: None,
             enabled: true,
             priority: 40,
+            supports_websocket: None,
+            passthrough_mode: true,
+            remote_models: Vec::new(),
+            remote_models_fetched_at: None,
+            last_speedtest: None,
             model_aliases: vec![ModelAlias {
                 alias: "gpt-5.5".into(),
                 upstream_model: "deepseek-chat".into(),

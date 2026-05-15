@@ -45,14 +45,16 @@ enum Command {
     Client(cmd::client::ClientCmd),
     /// Tail the request log.
     Logs(cmd::logs::LogsArgs),
-    /// Run a subprocess with local proxy env vars injected.
-    Run(cmd::run::RunArgs),
     /// Get or set config values.
     Config(cmd::config::ConfigArgs),
     /// Update to the latest version via npm.
     Update,
+    /// Open the vibe+ dashboard in the browser (picks fastest CDN).
+    Ui,
     /// Pair with the hosted control plane (Phase 2 placeholder).
     Pair(cmd::pair::PairArgs),
+    /// Run or install the Vibe Plus MCP server for Codex.
+    Mcp(cmd::mcp::McpArgs),
 }
 
 #[tokio::main]
@@ -72,10 +74,11 @@ async fn main() -> Result<()> {
         Command::CodexHistory(a) => cmd::codex_history::run(a),
         Command::Client(c) => cmd::client::run(c).await,
         Command::Logs(a) => cmd::logs::run(a).await,
-        Command::Run(a) => cmd::run::run(a),
         Command::Config(a) => cmd::config::run(a),
         Command::Update => cmd::update::run(),
+        Command::Ui => cmd::ui::run().await,
         Command::Pair(a) => cmd::pair::run(a),
+        Command::Mcp(a) => cmd::mcp::run(a).await,
     }
 }
 

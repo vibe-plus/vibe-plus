@@ -151,11 +151,15 @@ fn add(db: &Db) -> Result<()> {
 
     let input = ProviderInput {
         name,
+        group_name: None,
         kind,
         base_url,
+        avatar_url: None,
         auth_ref,
         enabled: true,
         priority,
+        supports_websocket: None,
+        passthrough_mode: true,
         model_aliases: vec![
             ModelAlias {
                 alias: "high".into(),
@@ -193,11 +197,15 @@ fn edit(db: &Db, id: &str) -> Result<()> {
         id,
         ProviderInput {
             name,
+            group_name: p.group_name,
             kind: p.kind,
             base_url,
+            avatar_url: p.avatar_url,
             auth_ref: p.auth_ref,
             enabled,
             priority,
+            supports_websocket: p.supports_websocket,
+            passthrough_mode: p.passthrough_mode,
             model_aliases: p.model_aliases,
         },
     )?;
@@ -339,7 +347,7 @@ async fn response_json(resp: reqwest::Response) -> Result<serde_json::Value> {
 fn default_high_model(kind: ProviderKind) -> String {
     match kind {
         ProviderKind::Anthropic => "claude-opus-4-7".into(),
-        // Codex / OpenAI Chat：与 codex-rs 当前默认家族对齐（非固定枚举，可在 DB 里改别名）
+        // Codex / OpenAI Chat: align with the current codex-rs default family; this is not a fixed enum and aliases can be edited in DB.
         _ => "gpt-5.3-codex".into(),
     }
 }

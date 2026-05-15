@@ -14,9 +14,13 @@ pub async fn run(args: TakeoverArgs) -> Result<()> {
     if args.restore {
         let outcome = vibe_core::takeover::restore(&args.client)?;
         println!(
-            "[ok]  restored {} config from {}",
+            "[ok]  restored {} config {}",
             outcome.client,
-            outcome.backup_path.as_deref().unwrap_or("(unknown backup)")
+            outcome
+                .backup_path
+                .as_deref()
+                .map(|path| format!("from {path}"))
+                .unwrap_or_else(|| "by removing vibe takeover entries".into())
         );
         return Ok(());
     }
@@ -60,11 +64,11 @@ fn print_next_steps(client: &str, base_url: &str) {
         }
         "opencode" => {
             println!("Next steps:");
-            println!("  Restart OpenCode — 请求将经 vibe+ 路由，路径 {base_url}/opencode/v1");
+            println!("  Restart OpenCode — requests will be routed through vibe+, path {base_url}/opencode/v1");
         }
         "codex" => {
             println!("Next steps:");
-            println!("  Restart codex — 无需登录，请求将经 vibe+ 路由至 {base_url}/codex/v1");
+            println!("  Restart codex — no login required; requests will be routed through vibe+ to {base_url}/codex/v1");
             println!();
             println!("  Verify: codex \"say hi\"");
             println!("          then check: curl -s {base_url}/_vp/logs?limit=1 | jq");

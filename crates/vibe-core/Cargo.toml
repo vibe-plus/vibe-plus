@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-repository.workspace = true
 rust-version.workspace = true
 description = "Local API gateway core: server, providers, router, transforms."
 
@@ -42,6 +41,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 base64 = { workspace = true }
 url = { workspace = true }
+rand = { workspace = true }
+scraper = "0.24"
 
 [dev-dependencies]
 tempfile = "3.27.0"

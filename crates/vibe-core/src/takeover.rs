@@ -36,13 +36,17 @@ pub fn takeover(client: &str, base_url: &str) -> Result<TakeoverOutcome> {
 pub fn restore(client: &str) -> Result<TakeoverOutcome> {
     let cfg_path = detect_config_path(client)?;
     let backup = latest_backup(client)?;
-    std::fs::copy(&backup, &cfg_path)
-        .with_context(|| format!("restoring {} from {}", cfg_path.display(), backup.display()))?;
+    if let Some(backup) = &backup {
+        std::fs::copy(backup, &cfg_path).with_context(|| {
+            format!("restoring {} from {}", cfg_path.display(), backup.display())
+        })?;
+    }
+    disable_takeover(client, &cfg_path)?;
 
     Ok(TakeoverOutcome {
         client: client.into(),
         config_path: cfg_path.display().to_string(),
-        backup_path: Some(backup.display().to_string()),
+        backup_path: backup.map(|p| p.display().to_string()),
     })
 }
 
@@ -53,26 +57,53 @@ fn backup_path(client: &str) -> Result<PathBuf> {
     Ok(dir.join(format!("{client}.{ts}.bak")))
 }
 
-fn latest_backup(client: &str) -> Result<PathBuf> {
-    let dir = paths::backups_dir()?.join("takeover");
-    let prefix = format!("{client}.");
+fn latest_backup(client: &str) -> Result<Option<PathBuf>> {
+    let base = paths::backups_dir()?;
+    let dirs = [base.join("takeover"), base];
     let mut backups = Vec::new();
-    if dir.exists() {
+    for dir in dirs {
+        if !dir.exists() {
+            continue;
+        }
         for entry in std::fs::read_dir(&dir)? {
             let path = entry?.path();
             if path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".bak"))
+                .is_some_and(|name| backup_name_matches(client, name))
             {
                 backups.push(path);
             }
         }
     }
     backups.sort();
-    backups
-        .pop()
-        .with_context(|| format!("no takeover backup found for {client}"))
+    Ok(backups.pop())
+}
+
+fn backup_name_matches(client: &str, name: &str) -> bool {
+    let new_prefix = format!("{client}.");
+    if name.starts_with(&new_prefix) && name.ends_with(".bak") {
+        return true;
+    }
+
+    let legacy_prefix = format!("{client}-");
+    if !name.starts_with(&legacy_prefix) {
+        return false;
+    }
+    match client {
+        "codex" => name.ends_with(".bak.toml"),
+        "claude" | "opencode" => name.ends_with(".bak.json"),
+        _ => false,
+    }
+}
+
+fn disable_takeover(client: &str, path: &PathBuf) -> Result<()> {
+    match client {
+        "claude" => disable_claude_takeover(path),
+        "codex" => disable_codex_takeover(path),
+        "opencode" => disable_opencode_takeover(path),
+        _ => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -80,39 +111,26 @@ fn latest_backup(client: &str) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn detect_config_path(client: &str) -> Result<PathBuf> {
-    let dirs = directories::UserDirs::new().context("cannot find home directory")?;
-    let home = dirs.home_dir();
-
-    let path = match client {
+    match client {
         "claude" => {
-            // Claude Code reads ~/.claude/settings.json and injects its `env` block
-            // as environment variables before starting. This is how all proxy
-            // implementations (cc-switch, cligate, OmniProxy) redirect the base URL.
-            home.join(".claude").join("settings.json")
+            // Claude Code reads $CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json)
+            // and injects its `env` block as environment variables before starting.
+            paths::claude_settings_path()
         }
         "opencode" => {
-            // CC Switch confirms: OpenCode's canonical user-override file is
-            // ~/.config/opencode/opencode.json (opencode_config.rs get_opencode_config_path).
+            // OpenCode's canonical user-override file is
+            // $XDG_CONFIG_HOME/opencode/opencode.json (default ~/.config/opencode/opencode.json).
             // config.json is OpenCode's own managed/generated file; we do not write there.
-            home.join(".config").join("opencode").join("opencode.json")
+            paths::opencode_config_path()
         }
         "codex" => {
-            // Codex CLI: ~/.codex/config.toml is the primary config; auth.json holds keys.
-            // We write to config.toml for the base_url field.
-            let p1 = home.join(".codex").join("config.toml");
-            if p1.exists() {
-                return Ok(p1);
-            }
-            // Older/alternate path
-            let p2 = home.join(".config").join("codex").join("config.toml");
-            if p2.exists() {
-                return Ok(p2);
-            }
-            p1
+            // Codex CLI primary config is $CODEX_HOME/config.toml when CODEX_HOME is set.
+            // Otherwise we prefer ~/.codex/config.toml and fall back to
+            // $XDG_CONFIG_HOME/codex/config.toml.
+            paths::codex_config_path()
         }
         other => anyhow::bail!("unknown client: {other}. Supported: claude, opencode, codex"),
-    };
-    Ok(path)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +197,55 @@ fn patch_claude_settings(path: &PathBuf, base_url: &str) -> Result<()> {
     apply_claude_native_env(env_obj, native, base_url);
     apply_claude_status_line(obj, &cfg.claude.status_line);
 
+    std::fs::write(path, serde_json::to_string_pretty(&v)?)?;
+    Ok(())
+}
+
+fn disable_claude_takeover(path: &PathBuf) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(path)?;
+    let mut v: Value = if raw.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return Ok(());
+    };
+    if let Some(env_obj) = obj.get_mut("env").and_then(|env| env.as_object_mut()) {
+        if env_obj
+            .get("ANTHROPIC_BASE_URL")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.contains("/claude"))
+        {
+            env_obj.remove("ANTHROPIC_BASE_URL");
+        }
+        if env_obj
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .and_then(|value| value.as_str())
+            == Some("PROXY_MANAGED")
+        {
+            env_obj.remove("ANTHROPIC_AUTH_TOKEN");
+        }
+        if env_obj
+            .get("ANTHROPIC_API_KEY")
+            .and_then(|value| value.as_str())
+            == Some("PROXY_MANAGED")
+        {
+            env_obj.remove("ANTHROPIC_API_KEY");
+        }
+    }
+    if obj
+        .get("statusLine")
+        .and_then(|value| value.as_object())
+        .and_then(|status| status.get("command"))
+        .and_then(|value| value.as_str())
+        == Some("vibe statusline")
+    {
+        obj.remove("statusLine");
+    }
     std::fs::write(path, serde_json::to_string_pretty(&v)?)?;
     Ok(())
 }
@@ -421,6 +488,31 @@ fn patch_opencode_config(path: &PathBuf, base_url: &str) -> Result<()> {
     Ok(())
 }
 
+fn disable_opencode_takeover(path: &PathBuf) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(path)?;
+    let mut v: Value = if raw.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?
+    };
+    if let Some(obj) = v.as_object_mut() {
+        if obj.get("model").and_then(|value| value.as_str()) == Some("vibe/gpt-5.3-codex") {
+            obj.remove("model");
+        }
+        if let Some(providers) = obj
+            .get_mut("provider")
+            .and_then(|value| value.as_object_mut())
+        {
+            providers.remove("vibe");
+        }
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&v)?)?;
+    Ok(())
+}
+
 /// Patch ~/.codex/config.toml for Codex CLI takeover.
 ///
 /// Use custom [model_providers.vibeplus] + model_provider = "vibeplus",
@@ -490,6 +582,31 @@ fn patch_codex_config(path: &PathBuf, base_url: &str) -> Result<()> {
     );
     mp.insert("vibeplus", toml_edit::Item::Table(vibeplus));
 
+    std::fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+fn disable_codex_takeover(path: &PathBuf) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let existing = std::fs::read_to_string(path)?;
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
+    let root = doc.as_table_mut();
+    if root.get("model_provider").and_then(|item| item.as_str()) == Some("vibeplus") {
+        root.remove("model_provider");
+    }
+    if let Some(model_providers) = root
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    {
+        model_providers.remove("vibeplus");
+        if model_providers.is_empty() {
+            root.remove("model_providers");
+        }
+    }
     std::fs::write(path, doc.to_string())?;
     Ok(())
 }

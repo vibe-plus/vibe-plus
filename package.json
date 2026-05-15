@@ -2,6 +2,7 @@
   "name": "vibe-plus",
   "version": "0.0.0",
   "private": true,
+  "author": "cheezone <cheezone@163.com>",
   "workspaces": [
     "packages/*",
     "apps/*",
@@ -10,16 +11,15 @@
   "type": "module",
   "scripts": {
     "ready": "vp check && vp run -r test && vp run -r build",
-    "dev": "vp run website#dev",
+    "dev": "vp run web#dev",
     "prepare": "vp config",
     "gateway:restart": "bash scripts/rebuild-and-run-gateway.sh"
   },
   "devDependencies": {
-    "lander": "workspace:*",
     "unplugin-caddy-localhost": "latest",
     "unplugin-singleton": "latest",
     "vite-plus": "catalog:",
-    "website": "workspace:*"
+    "web": "workspace:*"
   },
   "overrides": {
     "vite": "catalog:",

@@ -12,8 +12,7 @@ members = [
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
-authors = ["vibe-plus contributors"]
-repository = "https://github.com/vibe-plus/vibe-plus"
+authors = ["cheezone <cheezone@163.com>"]
 rust-version = "1.82"
 
 [workspace.dependencies]
@@ -62,14 +61,18 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "5"
 keyring = "3"
-ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
+ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings", "serde-json-impl"] }
 base64 = "0.22"
 url = "2"
+rand = "0.8"
+png = "0.18"
 
 # desktop shell
 tao = "0.35"
 tray-icon = "0.24"
 wry = "0.55"
+rust-embed = { version = "8", features = ["include-exclude"] }
+mime_guess = { version = "2", default-features = false, features = ["rev-mappings"] }
 
 [profile.release]
 lto = "thin"

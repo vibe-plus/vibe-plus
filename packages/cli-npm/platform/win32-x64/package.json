@@ -1,12 +1,9 @@
 {
-  "name": "@vibe-plus/win32-x64",
+  "name": "@vibe-plus/cli-win32-x64",
   "version": "0.0.1",
   "description": "vibe binary for win32-x64",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/vibe-plus/vibe-plus"
-  },
+  "author": "cheezone <cheezone@163.com>",
   "files": [
     "bin/"
   ],

@@ -33,6 +33,16 @@ target/
 # Vibe runtime
 .vibe-local/
 
+# Local gateway state (must never ship)
+data.db
+
+# Local QA / browser dumps
+output/
+
 # QA screenshots from local browser runs
 apps/website/qa-screenshots/
 .playwright-cli/
+
+# Environment variables
+.env
+.env.local

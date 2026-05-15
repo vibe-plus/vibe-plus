@@ -7,10 +7,17 @@ import type { ProviderKind } from "./ProviderKind.js";
  */
 export type ProviderInput = {
   name: string;
+  group_name: string | null;
+  /**
+   * Optional custom avatar/logo URL for the provider, typically discovered from the upstream site.
+   */
+  avatar_url: string | null;
   kind: ProviderKind;
   base_url: string;
   auth_ref: string | null;
   enabled: boolean;
   priority: number;
+  supports_websocket: boolean | null;
+  passthrough_mode: boolean;
   model_aliases: Array<ModelAlias>;
 };
