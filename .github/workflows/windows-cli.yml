@@ -1,0 +1,46 @@
+name: Windows CLI Smoke Test
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "packages/cli-npm/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows-cli.yml"
+      - ".github/scripts/test-windows-cli.ps1"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "packages/cli-npm/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows-cli.yml"
+      - ".github/scripts/test-windows-cli.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Build and run CLI on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build CLI
+        run: cargo build --release -p vibe
+
+      - name: Smoke test CLI binary and npm wrapper
+        shell: pwsh
+        run: ./.github/scripts/test-windows-cli.ps1 -RepoRoot $env:GITHUB_WORKSPACE -ExePath "$env:GITHUB_WORKSPACE/target/release/vibe.exe"
