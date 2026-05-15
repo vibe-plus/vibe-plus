@@ -1,6 +1,6 @@
 {
   "name": "utils",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Shared utilities for vibe-plus.",
   "license": "MIT",
   "author": "cheezone <cheezone@163.com>",

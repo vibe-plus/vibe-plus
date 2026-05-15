@@ -1,6 +1,6 @@
 {
   "name": "@vibe-plus/mcp",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "author": "cheezone <cheezone@163.com>",
   "bin": {
