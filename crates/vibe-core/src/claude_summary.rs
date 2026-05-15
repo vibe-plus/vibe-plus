@@ -381,6 +381,8 @@ mod tests {
                 cache_tokens: 0,
                 latency_ms: Some(1000),
                 first_token_ms: None,
+                cost_usd: None,
+                thread_cost_usd: None,
             },
         )
         .expect("summary");

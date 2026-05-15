@@ -23,6 +23,10 @@ pub struct SummaryMetrics {
     pub cache_tokens: i64,
     pub latency_ms: Option<i64>,
     pub first_token_ms: Option<i64>,
+    /// Estimated USD cost for this turn; `None` when model is unknown.
+    pub cost_usd: Option<f64>,
+    /// Cumulative USD cost for the current thread (all turns); `None` when unavailable.
+    pub thread_cost_usd: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -31,7 +35,13 @@ pub struct SummaryAccumulator {
     client: CodexClientKind,
     state: Option<AppState>,
     turn_id: Option<String>,
+    thread_id: Option<String>,
+    upstream_model: String,
     usage: Usage,
+    /// SUM of input_tokens across all response.completed events this turn (for cost).
+    turn_input_sum: i64,
+    /// SUM of output_tokens across all response.completed events this turn (for display + cost).
+    turn_output_sum: i64,
     first_token_ms: Option<i64>,
     emitted: bool,
     last_text_target: Option<TextTarget>,
@@ -55,6 +65,20 @@ impl SummaryMetrics {
             cache_tokens: usage.cache_read_tokens + usage.cache_creation_tokens,
             latency_ms,
             first_token_ms,
+            cost_usd: None,
+            thread_cost_usd: None,
+        }
+    }
+
+    pub fn from_usage_with_model(
+        usage: Usage,
+        model: &str,
+        latency_ms: Option<i64>,
+        first_token_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            cost_usd: usage.cost_usd(model),
+            ..Self::from_usage(usage, latency_ms, first_token_ms)
         }
     }
 
@@ -78,7 +102,7 @@ impl SummaryMetrics {
 
 impl SummaryAccumulator {
     pub fn new(cfg: CodexSummaryConfig, client: CodexClientKind) -> Self {
-        Self::new_for_turn(cfg, client, None, None)
+        Self::new_for_turn(cfg, client, None, None, None, String::new())
     }
 
     pub fn new_for_turn(
@@ -86,13 +110,19 @@ impl SummaryAccumulator {
         client: CodexClientKind,
         state: Option<AppState>,
         turn_id: Option<String>,
+        thread_id: Option<String>,
+        upstream_model: String,
     ) -> Self {
         Self {
             cfg,
             client,
             state,
             turn_id,
+            thread_id,
+            upstream_model,
             usage: Usage::default(),
+            turn_input_sum: 0,
+            turn_output_sum: 0,
             first_token_ms: None,
             emitted: false,
             last_text_target: None,
@@ -147,16 +177,25 @@ impl SummaryAccumulator {
                 continue;
             }
 
-            let metrics = SummaryMetrics::from_usage(
-                self.usage,
-                Some(latency_ms.max(0)),
-                self.first_token_ms,
-            );
+            let mut metrics = self.build_metrics(latency_ms);
             let Some(text) = render_summary(&self.cfg, self.client, metrics) else {
                 self.flush_pending_finalization(&mut out);
                 out.push(frame_json);
                 continue;
             };
+            // Pre-flight: only consume the per-turn summary slot if this
+            // response actually carries a message we can attach the summary
+            // to. A tool-call-only request has no assistant message in its
+            // pending finalization or in `response.completed.response.output`,
+            // so the append helpers would no-op anyway. Reserving the slot
+            // here would silently lock out the follow-up request that DOES
+            // carry the final assistant text — which is the "end slot
+            // disappears on multi-turn / tool-using turn" bug.
+            if !self.has_message_summary_target(&frame_json) {
+                self.flush_pending_finalization(&mut out);
+                out.push(frame_json);
+                continue;
+            }
             if let Some(state) = &self.state {
                 if !reserve_summary_slot(state, self.turn_id.as_deref(), self.client) {
                     self.emitted = true;
@@ -166,6 +205,12 @@ impl SummaryAccumulator {
                 }
             }
             self.emitted = true;
+            // Persist turn cost and get cumulative thread cost (after slot reserved).
+            if let Some(turn_cost) = metrics.cost_usd {
+                metrics.thread_cost_usd = self.persist_thread_cost(turn_cost);
+            }
+            // Re-render with thread cost included.
+            let text = render_summary(&self.cfg, self.client, metrics).unwrap_or(text);
 
             let append_text = format_summary_append(&self.last_text, &text);
             if let Some(delta) = self.summary_delta_frame(&append_text) {
@@ -193,12 +238,123 @@ impl SummaryAccumulator {
         out.append(&mut self.pending_finalization);
     }
 
+    /// True if this response carries an assistant message the summary text
+    /// can be appended to (either via a buffered finalization frame or via
+    /// the `response.output[]` array on the terminal frame). Used to avoid
+    /// burning the per-turn dedupe slot on a tool-call-only response that
+    /// has nothing to attach the summary to anyway.
+    fn has_message_summary_target(&self, completed_frame: &str) -> bool {
+        // output_text.done and content_part.done are only ever emitted for
+        // assistant text streams — never for function_call output items.
+        // Their presence in pending_finalization is a sufficient signal.
+        let has_text_finalization = self.pending_finalization.iter().any(|f| {
+            let Ok(v) = serde_json::from_str::<Value>(f) else {
+                return false;
+            };
+            matches!(
+                v.get("type").and_then(Value::as_str),
+                Some("response.output_text.done") | Some("response.content_part.done")
+            )
+        });
+        if has_text_finalization {
+            return true;
+        }
+        // output_item.done can be either a message item or a function_call
+        // item — only the message variant accepts a summary append.
+        let has_message_item_done = self.pending_finalization.iter().any(|f| {
+            let Ok(v) = serde_json::from_str::<Value>(f) else {
+                return false;
+            };
+            v.get("type").and_then(Value::as_str) == Some("response.output_item.done")
+                && v.pointer("/item/type").and_then(Value::as_str) == Some("message")
+        });
+        if has_message_item_done {
+            return true;
+        }
+        // Fallback: a non-streaming response.completed may carry the full
+        // message item inside `response.output[]`. `append_summary_to_
+        // completed_frame` injects there as a last resort.
+        let Ok(v) = serde_json::from_str::<Value>(completed_frame) else {
+            return false;
+        };
+        v.pointer("/response/output")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .any(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+            })
+            .unwrap_or(false)
+    }
+
     fn record_frame_state(&mut self, frame_json: &str, latency_ms: i64) {
         if frame_has_output_text(frame_json) {
             self.record_first_token_ms(latency_ms);
         }
         apply_usage_from_frame(frame_json, &mut self.usage);
+        self.accumulate_request_sums(frame_json);
         self.capture_text_frame(frame_json);
+    }
+
+    /// Accumulate per-request input/output from `response.completed` for cost + display SUM.
+    fn accumulate_request_sums(&mut self, frame_json: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(frame_json) else {
+            return;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("response.completed") {
+            return;
+        }
+        let Some(u) = v.pointer("/response/usage").or_else(|| v.get("usage")) else {
+            return;
+        };
+        if let Some(n) = u
+            .get("input_tokens")
+            .or_else(|| u.get("prompt_tokens"))
+            .and_then(|x| x.as_i64())
+        {
+            self.turn_input_sum += n;
+        }
+        if let Some(n) = u
+            .get("output_tokens")
+            .or_else(|| u.get("completion_tokens"))
+            .and_then(|x| x.as_i64())
+        {
+            self.turn_output_sum += n;
+        }
+    }
+
+    /// Build SummaryMetrics (no side effects — call before slot reserve).
+    fn build_metrics(&self, latency_ms: i64) -> SummaryMetrics {
+        let display_output = if self.turn_output_sum > 0 {
+            self.turn_output_sum
+        } else {
+            self.usage.output_tokens
+        };
+        let cost_input = if self.turn_input_sum > 0 {
+            self.turn_input_sum
+        } else {
+            self.usage.input_tokens
+        };
+        let cost_usage = Usage {
+            input_tokens: cost_input,
+            output_tokens: display_output,
+            ..Usage::default()
+        };
+        SummaryMetrics {
+            input_tokens: self.usage.input_tokens,
+            output_tokens: display_output,
+            cache_tokens: self.usage.cache_read_tokens + self.usage.cache_creation_tokens,
+            latency_ms: Some(latency_ms.max(0)),
+            first_token_ms: self.first_token_ms,
+            cost_usd: cost_usage.cost_usd(&self.upstream_model),
+            thread_cost_usd: None,
+        }
+    }
+
+    /// Persist turn cost and return cumulative thread cost (call after slot reserve).
+    fn persist_thread_cost(&self, turn_cost: f64) -> Option<f64> {
+        let state = self.state.as_ref()?;
+        let thread_id = self.thread_id.as_deref()?;
+        Some(state.add_codex_thread_cost(thread_id, turn_cost))
     }
 
     fn capture_text_frame(&mut self, frame_json: &str) {
@@ -345,16 +501,12 @@ impl SummaryAccumulator {
     }
 
     pub fn maybe_append_to_frame(&mut self, frame_json: &str, latency_ms: i64) -> Option<String> {
-        if frame_has_output_text(frame_json) {
-            self.record_first_token_ms(latency_ms);
-        }
-        apply_usage_from_frame(frame_json, &mut self.usage);
+        self.record_frame_state(frame_json, latency_ms);
         if self.emitted || !response_completed_is_end_turn(frame_json) {
             return None;
         }
-        let metrics =
-            SummaryMetrics::from_usage(self.usage, Some(latency_ms.max(0)), self.first_token_ms);
-        let text = render_summary(&self.cfg, self.client, metrics)?;
+        let mut metrics = self.build_metrics(latency_ms);
+        let _ = render_summary(&self.cfg, self.client, metrics)?;
         if let Some(state) = &self.state {
             if !reserve_summary_slot(state, self.turn_id.as_deref(), self.client) {
                 self.emitted = true;
@@ -362,6 +514,10 @@ impl SummaryAccumulator {
             }
         }
         self.emitted = true;
+        if let Some(turn_cost) = metrics.cost_usd {
+            metrics.thread_cost_usd = self.persist_thread_cost(turn_cost);
+        }
+        let text = render_summary(&self.cfg, self.client, metrics)?;
         append_summary_to_completed_frame(frame_json, &text)
     }
 }
@@ -402,6 +558,42 @@ fn turn_id_from_metadata_value(v: &Value) -> Option<String> {
                 (!trimmed.is_empty() && !trimmed.starts_with('{')).then(|| trimmed.to_owned())
             }),
         Value::Object(_) => v.get("turn_id").and_then(Value::as_str).map(str::to_owned),
+        _ => None,
+    }
+}
+
+pub fn thread_id_from_request(body: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    thread_id_from_value(&v)
+}
+
+pub fn thread_id_from_value(v: &Value) -> Option<String> {
+    for pointer in [
+        "/client_metadata/x-codex-turn-metadata",
+        "/response/client_metadata/x-codex-turn-metadata",
+        "/x-codex-turn-metadata",
+        "/turn_metadata",
+        "/client_metadata",
+        "/response/client_metadata",
+    ] {
+        if let Some(thread_id) = v.pointer(pointer).and_then(thread_id_from_metadata_value_inner) {
+            return Some(thread_id);
+        }
+    }
+    v.pointer("/client_metadata/thread_id")
+        .or_else(|| v.pointer("/response/client_metadata/thread_id"))
+        .or_else(|| v.pointer("/thread_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn thread_id_from_metadata_value_inner(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => serde_json::from_str::<Value>(s)
+            .ok()
+            .as_ref()
+            .and_then(thread_id_from_metadata_value_inner),
+        Value::Object(_) => v.get("thread_id").and_then(Value::as_str).map(str::to_owned),
         _ => None,
     }
 }
@@ -790,6 +982,22 @@ fn metric_labels(cfg: &CodexSummaryConfig, metrics: SummaryMetrics) -> Vec<(Stri
             ));
         }
     }
+    if cfg.show_cost {
+        if let Some(cost) = metrics.cost_usd.filter(|c| *c > 0.0) {
+            out.push((
+                metric_label(&cfg.label_overrides, "cost"),
+                format_cost(cost),
+            ));
+        }
+    }
+    if cfg.show_thread_cost {
+        if let Some(thread_cost) = metrics.thread_cost_usd.filter(|c| *c > 0.0) {
+            out.push((
+                metric_label(&cfg.label_overrides, "thread_cost"),
+                format_cost(thread_cost),
+            ));
+        }
+    }
     out
 }
 
@@ -851,7 +1059,27 @@ fn metric_label(overrides: &CodexSummaryLabelOverrides, key: &str) -> String {
             .first_token
             .clone()
             .unwrap_or_else(|| "first".to_string()),
+        "cost" => overrides
+            .cost
+            .clone()
+            .unwrap_or_else(|| "~usd".to_string()),
+        "thread_cost" => overrides
+            .thread_cost
+            .clone()
+            .unwrap_or_else(|| "∑usd".to_string()),
         _ => key.to_string(),
+    }
+}
+
+fn format_cost(usd: f64) -> String {
+    if usd < 0.000_01 {
+        format!("<$0.00001")
+    } else if usd < 0.001 {
+        format!("${usd:.5}")
+    } else if usd < 1.0 {
+        format!("${usd:.4}")
+    } else {
+        format!("${usd:.2}")
     }
 }
 
@@ -944,6 +1172,8 @@ mod tests {
             cache_tokens: 18_400,
             latency_ms: Some(60_000),
             first_token_ms: Some(250),
+            cost_usd: None,
+            thread_cost_usd: None,
         }
     }
 
@@ -1002,6 +1232,8 @@ mod tests {
             cache_tokens: 0,
             latency_ms: Some(10),
             first_token_ms: None,
+            cost_usd: None,
+            thread_cost_usd: None,
         };
         assert!(render_summary(&cfg, CodexClientKind::App, metrics).is_none());
     }
@@ -1085,15 +1317,403 @@ mod tests {
             CodexClientKind::Cli,
             Some(state.clone()),
             Some("turn-1".into()),
+            None,
+            String::new(),
         );
         let mut second = SummaryAccumulator::new_for_turn(
             CodexSummaryConfig::default(),
             CodexClientKind::Cli,
             Some(state),
             Some("turn-1".into()),
+            None,
+            String::new(),
         );
 
         assert!(first.maybe_append_to_frame(completed, 1_000).is_some());
         assert!(second.maybe_append_to_frame(completed, 1_000).is_none());
+    }
+
+    // ----- SSE block-structure regression tests -------------------------
+    //
+    // Background: `maybe_append_to_sse_block` is called per Passthrough-mode
+    // upstream SSE block (one `event: T\ndata: J` pair). The summary
+    // accumulator may BUFFER a `data:` frame (returning 0 frames) or FLUSH
+    // several buffered frames at once (returning N>1 frames). A previous
+    // implementation just rewrote `data:` lines in place while preserving the
+    // single upstream `event:` line — which produced:
+    //
+    //   • orphan `event: T` blocks (data buffered → no `data:` line emitted)
+    //   • blocks with one `event:` line and several stacked `data:` lines
+    //     (multiple frames flushed → multiple `data:` under one `event:`)
+    //
+    // codex-rs then never saw a valid `response.completed`, the WS/SSE
+    // stream was reported as truncated, and the Codex CLI looped through
+    // reconnects ending with "stream closed before response.completed".
+    //
+    // The invariant these tests pin down is: any string returned by
+    // `maybe_append_to_sse_block`, when split on `\n\n`, yields blocks where
+    // each block has AT MOST one `event:` line AND at most one `data:` line,
+    // and if a block has an `event:` line it must also have a `data:` line
+    // (no orphan events). The `event:` `type` must match the `data:` JSON
+    // `type` field.
+
+    /// Validate the SSE structure invariant on a block (or concatenation of
+    /// blocks separated by `\n\n`). Panics with a descriptive message on the
+    /// exact violation pattern, so a regression is easy to diagnose.
+    fn assert_blocks_well_formed(emitted: &str) {
+        for (idx, raw_block) in emitted.split("\n\n").enumerate() {
+            let trimmed = raw_block.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut event_type: Option<String> = None;
+            let mut data_payloads: Vec<String> = Vec::new();
+            for line in raw_block.lines() {
+                let line = line.trim_end_matches('\r');
+                if let Some(rest) = line.strip_prefix("event:") {
+                    assert!(
+                        event_type.is_none(),
+                        "block #{idx} has multiple `event:` lines:\n{raw_block}"
+                    );
+                    event_type = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    data_payloads.push(rest.trim().to_string());
+                }
+            }
+            assert!(
+                data_payloads.len() <= 1,
+                "block #{idx} stacks {} `data:` lines under one event — \
+                 this is the exact malformed-SSE pattern that breaks codex-rs:\n{raw_block}",
+                data_payloads.len()
+            );
+            if let Some(t) = &event_type {
+                assert!(
+                    !data_payloads.is_empty(),
+                    "block #{idx} has orphan `event: {t}` with no `data:` line — \
+                     codex-rs sees a typed event with empty payload:\n{raw_block}"
+                );
+                let data = &data_payloads[0];
+                let v: Value = serde_json::from_str(data).unwrap_or_else(|e| {
+                    panic!("block #{idx} data is not valid JSON: {e}\n{data}")
+                });
+                let inner = v
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("block #{idx} data has no `type` field:\n{data}"));
+                assert_eq!(
+                    inner, t,
+                    "block #{idx} `event:` type does not match `data:` JSON type:\n{raw_block}"
+                );
+            }
+        }
+    }
+
+    /// Simulate the exact upstream sequence that caused the production bug:
+    /// `output_text.done` → `content_part.done` → `output_item.done` →
+    /// `response.completed`. Each comes in as its own SSE block. The first
+    /// three trigger buffering; the fourth flushes them. Every emitted block
+    /// must remain a well-formed `event: T\ndata: J` pair.
+    #[test]
+    fn buffered_finalization_flush_emits_well_formed_sse_blocks() {
+        let mut acc = SummaryAccumulator::new(CodexSummaryConfig::default(), CodexClientKind::Cli);
+        // Seed usage so render_summary doesn't bail out.
+        acc.usage = Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Usage::default()
+        };
+
+        let blocks = [
+            "event: response.output_text.done\n\
+             data: {\"type\":\"response.output_text.done\",\"response_id\":\"resp_1\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"text\":\"hi\"}",
+            "event: response.content_part.done\n\
+             data: {\"type\":\"response.content_part.done\",\"response_id\":\"resp_1\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"hi\"}}",
+            "event: response.output_item.done\n\
+             data: {\"type\":\"response.output_item.done\",\"response_id\":\"resp_1\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}",
+            "event: response.completed\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120}}}",
+        ];
+
+        // Track which upstream `type`s the gateway emits across all blocks.
+        let mut all_emitted = String::new();
+        let mut completed_seen = false;
+        for (i, block) in blocks.iter().enumerate() {
+            let out = acc.maybe_append_to_sse_block(block, 1_000);
+            let emitted = out.as_deref().unwrap_or(block);
+            assert_blocks_well_formed(emitted);
+            if !all_emitted.is_empty() {
+                all_emitted.push_str("\n\n");
+            }
+            all_emitted.push_str(emitted);
+            if i == blocks.len() - 1 {
+                completed_seen = emitted.contains("response.completed");
+            }
+        }
+
+        // The final flush MUST surface a well-formed `response.completed`
+        // event — that's the terminal signal codex-rs waits for.
+        assert!(
+            completed_seen,
+            "response.completed never emitted as a typed SSE event:\n{all_emitted}"
+        );
+
+        // All four upstream event types must show up exactly once in the
+        // combined output — the buffer flushes them, it doesn't drop them.
+        for t in [
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ] {
+            let pattern = format!("event: {t}\n");
+            assert!(
+                all_emitted.contains(&pattern),
+                "missing typed event `{t}` in combined stream:\n{all_emitted}"
+            );
+        }
+
+        // CONTENT-LEVEL invariant: the whole point of buffering the three
+        // finalization frames is so the turn-summary text can be appended
+        // into their `text` payload before they're released. If summary
+        // rendering silently regresses (render_summary returns None, the
+        // append helpers stop firing, the modified frame gets dropped during
+        // SSE reconstruction, etc.) the gateway still emits structurally
+        // valid SSE — but the user-visible "end slot" disappears. Verify the
+        // summary text actually rides along on the finalization frames.
+        //
+        // We don't pin the exact summary string (it depends on style/locale),
+        // but we DO require ALL three finalization frames to carry a longer
+        // `text` than the original "hi" payload so the test can't pass on a
+        // technicality if rendering silently strips the suffix.
+        let blocks_out: Vec<&str> = all_emitted.split("\n\n").collect();
+        let parse_data = |block: &str| -> Option<Value> {
+            block
+                .lines()
+                .find_map(|l| l.strip_prefix("data:"))
+                .map(str::trim)
+                .and_then(|d| serde_json::from_str::<Value>(d).ok())
+        };
+        let find_data_for = |kind: &str| -> Value {
+            blocks_out
+                .iter()
+                .find_map(|b| {
+                    let v = parse_data(b)?;
+                    (v.get("type").and_then(Value::as_str) == Some(kind)).then_some(v)
+                })
+                .unwrap_or_else(|| panic!("no `{kind}` event in:\n{all_emitted}"))
+        };
+
+        let text_done = find_data_for("response.output_text.done");
+        let part_done = find_data_for("response.content_part.done");
+        let item_done = find_data_for("response.output_item.done");
+
+        let text_done_text = text_done
+            .pointer("/text")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            text_done_text.len() > "hi".len(),
+            "response.output_text.done lost its end-slot suffix — \
+             `text` is still {text_done_text:?}, summary rendering regressed:\n{text_done}"
+        );
+
+        let part_done_text = part_done
+            .pointer("/part/text")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            part_done_text.len() > "hi".len(),
+            "response.content_part.done lost its end-slot suffix — \
+             `part.text` is still {part_done_text:?}:\n{part_done}"
+        );
+
+        let item_done_text = item_done
+            .pointer("/item/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            item_done_text.len() > "hi".len(),
+            "response.output_item.done lost its end-slot suffix — \
+             item content text is still {item_done_text:?}:\n{item_done}"
+        );
+
+        // And all three should agree: same suffix appended to each.
+        let suffix = &text_done_text["hi".len()..];
+        assert!(
+            !suffix.is_empty(),
+            "end-slot suffix is empty; render_summary likely returned None"
+        );
+        assert!(
+            part_done_text.ends_with(suffix),
+            "content_part.done suffix ({:?}) doesn't match output_text.done suffix ({:?})",
+            &part_done_text[part_done_text.len().saturating_sub(suffix.len())..],
+            suffix
+        );
+        assert!(
+            item_done_text.ends_with(suffix),
+            "output_item.done suffix ({:?}) doesn't match output_text.done suffix ({:?})",
+            &item_done_text[item_done_text.len().saturating_sub(suffix.len())..],
+            suffix
+        );
+    }
+
+    /// Pass-through case: when a block does NOT trigger buffering or flush
+    /// (e.g. `response.output_text.delta`), the function should return None
+    /// and the caller forwards the upstream block unchanged. Also smoke-test
+    /// that an arbitrary unchanged block stays well-formed.
+    #[test]
+    fn unrelated_block_is_passed_through_unchanged() {
+        let mut acc = SummaryAccumulator::new(CodexSummaryConfig::default(), CodexClientKind::Cli);
+        let block = "event: response.output_text.delta\n\
+                     data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_1\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\"}";
+        assert!(
+            acc.maybe_append_to_sse_block(block, 100).is_none(),
+            "deltas should pass through untouched"
+        );
+        assert_blocks_well_formed(block);
+    }
+
+    /// The validator itself must reject the historical broken pattern,
+    /// otherwise it would silently pass the very regression it's meant to
+    /// catch. This locks in the meaning of "well-formed".
+    #[test]
+    #[should_panic(expected = "stacks 2 `data:` lines under one event")]
+    fn validator_rejects_stacked_data_lines() {
+        let broken = "event: response.completed\n\
+                      data: {\"type\":\"response.output_item.done\"}\n\
+                      data: {\"type\":\"response.completed\"}";
+        assert_blocks_well_formed(broken);
+    }
+
+    #[test]
+    #[should_panic(expected = "orphan `event:")]
+    fn validator_rejects_orphan_event_line() {
+        let broken = "event: response.output_text.done";
+        assert_blocks_well_formed(broken);
+    }
+
+    /// Regression for the multi-turn "end slot disappears" bug.
+    ///
+    /// In a tool-using Codex turn the SAME `turn_id` is reused across multiple
+    /// HTTP requests (first request returns a `function_call`, second request
+    /// returns the final assistant message). The per-turn summary slot is a
+    /// state-wide dedupe lock: whoever calls `reserve_summary_slot` first
+    /// wins, and every subsequent accumulator silently flushes its buffered
+    /// finalization frames WITHOUT injecting the summary.
+    ///
+    /// Bug: the tool-call request had no message-type item to attach the
+    /// summary to, but still grabbed the slot — so the follow-up text
+    /// request, which DID have a message, found the slot taken and emitted
+    /// an end-slot-less response. Net effect: end slot vanishes on every
+    /// tool-using turn.
+    ///
+    /// This test pins down the invariant: in a 2-request turn, the request
+    /// that actually carries the assistant message MUST end up with the
+    /// summary appended. It does NOT matter which request "wins" the slot,
+    /// only that the message-carrying request wins.
+    #[test]
+    fn end_slot_survives_multi_request_turn_with_tool_call() {
+        let state = AppState::init(
+            vibe_db::Db::memory().expect("db"),
+            crate::config::Config::default(),
+            15917,
+        )
+        .expect("state");
+
+        // Request 1: tool-call only. No message item, just a function_call
+        // output_item.done. This is what triggers the bug — the reserve
+        // would fire here even though there's nothing to attach to.
+        let mut tool_call_acc = SummaryAccumulator::new_for_turn(
+            CodexSummaryConfig::default(),
+            CodexClientKind::Cli,
+            Some(state.clone()),
+            Some("turn-abc".into()),
+            None,
+            "gpt-5.4".into(),
+        );
+        // Seed usage so render_summary doesn't bail on empty metrics.
+        tool_call_acc.usage = Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Usage::default()
+        };
+        let tool_call_blocks = [
+            "event: response.output_item.done\n\
+             data: {\"type\":\"response.output_item.done\",\"response_id\":\"resp_1\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"name\":\"shell\",\"arguments\":\"{}\",\"call_id\":\"call_1\"}}",
+            "event: response.completed\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_1\"}],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120}}}",
+        ];
+        for block in &tool_call_blocks {
+            let _ = tool_call_acc.maybe_append_to_sse_block(block, 1_000);
+        }
+
+        // Request 2: same turn_id. Final assistant message — this is the one
+        // the user actually reads. The summary MUST land here.
+        let mut text_acc = SummaryAccumulator::new_for_turn(
+            CodexSummaryConfig::default(),
+            CodexClientKind::Cli,
+            Some(state.clone()),
+            Some("turn-abc".into()),
+            None,
+            "gpt-5.4".into(),
+        );
+        text_acc.usage = Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Usage::default()
+        };
+        let text_blocks = [
+            "event: response.output_text.done\n\
+             data: {\"type\":\"response.output_text.done\",\"response_id\":\"resp_2\",\"item_id\":\"msg_2\",\"output_index\":0,\"content_index\":0,\"text\":\"final answer\"}",
+            "event: response.content_part.done\n\
+             data: {\"type\":\"response.content_part.done\",\"response_id\":\"resp_2\",\"item_id\":\"msg_2\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"final answer\"}}",
+            "event: response.output_item.done\n\
+             data: {\"type\":\"response.output_item.done\",\"response_id\":\"resp_2\",\"output_index\":0,\"item\":{\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"final answer\"}]}}",
+            "event: response.completed\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"output\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120}}}",
+        ];
+        let mut combined = String::new();
+        for block in &text_blocks {
+            let emitted = text_acc
+                .maybe_append_to_sse_block(block, 2_000)
+                .unwrap_or_else(|| block.to_string());
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&emitted);
+        }
+
+        // Parse the emitted output_item.done and verify the assistant
+        // message text was extended (end-slot suffix appended). "final
+        // answer" is 12 chars; anything longer means the summary made it.
+        let mut found_message_with_suffix = false;
+        for block in combined.split("\n\n") {
+            let data = block
+                .lines()
+                .find_map(|l| l.strip_prefix("data:").map(str::trim));
+            let Some(data) = data else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if v.get("type").and_then(Value::as_str) != Some("response.output_item.done") {
+                continue;
+            }
+            let item_text = v
+                .pointer("/item/content/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if v.pointer("/item/type").and_then(Value::as_str) == Some("message")
+                && item_text.len() > "final answer".len()
+            {
+                found_message_with_suffix = true;
+                break;
+            }
+        }
+        assert!(
+            found_message_with_suffix,
+            "end slot disappeared on the message-carrying request of a multi-step \
+             tool-using turn — the per-turn summary slot was likely consumed by an \
+             earlier request that had no message to attach to. Emitted output:\n{combined}"
+        );
     }
 }

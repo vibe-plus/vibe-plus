@@ -95,6 +95,8 @@ pub struct AppState {
     pub claude_summary_dedupe: Arc<Mutex<HashMap<String, Instant>>>,
     pub codex_transport: Arc<CodexTransportCounters>,
     pub codex_sticky_routes: Arc<Mutex<HashMap<String, (CodexStickyRoute, Instant)>>>,
+    /// Accumulated USD cost per thread_id (keyed by thread_id, TTL 30 min).
+    pub codex_thread_costs: Arc<Mutex<HashMap<String, (f64, Instant)>>>,
     pub dashboard_stats_publish_pending: Arc<AtomicBool>,
     pub providers_overview_publish_pending: Arc<AtomicBool>,
     codex_summary_config: Arc<Mutex<CodexSummaryConfig>>,
@@ -129,6 +131,7 @@ impl AppState {
             claude_summary_dedupe: Arc::new(Mutex::new(HashMap::new())),
             codex_transport: Arc::new(CodexTransportCounters::default()),
             codex_sticky_routes: Arc::new(Mutex::new(HashMap::new())),
+            codex_thread_costs: Arc::new(Mutex::new(HashMap::new())),
             dashboard_stats_publish_pending: Arc::new(AtomicBool::new(false)),
             providers_overview_publish_pending: Arc::new(AtomicBool::new(false)),
         })
@@ -227,6 +230,20 @@ impl AppState {
         true
     }
 
+    /// Read the current sticky route without updating `last_seen` (non-destructive peek).
+    pub fn peek_codex_sticky_route(&self, key: &str, ttl: Duration) -> Option<CodexStickyRoute> {
+        let now = Instant::now();
+        let routes = self
+            .codex_sticky_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (route, last_seen) = routes.get(key)?;
+        if now.duration_since(*last_seen) > ttl {
+            return None;
+        }
+        Some(route.clone())
+    }
+
     pub fn get_codex_sticky_route(&self, key: &str, ttl: Duration) -> Option<CodexStickyRoute> {
         let now = Instant::now();
         let mut routes = self
@@ -255,5 +272,35 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         routes.remove(key);
+    }
+
+    /// Add `delta` USD to the running thread cost, evicting expired entries.
+    /// Returns the new cumulative cost for this thread_id.
+    pub fn add_codex_thread_cost(&self, thread_id: &str, delta: f64) -> f64 {
+        let ttl = Duration::from_secs(30 * 60);
+        let now = Instant::now();
+        let mut map = self
+            .codex_thread_costs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        map.retain(|_, (_, ts)| now.duration_since(*ts) <= ttl);
+        let entry = map.entry(thread_id.to_string()).or_insert((0.0, now));
+        entry.0 += delta;
+        entry.1 = now;
+        entry.0
+    }
+
+    /// Read cumulative cost for this thread_id without updating the timestamp.
+    pub fn get_codex_thread_cost(&self, thread_id: &str) -> f64 {
+        let ttl = Duration::from_secs(30 * 60);
+        let now = Instant::now();
+        let map = self
+            .codex_thread_costs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        map.get(thread_id)
+            .filter(|(_, ts)| now.duration_since(*ts) <= ttl)
+            .map(|(cost, _)| *cost)
+            .unwrap_or(0.0)
     }
 }

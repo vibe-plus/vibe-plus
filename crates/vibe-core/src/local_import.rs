@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use url::Url;
 use vibe_protocol::{CredentialInput, ModelAlias, ProviderInput, ProviderKind};
-use rusqlite;
 
 fn is_localhost_url(url: &str) -> bool {
     let s = url.trim_start_matches("http://").trim_start_matches("https://");
@@ -1360,6 +1359,284 @@ mod tests {
     #[test]
     fn scan_returns_vec() {
         let _ = scan();
+    }
+
+    // -----------------------------------------------------------------------
+    // is_localhost_url
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn localhost_url_patterns() {
+        assert!(is_localhost_url("http://127.0.0.1:8317/api/provider/kimi"));
+        assert!(is_localhost_url("http://localhost/v1"));
+        assert!(is_localhost_url("http://[::1]:8080/"));
+        assert!(is_localhost_url("http://127.0.0.2:9000")); // any 127.x
+        assert!(!is_localhost_url("https://api.anthropic.com"));
+        assert!(!is_localhost_url("https://api.deepseek.com"));
+        assert!(!is_localhost_url("https://192.168.1.1/v1")); // LAN, not loopback
+    }
+
+    // -----------------------------------------------------------------------
+    // scan_ccs_db — unit tests against an in-memory SQLite database
+    // -----------------------------------------------------------------------
+
+    fn make_test_db(rows: &[(&str, &str, &str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cc-switch.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE providers (
+                id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                settings_config TEXT NOT NULL,
+                PRIMARY KEY (id, app_type)
+            );",
+        )
+        .unwrap();
+        for (id, app_type, name, cfg) in rows {
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config) VALUES (?1,?2,?3,?4)",
+                rusqlite::params![id, app_type, name, cfg],
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    fn scan_test_db(dir: &tempfile::TempDir) -> Vec<LocalCandidate> {
+        let db_path = dir.path().join("cc-switch.db");
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, app_type, name, settings_config FROM providers")
+            .unwrap();
+        let mut out = Vec::new();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap();
+        for (id, app_type, name, settings_json) in rows.filter_map(|r| r.ok()) {
+            let Ok(cfg) = serde_json::from_str::<Value>(&settings_json) else {
+                continue;
+            };
+            if let Some(c) = ccs_db_row_to_candidate(&id, &app_type, &name, &cfg, &db_path) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn ccs_db_claude_imports_real_upstream() {
+        let cfg = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://token-plan-cn.example.com/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "tp-secretkey1234567890abcdef",
+                "ANTHROPIC_MODEL": "mimo-v2.5-pro",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-v2.5-sonnet"
+            }
+        });
+        let dir = make_test_db(&[("id-1", "claude", "MiMo", &cfg.to_string())]);
+        let candidates = scan_test_db(&dir);
+
+        assert_eq!(candidates.len(), 1);
+        let c = &candidates[0];
+        assert_eq!(c.kind, ProviderKind::Anthropic);
+        assert_eq!(c.base_url, "https://token-plan-cn.example.com/anthropic");
+        assert!(c.auth_ref.as_deref().unwrap().starts_with("literal:tp-"));
+        assert!(c.default_aliases.iter().any(|a| a.alias == "sonnet"));
+        assert!(c.default_aliases.iter().any(|a| a.alias == "default"));
+    }
+
+    #[test]
+    fn ccs_db_claude_skips_localhost_proxy() {
+        // This is the "ccs-internal-managed" pattern — CC Switch's own local proxy.
+        // Must NOT be imported as a provider.
+        let cfg = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:8317/api/provider/kimi",
+                "ANTHROPIC_AUTH_TOKEN": "ccs-internal-managed",
+                "ANTHROPIC_MODEL": "kimi-k2.5"
+            }
+        });
+        let dir = make_test_db(&[("kimi-id", "claude", "Kimi", &cfg.to_string())]);
+        let candidates = scan_test_db(&dir);
+        assert!(candidates.is_empty(), "localhost proxy must not be imported");
+    }
+
+    #[test]
+    fn ccs_db_claude_skips_missing_base_url() {
+        // "Claude Official" entry with empty env — nothing to import.
+        let cfg = serde_json::json!({ "env": {} });
+        let dir = make_test_db(&[("claude-official", "claude", "Claude Official", &cfg.to_string())]);
+        let candidates = scan_test_db(&dir);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn ccs_db_codex_imports_with_toml_config() {
+        let toml_config = r#"
+model_provider = "custom"
+model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://free.example.cc/v1"
+"#;
+        let cfg = serde_json::json!({
+            "auth": { "OPENAI_API_KEY": "sk-abcdef1234567890abcdef1234567890" },
+            "config": toml_config
+        });
+        let dir = make_test_db(&[("codex-1", "codex", "享受", &cfg.to_string())]);
+        let candidates = scan_test_db(&dir);
+
+        assert_eq!(candidates.len(), 1);
+        let c = &candidates[0];
+        assert_eq!(c.kind, ProviderKind::OpenaiResponses);
+        assert_eq!(c.base_url, "https://free.example.cc/v1");
+        assert!(c.auth_ref.as_deref().unwrap().starts_with("literal:sk-"));
+        assert!(c.default_aliases.iter().any(|a| a.alias == "default" && a.upstream_model == "gpt-5.4"));
+    }
+
+    #[test]
+    fn ccs_db_codex_skips_localhost_base_url() {
+        let toml_config = r#"
+model_provider = "local"
+[model_providers.local]
+base_url = "http://localhost:11434/v1"
+wire_api = "responses"
+requires_openai_auth = false
+"#;
+        let cfg = serde_json::json!({
+            "auth": { "OPENAI_API_KEY": "sk-fake" },
+            "config": toml_config
+        });
+        let dir = make_test_db(&[("local-1", "codex", "LocalModel", &cfg.to_string())]);
+        let candidates = scan_test_db(&dir);
+        assert!(candidates.is_empty(), "localhost codex provider must be skipped");
+    }
+
+    #[test]
+    fn ccs_db_codex_skips_missing_api_key() {
+        let toml_config = r#"
+model_provider = "custom"
+[model_providers.custom]
+base_url = "https://api.example.com"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        // auth block present but OPENAI_API_KEY is empty
+        let cfg = serde_json::json!({
+            "auth": { "OPENAI_API_KEY": "" },
+            "config": toml_config
+        });
+        let dir = make_test_db(&[("no-key", "codex", "NoKey", &cfg.to_string())]);
+        let candidates = scan_test_db(&dir);
+        assert!(candidates.is_empty(), "entry without API key must be skipped");
+    }
+
+    #[test]
+    fn ccs_db_gemini_skips_official_entry_without_key() {
+        let cfg = serde_json::json!({ "env": {}, "config": {} });
+        let dir = make_test_db(&[("gemini-official", "gemini", "Google Official", &cfg.to_string())]);
+        let candidates = scan_test_db(&dir);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn ccs_db_multiple_providers_imported() {
+        let claude_cfg = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.kimi.example.com/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "tp-kimi-secret-0000000000000000",
+                "ANTHROPIC_MODEL": "kimi-k2"
+            }
+        });
+        let toml_config = r#"
+model_provider = "custom"
+model = "gpt-5-codex"
+[model_providers.custom]
+base_url = "https://api.codex.example.com"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let codex_cfg = serde_json::json!({
+            "auth": { "OPENAI_API_KEY": "sk-codex-secret-0000000000000000" },
+            "config": toml_config
+        });
+        let dir = make_test_db(&[
+            ("kimi-id", "claude", "Kimi", &claude_cfg.to_string()),
+            ("codex-id", "codex", "MyCodex", &codex_cfg.to_string()),
+            // Official entries with no keys — should be skipped
+            ("claude-official", "claude", "Claude Official", r#"{"env":{}}"#),
+        ]);
+        let candidates = scan_test_db(&dir);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|c| c.kind == ProviderKind::Anthropic));
+        assert!(candidates.iter().any(|c| c.kind == ProviderKind::OpenaiResponses));
+    }
+
+    // -----------------------------------------------------------------------
+    // ccs_profile file scan — localhost filter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ccs_profile_localhost_filtered_from_file_scan() {
+        // Simulate a CCS profile pointing to CC Switch's local proxy.
+        // ccs_profile_to_candidate returns it (used for bundle imports),
+        // but scan_ccs_profiles must filter it out.
+        let profile = CcsProfileCandidate {
+            client: "ccs:test".into(),
+            name: "test".into(),
+            source_path: std::path::PathBuf::from("/tmp/test.settings.json"),
+            settings: serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8317/api/provider/test",
+                    "ANTHROPIC_AUTH_TOKEN": "ccs-internal-managed"
+                }
+            }),
+        };
+        // ccs_profile_to_candidate itself still converts it (used by bundle/deeplink)
+        let candidate = ccs_profile_to_candidate(&profile);
+        assert!(candidate.is_some(), "ccs_profile_to_candidate must not filter localhost");
+
+        // But the file scan filter should reject it
+        let c = candidate.unwrap();
+        assert!(is_localhost_url(&c.base_url), "should be detected as localhost");
+    }
+
+    // -----------------------------------------------------------------------
+    // cc_switch_request_to_plan — haiku/sonnet/opus aliases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cc_switch_deeplink_haiku_sonnet_opus_aliases() -> anyhow::Result<()> {
+        let url = "ccswitch://v1/import?resource=provider&app=claude&name=Test\
+            &endpoint=https%3A%2F%2Fapi.example.com%2Fanthropic\
+            &model=test-default\
+            &haikuModel=test-haiku\
+            &sonnetModel=test-sonnet\
+            &opusModel=test-opus";
+        let plan = cc_switch_deeplink_to_plan(url)?;
+        let aliases = &plan.provider.model_aliases;
+        assert!(aliases.iter().any(|a| a.alias == "default" && a.upstream_model == "test-default"));
+        assert!(aliases.iter().any(|a| a.alias == "haiku" && a.upstream_model == "test-haiku"));
+        assert!(aliases.iter().any(|a| a.alias == "sonnet" && a.upstream_model == "test-sonnet"));
+        assert!(aliases.iter().any(|a| a.alias == "opus" && a.upstream_model == "test-opus"));
+        Ok(())
     }
 
     #[test]

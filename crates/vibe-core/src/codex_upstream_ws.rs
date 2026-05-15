@@ -27,6 +27,8 @@ pub enum UpstreamWsOutcome {
 pub struct StatusDecision {
     pub should_show_status: bool,
     pub turn_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub is_failover: bool,
 }
 
 pub async fn try_forward_official_codex_ws(
@@ -37,6 +39,12 @@ pub async fn try_forward_official_codex_ws(
     status_decision: StatusDecision,
 ) -> UpstreamWsOutcome {
     let request_body = transforms::force_responses_stream_true(&body_bytes);
+    // Peek at the existing sticky route before routing so we can detect failovers.
+    let sticky_key_pre =
+        forward::codex_sticky_key(Wire::OpenaiResponses, &ws_headers, &request_body);
+    let prev_sticky = sticky_key_pre
+        .as_deref()
+        .and_then(|k| state.peek_codex_sticky_route(k, std::time::Duration::from_secs(30 * 60)));
     let prepared = match forward::prepare_forward_once(
         &state,
         Wire::OpenaiResponses,
@@ -54,6 +62,12 @@ pub async fn try_forward_official_codex_ws(
             return UpstreamWsOutcome::Forwarded;
         }
     };
+    // Failover: a previous sticky route existed and the new pick is different.
+    let is_failover = status_decision.is_failover
+        || prev_sticky.as_ref().map_or(false, |prev| {
+            prev.provider_id != prepared.provider.id
+                || prev.credential_id != prepared.credential_id
+        });
 
     if !router::provider_is_chatgpt_codex_official(&prepared.provider) {
         return UpstreamWsOutcome::Fallback(body_bytes);
@@ -247,6 +261,8 @@ pub async fn try_forward_official_codex_ws(
         prepared.log_ctx.codex_client_kind,
         Some(state.clone()),
         status_decision.turn_id.clone(),
+        status_decision.thread_id.clone(),
+        prepared.upstream_model.clone(),
     );
     let mut current_response_id = response_id.clone();
     let mut terminal_seen = false;
@@ -271,6 +287,7 @@ pub async fn try_forward_official_codex_ws(
                         status_decision.should_show_status,
                         status_decision.turn_id.as_deref(),
                         &state,
+                        is_failover,
                     );
                 }
                 append_trace(&mut upstream_trace, &text);
@@ -508,6 +525,7 @@ struct CodexStatusInjection {
     ttfs_ms: i64,
     emitted: bool,
     suppress_status: bool,
+    is_failover: bool,
 }
 
 impl CodexStatusInjection {
@@ -517,6 +535,7 @@ impl CodexStatusInjection {
         should_show_status: bool,
         turn_id: Option<&str>,
         state: &AppState,
+        is_failover: bool,
     ) -> Option<Self> {
         visual.map(|visual| {
             let suppress_status = !state.codex_route_status_enabled()
@@ -527,6 +546,7 @@ impl CodexStatusInjection {
                 ttfs_ms,
                 emitted: false,
                 suppress_status,
+                is_failover,
             }
         })
     }
@@ -539,6 +559,15 @@ impl CodexStatusInjection {
         let mut frames = Vec::new();
         if let Some(event) = codex_visual::coding_plan_rate_limit_event(&self.visual) {
             frames.push(event);
+        }
+        if let Some(event) = codex_visual::token_plan_rate_limit_event(&self.visual) {
+            frames.push(event);
+        }
+        if self.is_failover {
+            frames.extend(codex_visual::failover_announcement_events(
+                &self.visual,
+                response_id,
+            ));
         }
         if !self.suppress_status {
             frames.extend(codex_visual::status_message_events(

@@ -232,6 +232,13 @@ pub struct CodexSummaryConfig {
     pub show_latency: bool,
     #[serde(default)]
     pub show_first_token: bool,
+    /// Show estimated USD cost per turn. Only accurate for models in the
+    /// built-in pricing table; silently omitted for unknown models.
+    #[serde(default)]
+    pub show_cost: bool,
+    /// Show cumulative USD cost for the current thread (all turns).
+    #[serde(default = "default_true")]
+    pub show_thread_cost: bool,
     #[serde(default = "default_speed_decimal_places")]
     pub speed_decimal_places: u8,
     #[serde(default = "default_summary_separator")]
@@ -292,6 +299,10 @@ pub struct CodexSummaryLabelOverrides {
     pub latency: Option<String>,
     #[serde(default)]
     pub first_token: Option<String>,
+    #[serde(default)]
+    pub cost: Option<String>,
+    #[serde(default)]
+    pub thread_cost: Option<String>,
 }
 
 impl Default for CodexSummaryConfig {
@@ -304,6 +315,8 @@ impl Default for CodexSummaryConfig {
             show_cache: true,
             show_latency: false,
             show_first_token: false,
+            show_cost: true,
+            show_thread_cost: true,
             speed_decimal_places: default_speed_decimal_places(),
             separator: default_summary_separator(),
             label_overrides: CodexSummaryLabelOverrides::default(),
@@ -590,6 +603,8 @@ fn default_claude_summary_config() -> CodexSummaryConfig {
         show_cache: true,
         show_latency: false,
         show_first_token: false,
+        show_cost: false,
+        show_thread_cost: true,
         speed_decimal_places: default_speed_decimal_places(),
         separator: default_summary_separator(),
         label_overrides: CodexSummaryLabelOverrides::default(),
@@ -752,7 +767,7 @@ style = "ascii_plain"
         assert!(!reparsed.claude.summary.clients.app.enabled);
         assert_eq!(
             reparsed.claude.summary.clients.cli.style,
-            CodexSummaryStyle::ChineseLight
+            CodexSummaryStyle::EnglishLight
         );
         assert_eq!(
             reparsed.claude.summary.clients.unknown.style,

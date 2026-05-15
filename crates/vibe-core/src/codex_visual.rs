@@ -173,6 +173,113 @@ pub fn status_message_events(
     vec![added, done]
 }
 
+/// Synthesize a `codex.rate_limits` event from a token-plan snapshot so
+/// third-party APIs (Kimi, DeepSeek, Qwen …) render a native quota bar in the
+/// Codex app even though they don't emit official `x-codex-*` response headers.
+///
+/// Only fires for token plans; coding plans and PAYG are handled by
+/// `coding_plan_rate_limit_event`.
+pub fn token_plan_rate_limit_event(ctx: &CodexVisualContext) -> Option<String> {
+    if !is_token_plan(ctx.credential_plan_type.as_deref()) {
+        return None;
+    }
+    let plan = ctx.token_plan.as_ref()?;
+    if plan.limit <= 0 || plan.remaining < 0 {
+        return None;
+    }
+    let used_percent =
+        ((plan.limit - plan.remaining) as f64 / plan.limit as f64 * 100.0).clamp(0.0, 100.0);
+    let limit_name = ctx
+        .credential_label
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&ctx.provider_name);
+    Some(
+        serde_json::json!({
+            "type": "codex.rate_limits",
+            "metered_limit_name": limit_id(ctx),
+            "limit_name": limit_name,
+            "plan_type": "token",
+            "rate_limits": {
+                "primary": {
+                    "used_percent": used_percent,
+                    "window_minutes": null,
+                    "reset_at": null
+                }
+            },
+            "code_review_rate_limits": null,
+            "credits": null,
+            "promo": null
+        })
+        .to_string(),
+    )
+}
+
+/// Build the pair of Responses-API events that announce a provider failover.
+///
+/// Rendered in orange (warning colour) inside the Codex App using the same
+/// LaTeX math block pattern as the route-status message, so it visually
+/// distinguishes itself from regular assistant output without being intrusive.
+pub fn failover_announcement_events(
+    ctx: &CodexVisualContext,
+    response_id: &str,
+) -> Vec<String> {
+    let item_id = format!(
+        "vibe_failover_{}",
+        response_id.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+    );
+    // Show "Provider · Credential" when the credential label is distinct from the
+    // provider name (multiple credentials on same provider). Otherwise just provider.
+    let cred_label = ctx
+        .credential_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(ctx.provider_name.trim()));
+    let slot = if let Some(label) = cred_label {
+        format!(
+            "\\textsf{{{}}}\\;\\cdot\\;\\textsf{{{}}}",
+            latex_text(&ctx.provider_name),
+            latex_text(label)
+        )
+    } else {
+        format!("\\textsf{{{}}}", latex_text(&ctx.provider_name))
+    };
+    let text = format!(
+        "$$\n\\scriptsize\n\\color{{#f97316}}{{\\textsf{{Vibe+}}\\,\\mid\\,\\textsf{{Switched to}}\\;{}\\;\\cdot\\;\\textsf{{primary quota exhausted}}}}\n$$",
+        slot
+    );
+    let item = serde_json::json!({
+        "id": item_id,
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}]
+    });
+    let added = serde_json::json!({
+        "type": "response.output_item.added",
+        "response_id": response_id,
+        "output_index": FAILOVER_OUTPUT_INDEX,
+        "item": {
+            "id": item_id,
+            "type": "message",
+            "role": "assistant",
+            "content": []
+        }
+    })
+    .to_string();
+    let done = serde_json::json!({
+        "type": "response.output_item.done",
+        "response_id": response_id,
+        "output_index": FAILOVER_OUTPUT_INDEX,
+        "item": item
+    })
+    .to_string();
+    vec![added, done]
+}
+
+/// Output index for the failover announcement — placed just below the route
+/// status (9999) so it appears right after without colliding.
+const FAILOVER_OUTPUT_INDEX: u32 = 9998;
+
 pub fn coding_plan_rate_limit_event(ctx: &CodexVisualContext) -> Option<String> {
     if !is_coding_plan(
         ctx.credential_plan_type.as_deref(),

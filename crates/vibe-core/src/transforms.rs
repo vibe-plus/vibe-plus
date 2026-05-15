@@ -210,7 +210,11 @@ fn is_vibe_codex_status_message(item: &serde_json::Value) -> bool {
     if item
         .get("id")
         .and_then(|id| id.as_str())
-        .map(|id| id.starts_with("vibe_route_") || id.starts_with("vibe_summary_"))
+        .map(|id| {
+            id.starts_with("vibe_route_")
+                || id.starts_with("vibe_summary_")
+                || id.starts_with("vibe_failover_")
+        })
         .unwrap_or(false)
     {
         return true;
@@ -254,13 +258,15 @@ fn is_vibe_codex_formula_status_text(text: &str) -> bool {
         || text.contains("\\textsf{cache}")
         || text.contains("\\mathrm{cache}")
         || text.contains("\\textsf{lat}")
-        || text.contains("\\mathrm{lat}");
+        || text.contains("\\mathrm{lat}")
+        || text.contains("\\textsf{cost}")
+        || text.contains("\\mathrm{cost}");
     (has_vibe_marker || has_summary_color) && has_metric
 }
 
 fn is_vibe_codex_summary_plain_text(text: &str) -> bool {
     let body = text.strip_prefix('↯').map(str::trim).unwrap_or(text);
-    let keys = ["speed", "in", "out", "cache", "lat"];
+    let keys = ["speed", "in", "out", "cache", "lat", "cost"];
     keys.iter().any(|key| {
         body.strip_prefix(key)
             .and_then(|rest| rest.chars().next())
@@ -448,6 +454,7 @@ pub fn responses_to_chat(body: &[u8]) -> Bytes {
         "user",
         "seed",
         "response_format",
+        "reasoning_effort",
     ] {
         if let Some(v) = obj.get(*key) {
             chat.insert(key.to_string(), v.clone());
@@ -1330,12 +1337,111 @@ pub fn codex_response_proxy_fault_event(
 }
 
 // ---------------------------------------------------------------------------
+// reasoning_effort translation
+// ---------------------------------------------------------------------------
+
+/// Translate `reasoning_effort` (OpenAI Responses API) into provider-specific
+/// thinking parameters for DeepSeek and Qwen Chat Completions bodies.
+///
+/// - DeepSeek (r1 / reasoner variants): `{"thinking": {"type": "enabled", "budget_tokens": N}}`
+/// - Qwen (qwq / thinking variants):    `{"enable_thinking": true}`
+/// - All others (o-series, gpt-5, etc.): pass through unchanged.
+///
+/// Only mutates the body when `reasoning_effort` is present and the model matches a
+/// provider that needs translation. Returns `None` when no change is needed.
+pub fn translate_reasoning_effort(body: &[u8], upstream_model: &str) -> Option<Bytes> {
+    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = v.as_object_mut()?;
+    let effort_val = obj.remove("reasoning_effort")?;
+    let effort = effort_val.as_str().unwrap_or("medium");
+
+    let m = upstream_model.to_ascii_lowercase();
+    let m = if let Some(pos) = m.rfind('/') { &m[pos + 1..] } else { &m };
+
+    if m.starts_with("deepseek-r1")
+        || m.contains("deepseek-reasoner")
+        || m.starts_with("deepseek-prover")
+    {
+        let budget = match effort {
+            "low" => 4_096i64,
+            "high" => 32_768,
+            _ => 8_192, // medium
+        };
+        obj.insert(
+            "thinking".into(),
+            serde_json::json!({"type": "enabled", "budget_tokens": budget}),
+        );
+    } else if m.starts_with("qwq") || m.contains("-thinking") || m.starts_with("qwen3") {
+        if effort == "low" {
+            obj.insert("enable_thinking".into(), serde_json::Value::Bool(false));
+        } else {
+            obj.insert("enable_thinking".into(), serde_json::Value::Bool(true));
+        }
+    } else {
+        // Not a provider that needs translation — put effort back.
+        obj.insert("reasoning_effort".into(), effort_val);
+        return None;
+    }
+
+    serde_json::to_vec(&v).ok().map(Bytes::from)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translate_reasoning_deepseek_r1_medium() {
+        let body = br#"{"model":"deepseek-r1","messages":[],"reasoning_effort":"medium"}"#;
+        let out = translate_reasoning_effort(body, "deepseek-r1").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(v.get("reasoning_effort").is_none());
+        assert_eq!(v["thinking"]["type"], "enabled");
+        assert_eq!(v["thinking"]["budget_tokens"], 8_192);
+    }
+
+    #[test]
+    fn translate_reasoning_deepseek_high_budget() {
+        let body = br#"{"model":"deepseek-r1","messages":[],"reasoning_effort":"high"}"#;
+        let out = translate_reasoning_effort(body, "deepseek-r1").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["thinking"]["budget_tokens"], 32_768);
+    }
+
+    #[test]
+    fn translate_reasoning_qwen_thinking_enabled() {
+        let body = br#"{"model":"qwq-32b","messages":[],"reasoning_effort":"high"}"#;
+        let out = translate_reasoning_effort(body, "qwq-32b").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(v.get("reasoning_effort").is_none());
+        assert_eq!(v["enable_thinking"], true);
+    }
+
+    #[test]
+    fn translate_reasoning_qwen_low_disables_thinking() {
+        let body = br#"{"model":"qwq-32b","messages":[],"reasoning_effort":"low"}"#;
+        let out = translate_reasoning_effort(body, "qwq-32b").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["enable_thinking"], false);
+    }
+
+    #[test]
+    fn translate_reasoning_openai_passthrough() {
+        let body = br#"{"model":"gpt-4o","messages":[],"reasoning_effort":"medium"}"#;
+        let out = translate_reasoning_effort(body, "gpt-4o");
+        assert!(out.is_none(), "should not translate for gpt-4o");
+    }
+
+    #[test]
+    fn translate_reasoning_no_effort_returns_none() {
+        let body = br#"{"model":"deepseek-r1","messages":[]}"#;
+        let out = translate_reasoning_effort(body, "deepseek-r1");
+        assert!(out.is_none());
+    }
 
     #[test]
     fn strip_ws_envelope_removes_type() {

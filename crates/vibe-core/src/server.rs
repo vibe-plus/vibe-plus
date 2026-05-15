@@ -795,6 +795,8 @@ async fn codex_responses_handler(
         let should_show_status = transforms::responses_input_ends_with_user_message(&stripped);
         let turn_id = codex_summary::turn_id_from_request(&body)
             .or_else(|| codex_summary::turn_id_from_request(&stripped));
+        let thread_id = codex_summary::thread_id_from_request(&body)
+            .or_else(|| codex_summary::thread_id_from_request(&stripped));
         let request_started_instant = Instant::now();
         let upstream = forward::forward(
             state.clone(),
@@ -811,6 +813,7 @@ async fn codex_responses_handler(
             request_started_instant,
             should_show_status,
             turn_id,
+            thread_id,
         )
         .await
     }
@@ -1035,6 +1038,7 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(
     request_started_instant: Instant,
     should_show_status: bool,
     summary_turn_id: Option<String>,
+    summary_thread_id: Option<String>,
 ) -> Response {
     let (parts, body) = upstream.into_parts();
     let log_row_id = parts
@@ -1094,6 +1098,8 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(
             codex_client_kind,
             Some(state.clone()),
             summary_turn_id,
+            summary_thread_id,
+            visual.as_ref().map(|v| v.upstream_model.clone()).unwrap_or_default(),
         );
         let mut trace_stats = StreamTraceStats::new("sse", "chat_to_responses");
 
@@ -1551,6 +1557,8 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
         let should_show_status = transforms::responses_input_ends_with_user_message(&stripped);
         let turn_id = codex_summary::turn_id_from_request(&body_bytes)
             .or_else(|| codex_summary::turn_id_from_request(&stripped));
+        let thread_id = codex_summary::thread_id_from_request(&body_bytes)
+            .or_else(|| codex_summary::thread_id_from_request(&stripped));
 
         match crate::codex_upstream_ws::try_forward_official_codex_ws(
             &mut socket,
@@ -1560,6 +1568,8 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
             StatusDecision {
                 should_show_status,
                 turn_id: turn_id.clone(),
+                thread_id: thread_id.clone(),
+                is_failover: false,
             },
         )
         .await
@@ -1644,6 +1654,8 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
             codex_client_kind,
             Some(state.clone()),
             turn_id.clone(),
+            thread_id.clone(),
+            visual.as_ref().map(|v| v.upstream_model.clone()).unwrap_or_default(),
         );
 
         // 5. Non-2xx: emit a Responses-shaped `response.failed` frame so Codex CLI can

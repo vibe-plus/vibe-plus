@@ -2169,6 +2169,8 @@ pub async fn forward(
                     log_ctx.codex_client_kind,
                     Some(state.clone()),
                     codex_summary::turn_id_from_request(&body),
+                    codex_summary::thread_id_from_request(&body),
+                    upstream_model.clone(),
                 );
                 let completed = serde_json::json!({
                     "type": "response.completed",
@@ -2591,7 +2593,7 @@ fn body_wants_stream(body: &[u8]) -> bool {
 
 /// Extract a sticky routing key from request headers + body.
 /// Only meaningful for the OpenaiResponses wire.
-fn codex_sticky_key(wire: Wire, headers: &HeaderMap, body: &[u8]) -> Option<String> {
+pub(crate) fn codex_sticky_key(wire: Wire, headers: &HeaderMap, body: &[u8]) -> Option<String> {
     if wire != Wire::OpenaiResponses {
         return None;
     }

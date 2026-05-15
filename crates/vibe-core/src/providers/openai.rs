@@ -33,6 +33,13 @@ impl Adapter for OpenaiAdapter {
         let (path, effective_body): (&str, std::borrow::Cow<[u8]>) =
             if wire == Wire::OpenaiResponses && provider.kind == ProviderKind::OpenaiChat {
                 let converted = transforms::responses_to_chat(body);
+                // Translate reasoning_effort → provider-native thinking param when needed.
+                let model_str = serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                let converted = transforms::translate_reasoning_effort(&converted, &model_str)
+                    .unwrap_or(converted);
                 (
                     "/v1/chat/completions",
                     std::borrow::Cow::Owned(converted.to_vec()),
