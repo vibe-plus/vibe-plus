@@ -50,5 +50,18 @@ pub const WEB_COMPAT_API: u32 = 1;
 /// Oldest dashboard compatibility epoch this gateway promises to serve.
 pub const MIN_WEB_COMPAT_API: u32 = 1;
 
-/// Canonical URL of the hosted Web UI (GitHub Pages).
-pub const UI_BASE_URL: &str = "https://vibe-plus.github.io/vibe-plus/ui/";
+/// GitHub Pages project-site root (trailing slash). `version.json` and built assets
+/// are published here (`VITE_BASE_PATH=/vibe-plus/`).
+pub const UI_CDN_BASE_URL: &str = "https://vibe-plus.github.io/vibe-plus/";
+
+/// Alternate CDN mirror for the same project-site layout.
+pub const UI_CDN_MIRROR_BASE_URL: &str = "https://vibe-plus.cheez.tech/vibe-plus/";
+
+/// Dashboard SPA entry (deep link; GitHub Pages `404.html` restores the route in-browser).
+pub const UI_DASHBOARD_URL: &str = "https://vibe-plus.github.io/vibe-plus/ui/overview";
+
+/// Same dashboard entry on the mirror CDN.
+pub const UI_DASHBOARD_MIRROR_URL: &str = "https://vibe-plus.cheez.tech/vibe-plus/ui/overview";
+
+/// Alias kept for asset downloads (`version.json`, dist files).
+pub const UI_BASE_URL: &str = UI_CDN_BASE_URL;

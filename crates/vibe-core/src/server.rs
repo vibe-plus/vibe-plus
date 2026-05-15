@@ -305,7 +305,7 @@ async fn get_meta() -> Json<Meta> {
         cli_version: VERSION.to_string(),
         protocol_version: crate::WEB_COMPAT_API,
         min_web_protocol: crate::MIN_WEB_COMPAT_API,
-        ui_url: crate::UI_BASE_URL.to_string(),
+        ui_url: crate::UI_DASHBOARD_URL.to_string(),
     })
 }
 

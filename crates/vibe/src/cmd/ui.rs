@@ -1,40 +1,51 @@
 use anyhow::Result;
 use std::time::Instant;
+use vibe_core::{UI_CDN_BASE_URL, UI_CDN_MIRROR_BASE_URL, UI_DASHBOARD_MIRROR_URL, UI_DASHBOARD_URL};
 
-const CDN_CANDIDATES: &[(&str, &str)] = &[
-    ("github", "https://vibe-plus.github.io/ui"),
-    ("cheez.tech", "https://vibe-plus.cheez.tech/ui"),
+const CDN_BASES: &[(&str, &str, &str)] = &[
+    ("github", UI_CDN_BASE_URL, UI_DASHBOARD_URL),
+    (
+        "cheez.tech",
+        UI_CDN_MIRROR_BASE_URL,
+        UI_DASHBOARD_MIRROR_URL,
+    ),
 ];
 
-/// Probe each CDN with a HEAD request and return the URL of the fastest one.
-async fn pick_fastest_cdn() -> &'static str {
+/// Probe each CDN `version.json` and return the dashboard URL for the fastest healthy origin.
+async fn pick_dashboard_url() -> &'static str {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(4))
         .build()
         .unwrap_or_default();
 
     let mut handles = Vec::new();
-    for (label, url) in CDN_CANDIDATES {
+    for (label, base, dashboard) in CDN_BASES {
         let c = client.clone();
+        let probe_url = format!("{base}version.json");
         handles.push(tokio::spawn(async move {
             let t = Instant::now();
-            let ok = c.head(*url).send().await.is_ok();
-            (label, url, t.elapsed().as_millis(), ok)
+            let ok = c
+                .head(&probe_url)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            (label, dashboard, t.elapsed().as_millis(), ok)
         }));
     }
 
-    let mut best_url = CDN_CANDIDATES[0].1;
+    let mut best = CDN_BASES[0].2;
     let mut best_ms = u128::MAX;
     for h in handles {
-        if let Ok((label, url, ms, true)) = h.await {
+        if let Ok((label, dashboard, ms, true)) = h.await {
             if ms < best_ms {
                 best_ms = ms;
-                best_url = url;
+                best = dashboard;
             }
             tracing::debug!("CDN probe {label}: {ms}ms");
         }
     }
-    best_url
+    best
 }
 
 fn open_url(url: &str) -> Result<()> {
@@ -49,7 +60,7 @@ fn open_url(url: &str) -> Result<()> {
 
 pub async fn run() -> Result<()> {
     println!("Probing CDN speed…");
-    let url = pick_fastest_cdn().await;
+    let url = pick_dashboard_url().await;
     println!("Opening {url}");
     open_url(url)?;
     Ok(())

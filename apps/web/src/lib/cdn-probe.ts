@@ -1,4 +1,7 @@
-const CANDIDATES = ["https://vibe-plus.github.io", "https://vibe-plus.cheez.tech"] as const;
+const CANDIDATES = [
+  "https://vibe-plus.github.io/vibe-plus",
+  "https://vibe-plus.cheez.tech/vibe-plus",
+] as const;
 
 const CACHE_KEY = "vp-cdn-origin";
 const CACHE_TS_KEY = "vp-cdn-ts";
