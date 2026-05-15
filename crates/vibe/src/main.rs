@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     match cli.command {
         None => cmd::up::run().await,
         Some(Command::Start(a)) => cmd::start::run(a).await,
-        Some(Command::Stop) => cmd::stop::run(),
+        Some(Command::Stop) => cmd::stop::run().await,
         Some(Command::Status) => cmd::status::run().await,
         Some(Command::Statusline) => cmd::statusline::run(),
         Some(Command::Doctor) => cmd::doctor::run().await,
