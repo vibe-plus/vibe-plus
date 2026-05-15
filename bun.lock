@@ -13,7 +13,7 @@
     },
     "apps/web": {
       "name": "web",
-      "version": "0.0.2",
+      "version": "0.0.4",
       "dependencies": {
         "diff": "^9.0.0",
         "pinia": "^2.3.1",
@@ -50,15 +50,15 @@
     },
     "packages/cli-npm": {
       "name": "@vibe-plus/cli",
-      "version": "0.0.3",
+      "version": "0.0.4",
       "bin": {
         "v": "bin/vibe.js",
         "vibe": "bin/vibe.js",
         "vibe-plus": "bin/vibe.js",
       },
       "optionalDependencies": {
-        "@vibe-plus/cli-darwin-arm64": "0.0.3",
-        "@vibe-plus/cli-win32-x64": "0.0.3",
+        "@vibe-plus/cli-darwin-arm64": "0.0.4",
+        "@vibe-plus/cli-win32-x64": "0.0.4",
       },
     },
     "packages/mcp": {

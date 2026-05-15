@@ -1,4 +1,5 @@
 mod cmd;
+mod npm_registry;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -48,6 +49,9 @@ enum Command {
     Logs(cmd::logs::LogsArgs),
     /// Get or set config values.
     Config(cmd::config::ConfigArgs),
+    /// Install or update Claude Code, Codex CLI, and/or Codex Desktop.
+    #[command(name = "i", visible_alias = "install")]
+    Install(cmd::install::InstallArgs),
     /// Update to the latest version via npm.
     Update,
     /// Open the vibe+ dashboard in the browser (picks fastest CDN).
@@ -77,6 +81,7 @@ async fn main() -> Result<()> {
         Some(Command::Client(c)) => cmd::client::run(c).await,
         Some(Command::Logs(a)) => cmd::logs::run(a).await,
         Some(Command::Config(a)) => cmd::config::run(a),
+        Some(Command::Install(a)) => cmd::install::run(a).await,
         Some(Command::Update) => cmd::update::run(),
         Some(Command::Ui) => cmd::ui::run().await,
         Some(Command::Pair(a)) => cmd::pair::run(a),

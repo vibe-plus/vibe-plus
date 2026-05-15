@@ -1,4 +1,6 @@
 pub mod autostart;
+mod install_codex_app;
+pub mod install;
 pub mod gateway;
 pub mod up;
 pub mod ui;
