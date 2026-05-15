@@ -156,19 +156,34 @@ try {
   New-Item -ItemType Directory -Force -Path (Join-Path $platformDir "bin") | Out-Null
   Copy-Item -Path $ExePath -Destination (Join-Path $platformDir "bin/vibe.exe") -Force
 
+  Push-Location $workDir
+  try {
+    $platformPackJson = npm pack $platformDir --json | ConvertFrom-Json
+    $wrapperPackJson = npm pack $wrapperDir --json | ConvertFrom-Json
+    $platformTarball = Join-Path $workDir $platformPackJson[0].filename
+    $wrapperTarball = Join-Path $workDir $wrapperPackJson[0].filename
+  } finally {
+    Pop-Location
+  }
+
   Push-Location $installDir
   try {
-    npm init -y | Out-Null
-    npm install $wrapperDir $platformDir --no-audit --ignore-scripts | Out-Null
+    Set-Content -Path (Join-Path $installDir "package.json") -Value '{"private":true,"type":"module"}'
+    npm install $platformTarball $wrapperTarball --include=optional --no-audit --no-fund --ignore-scripts | Out-Null
+
+    $installedPlatform = Join-Path $installDir "node_modules/@vibe-plus/cli-win32-x64/bin/vibe.exe"
+    if (-not (Test-Path $installedPlatform)) {
+      throw "npm install did not include @vibe-plus/cli-win32-x64/bin/vibe.exe"
+    }
+
     $installedVibeShim = Join-Path $installDir "node_modules/.bin/vibe.cmd"
     if (-not (Test-Path $installedVibeShim)) {
       throw "npm did not create the vibe.cmd binary shim"
     }
 
-    $installedWrapper = Join-Path $installDir "node_modules/@vibe-plus/cli/bin/vibe.js"
-    Invoke-Vibe -FilePath "node" -Arguments @($installedWrapper, "--help") -Expected "local AI API gateway" | Out-Null
-    Invoke-Vibe -FilePath "node" -Arguments @($installedWrapper, "--version") -Expected "vibe" | Out-Null
-    Invoke-Vibe -FilePath "node" -Arguments @($installedWrapper, "statusline") -Stdin $statusLineInput -Expected "Vibe+" | Out-Null
+    Invoke-Vibe -FilePath $installedVibeShim -Arguments @("--help") -Expected "local AI API gateway" | Out-Null
+    Invoke-Vibe -FilePath $installedVibeShim -Arguments @("--version") -Expected "vibe" | Out-Null
+    Invoke-Vibe -FilePath $installedVibeShim -Arguments @("statusline") -Stdin $statusLineInput -Expected "Vibe+" | Out-Null
   } finally {
     Pop-Location
   }
