@@ -7,11 +7,7 @@ const require = createRequire(import.meta.url);
 
 const packageMap = {
   "darwin-arm64": "@vibe-plus/app-darwin-arm64",
-  "darwin-x64": "@vibe-plus/app-darwin-x64",
-  "linux-x64": "@vibe-plus/app-linux-x64",
-  "linux-arm64": "@vibe-plus/app-linux-arm64",
   "win32-x64": "@vibe-plus/app-win32-x64",
-  "win32-arm64": "@vibe-plus/app-win32-arm64",
 };
 
 function findBinary() {

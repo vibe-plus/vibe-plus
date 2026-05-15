@@ -9,11 +9,7 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const packageMap = {
   "darwin-arm64": "@vibe-plus/cli-darwin-arm64",
-  "darwin-x64": "@vibe-plus/cli-darwin-x64",
-  "linux-x64": "@vibe-plus/cli-linux-x64",
-  "linux-arm64": "@vibe-plus/cli-linux-arm64",
   "win32-x64": "@vibe-plus/cli-win32-x64",
-  "win32-arm64": "@vibe-plus/cli-win32-arm64",
 };
 
 function getPlatformPackage() {
@@ -24,8 +20,18 @@ function getPlatformPackage() {
   if (!pkg) {
     console.error(`vibe: unsupported platform ${key}`);
     console.error(`  Supported platforms: ${Object.keys(packageMap).join(", ")}`);
-    if (platform === "linux" && arch === "arm") {
-      console.error("  32-bit Linux ARM is not published yet; use arm64/x64 or build from source.");
+    if (platform === "linux") {
+      console.error(
+        "  Linux builds are not published; use macOS Apple Silicon or Windows x64, or build from source.",
+      );
+    } else if (platform === "darwin" && arch === "x64") {
+      console.error(
+        "  Intel Mac builds are not published; use Apple Silicon or build from source.",
+      );
+    } else if (platform === "win32" && arch === "arm64") {
+      console.error(
+        "  Windows ARM64 builds are not published; use Windows x64 or build from source.",
+      );
     }
     process.exit(1);
   }

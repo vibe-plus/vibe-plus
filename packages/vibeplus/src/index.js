@@ -76,7 +76,7 @@ async function main() {
       {
         value: "app",
         label: "App  (coming soon)",
-        hint: "native desktop app for macOS / Windows / Linux",
+        hint: "native desktop app for macOS Apple Silicon / Windows x64",
       },
     ],
   });

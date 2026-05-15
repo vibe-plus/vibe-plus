@@ -12,12 +12,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(root, "..", "..");
 const requireBinaries = process.argv.includes("--require-binaries");
 const platforms = [
-  ["darwin-arm64", "@vibe-plus/darwin-arm64", "darwin", "arm64", "vibe"],
-  ["darwin-x64", "@vibe-plus/darwin-x64", "darwin", "x64", "vibe"],
-  ["linux-arm64", "@vibe-plus/linux-arm64", "linux", "arm64", "vibe"],
-  ["linux-x64", "@vibe-plus/linux-x64", "linux", "x64", "vibe"],
-  ["win32-arm64", "@vibe-plus/win32-arm64", "win32", "arm64", "vibe.exe"],
-  ["win32-x64", "@vibe-plus/win32-x64", "win32", "x64", "vibe.exe"],
+  ["darwin-arm64", "@vibe-plus/cli-darwin-arm64", "darwin", "arm64", "vibe"],
+  ["win32-x64", "@vibe-plus/cli-win32-x64", "win32", "x64", "vibe.exe"],
 ];
 
 function run(command, args, options = {}) {
@@ -150,7 +146,7 @@ async function main() {
     run("chmod", ["+x", testBinary]);
     writeFileSync(
       path.join(testPackageDir, "package.json"),
-      JSON.stringify({ name: "@vibe-plus/darwin-arm64", version: wrapper.version }, null, 2),
+      JSON.stringify({ name: "@vibe-plus/cli-darwin-arm64", version: wrapper.version }, null, 2),
     );
     const npmOutput = run(process.execPath, ["./bin/vibe.js", "--version"], {
       env: {
@@ -190,44 +186,65 @@ async function main() {
     rmSync(tmp, { force: true, recursive: true });
   }
 
-  const winTmp = mkdtempSync(path.join(tmpdir(), "vibe-npm-win-arm64-"));
+  const winTmp = mkdtempSync(path.join(tmpdir(), "vibe-npm-win-x64-"));
   const winPackageDir = path.join(winTmp, "platform");
   const winBinDir = path.join(winPackageDir, "bin");
   const winBinary = path.join(winBinDir, "vibe.exe");
   try {
     run("mkdir", ["-p", winBinDir]);
-    writeFileSync(winBinary, "#!/usr/bin/env sh\necho vibe-verify-win-arm64\n");
+    writeFileSync(winBinary, "#!/usr/bin/env sh\necho vibe-verify-win-x64\n");
     run("chmod", ["+x", winBinary]);
     writeFileSync(
       path.join(winPackageDir, "package.json"),
-      JSON.stringify({ name: "@vibe-plus/win32-arm64", version: wrapper.version }, null, 2),
+      JSON.stringify({ name: "@vibe-plus/cli-win32-x64", version: wrapper.version }, null, 2),
     );
     const winOutput = run(process.execPath, ["./bin/vibe.js", "--version"], {
       env: {
         VIBE_CLI_PLATFORM: "win32",
-        VIBE_CLI_ARCH: "arm64",
+        VIBE_CLI_ARCH: "x64",
         VIBE_CLI_PLATFORM_PACKAGE: winPackageDir,
       },
       stdio: "pipe",
     });
-    assert(
-      winOutput.includes("vibe-verify-win-arm64"),
-      "wrapper did not resolve win32-arm64 binary",
-    );
+    assert(winOutput.includes("vibe-verify-win-x64"), "wrapper did not resolve win32-x64 binary");
   } finally {
     rmSync(winTmp, { force: true, recursive: true });
   }
 
-  const unsupported = runAllowFailure(process.execPath, ["./bin/vibe.js", "--version"], {
+  const unsupportedLinux = runAllowFailure(process.execPath, ["./bin/vibe.js", "--version"], {
     env: {
       VIBE_CLI_PLATFORM: "linux",
-      VIBE_CLI_ARCH: "arm",
+      VIBE_CLI_ARCH: "x64",
     },
   });
-  assert(unsupported.status !== 0, "unsupported platform should fail");
+  assert(unsupportedLinux.status !== 0, "unsupported Linux platform should fail");
   assert(
-    unsupported.stderr.includes("32-bit Linux ARM is not published yet"),
-    "unsupported 32-bit Linux ARM message should be specific",
+    unsupportedLinux.stderr.includes("Linux builds are not published"),
+    "unsupported Linux message should be specific",
+  );
+
+  const unsupportedIntelMac = runAllowFailure(process.execPath, ["./bin/vibe.js", "--version"], {
+    env: {
+      VIBE_CLI_PLATFORM: "darwin",
+      VIBE_CLI_ARCH: "x64",
+    },
+  });
+  assert(unsupportedIntelMac.status !== 0, "unsupported Intel Mac platform should fail");
+  assert(
+    unsupportedIntelMac.stderr.includes("Intel Mac builds are not published"),
+    "unsupported Intel Mac message should be specific",
+  );
+
+  const unsupportedWindowsArm = runAllowFailure(process.execPath, ["./bin/vibe.js", "--version"], {
+    env: {
+      VIBE_CLI_PLATFORM: "win32",
+      VIBE_CLI_ARCH: "arm64",
+    },
+  });
+  assert(unsupportedWindowsArm.status !== 0, "unsupported Windows ARM64 platform should fail");
+  assert(
+    unsupportedWindowsArm.stderr.includes("Windows ARM64 builds are not published"),
+    "unsupported Windows ARM64 message should be specific",
   );
 
   console.log("npm package verification passed");

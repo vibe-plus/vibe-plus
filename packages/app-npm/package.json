@@ -25,10 +25,6 @@
   },
   "optionalDependencies": {
     "@vibe-plus/app-darwin-arm64": "0.0.1",
-    "@vibe-plus/app-darwin-x64": "0.0.1",
-    "@vibe-plus/app-linux-arm64": "0.0.1",
-    "@vibe-plus/app-linux-x64": "0.0.1",
-    "@vibe-plus/app-win32-arm64": "0.0.1",
     "@vibe-plus/app-win32-x64": "0.0.1"
   },
   "engines": {

@@ -31,10 +31,6 @@
   },
   "optionalDependencies": {
     "@vibe-plus/cli-darwin-arm64": "0.0.1",
-    "@vibe-plus/cli-darwin-x64": "0.0.1",
-    "@vibe-plus/cli-linux-arm64": "0.0.1",
-    "@vibe-plus/cli-linux-x64": "0.0.1",
-    "@vibe-plus/cli-win32-arm64": "0.0.1",
     "@vibe-plus/cli-win32-x64": "0.0.1"
   },
   "engines": {
