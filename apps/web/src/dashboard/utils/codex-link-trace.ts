@@ -20,7 +20,7 @@ const max_trace_chars = 480_000;
 const default_max_diff_rows = 6_000;
 const default_max_edit_length = 120_000;
 
-/** 「上游→网关」与「网关→Codex」逐行 unified diff，便于看 summary 注入、终止帧等。 */
+/** Per-line unified diff: upstream→gateway vs gateway→Codex (summary injection, terminal frames, etc.). */
 export function stream_trace_line_diff(
   upstream_text: string | null | undefined,
   client_text: string | null | undefined,
@@ -78,49 +78,52 @@ function pick(n: number | null | undefined): string {
   return n == null ? "—" : String(n);
 }
 
-/** 类似 Chrome「时间 + 启动器」摘要：单屏看清链路与流式健康。 */
+/** Chrome-style timing summary: one screen for link health and streaming. */
 export function codex_request_overview_fields(log: RequestLog): overview_field[] {
   const rows: overview_field[] = [
-    { label: "应用", value: log.app ?? "—" },
-    { label: "客户端传输", value: log.client_transport ?? "—" },
+    { label: "App", value: log.app ?? "—" },
+    { label: "Client transport", value: log.client_transport ?? "—" },
     { label: "wire", value: log.wire ?? "—" },
     { label: "route_prefix", value: log.route_prefix ?? "—" },
-    { label: "请求模型", value: log.requested_model ?? "—" },
-    { label: "上游模型", value: log.upstream_model ?? "—" },
-    { label: "提供商", value: log.provider_id ?? "—" },
-    { label: "HTTP 状态", value: pick(log.status_code) },
-    { label: "上游 HTTP", value: pick(log.upstream_http_status) },
-    { label: "总耗时 ms", value: pick(log.latency_ms) },
-    { label: "上游首包 ms", value: pick(log.upstream_first_byte_ms) },
-    { label: "首 token ms", value: pick(log.first_token_ms) },
-    { label: "发往客户端首写 ms", value: pick(log.client_first_write_ms) },
+    { label: "Requested model", value: log.requested_model ?? "—" },
+    { label: "Upstream model", value: log.upstream_model ?? "—" },
+    { label: "Provider", value: log.provider_id ?? "—" },
+    { label: "HTTP status", value: pick(log.status_code) },
+    { label: "Upstream HTTP", value: pick(log.upstream_http_status) },
+    { label: "Total ms", value: pick(log.latency_ms) },
+    { label: "Upstream first byte ms", value: pick(log.upstream_first_byte_ms) },
+    { label: "First token ms", value: pick(log.first_token_ms) },
+    { label: "Client first write ms", value: pick(log.client_first_write_ms) },
     { label: "in / out tokens", value: `${log.input_tokens} / ${log.output_tokens}` },
-    { label: "cache 读 / 写", value: `${log.cache_read_tokens} / ${log.cache_creation_tokens}` },
-    { label: "估算 $", value: log.estimated_cost_usd ?? "—" },
     {
-      label: "上游块数 / 字节",
+      label: "Cache read / write",
+      value: `${log.cache_read_tokens} / ${log.cache_creation_tokens}`,
+    },
+    { label: "Est. $", value: log.estimated_cost_usd ?? "—" },
+    {
+      label: "Upstream chunks / bytes",
       value: `${log.upstream_chunk_count ?? 0} / ${(log.upstream_bytes ?? 0).toLocaleString()}`,
     },
     {
-      label: "客户端块数 / 字节",
+      label: "Client chunks / bytes",
       value: `${log.client_chunk_count ?? 0} / ${(log.client_bytes ?? 0).toLocaleString()}`,
     },
     { label: "stream_kind", value: log.stream_kind ?? "—" },
-    { label: "stream 结束原因", value: log.stream_end_reason ?? "—" },
+    { label: "Stream end reason", value: log.stream_end_reason ?? "—" },
     {
-      label: "已见上游终端",
+      label: "Upstream terminal seen",
       value: log.stream_terminal_seen == null ? "—" : String(log.stream_terminal_seen),
     },
-    { label: "上游终端 type", value: log.upstream_terminal_type ?? "—" },
-    { label: "网关注入 status 帧", value: String(log.status_injected ?? false) },
-    { label: "网关注入终端帧", value: String(log.terminal_injected ?? false) },
+    { label: "Upstream terminal type", value: log.upstream_terminal_type ?? "—" },
+    { label: "Gateway injected status", value: String(log.status_injected ?? false) },
+    { label: "Gateway injected terminal", value: String(log.terminal_injected ?? false) },
     { label: "bridge_mode", value: log.bridge_mode ?? "—" },
     { label: "dedupe", value: log.dedupe_key ?? "—" },
     { label: "cb_key", value: log.cb_key ?? "—" },
     { label: "credential_id", value: log.credential_id ?? "—" },
   ];
   if (log.stream_error_detail) {
-    rows.push({ label: "stream 错误详情", value: log.stream_error_detail });
+    rows.push({ label: "Stream error detail", value: log.stream_error_detail });
   }
   return rows;
 }

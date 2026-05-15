@@ -483,13 +483,13 @@ const detailAttempt = ref<UpstreamAttemptLog | null>(null);
 type DetailBodyKey = "overview" | "headers" | "request" | "upstream" | "client" | "diff";
 type AttemptDetailBodyKey = "requestHeaders" | "requestBody" | "responseHeaders" | "responseBody";
 const REQUEST_DETAIL_TABS: Array<{ key: DetailBodyKey | "attempts"; label: string }> = [
-  { key: "overview", label: "概览" },
-  { key: "headers", label: "标头" },
-  { key: "request", label: "Codex→网关" },
-  { key: "upstream", label: "上游→网关" },
-  { key: "client", label: "网关→Codex" },
-  { key: "diff", label: "改写对比" },
-  { key: "attempts", label: "上游路由" },
+  { key: "overview", label: "Overview" },
+  { key: "headers", label: "Headers" },
+  { key: "request", label: "Codex→Gateway" },
+  { key: "upstream", label: "Upstream→Gateway" },
+  { key: "client", label: "Gateway→Codex" },
+  { key: "diff", label: "Rewrite diff" },
+  { key: "attempts", label: "Upstream route" },
 ];
 const detailTab = ref<DetailBodyKey | "attempts">("overview");
 const attemptDetailTab = ref<AttemptDetailBodyKey>("requestBody");
@@ -565,12 +565,16 @@ function overview_clipboard_text(log: RequestLog): string {
   const cl_lines = (log.client_response_body ?? "")
     .split("\n")
     .filter((ln) => ln.trim().length > 0).length;
-  lines.push("", `上游→网关 原始帧行数: ${up_lines}`, `网关→Codex 实际帧行数: ${cl_lines}`);
+  lines.push(
+    "",
+    `Upstream→Gateway raw frame lines: ${up_lines}`,
+    `Gateway→Codex actual frame lines: ${cl_lines}`,
+  );
   const upc = frame_type_counts(log.response_body);
   const clc = frame_type_counts(log.client_response_body);
-  lines.push("", "[上游 event.type 计数]");
+  lines.push("", "[Upstream event.type counts]");
   for (const [k, v] of sorted_frame_type_entries(upc)) lines.push(`  ${k}: ${v}`);
-  lines.push("", "[发往 Codex event.type 计数]");
+  lines.push("", "[Gateway→Codex event.type counts]");
   for (const [k, v] of sorted_frame_type_entries(clc)) lines.push(`  ${k}: ${v}`);
   return lines.join("\n");
 }
@@ -742,7 +746,7 @@ const currentDetailText = computed(() => {
   if (detailTab.value === "overview") return overview_clipboard_text(detailLog.value);
   if (detailTab.value === "diff") {
     const b = trace_diff_bundle.value;
-    if (!b || b.rows.length === 0) return "(无 diff：两侧均为空，或 diff 被截断。)";
+    if (!b || b.rows.length === 0) return "(No diff: both sides empty or diff was truncated.)";
     return trace_diff_rows_for_clipboard(b.rows);
   }
   return detailBodyText(detailTab.value);
@@ -1158,7 +1162,7 @@ onBeforeUnmount(() => {
             </span>
             <div class="min-w-0 flex-1">
               <h2 id="network-detail-title" class="text-lg font-medium text-vp-text">
-                {{ detailMode === "attempt" ? "上行尝试" : "请求链路" }}
+                {{ detailMode === "attempt" ? "Upstream attempt" : "Request link" }}
               </h2>
               <p v-if="detailLog" class="text-xs text-vp-muted truncate font-mono mt-0.5">
                 {{ detailLog.id }} · {{ detailLog.client_transport ?? "unknown" }}
@@ -1167,9 +1171,10 @@ onBeforeUnmount(() => {
                 v-if="detailMode === 'request' && detailLog"
                 class="mt-1.5 text-[11px] leading-snug text-vp-muted"
               >
-                Codex→网关 = App 发来的请求体与标头；上游→网关 = 供应商原始流（多行 JSON
-                帧）；网关→Codex = 改写后实际发回 App 的帧；改写对比 = 上游帧与客户端帧的逐行
-                diff（含 summary、状态注入等）。
+                Codex→Gateway = request body and headers from the app; Upstream→Gateway = raw
+                provider stream (JSON lines); Gateway→Codex = frames sent back to the app after
+                rewrite; Rewrite diff = per-line diff of upstream vs client frames (summary, status
+                injection, etc.).
               </p>
               <p v-else-if="detailAttempt" class="text-xs text-vp-muted truncate font-mono mt-0.5">
                 {{ detailAttempt.request_id }} · {{ detailAttempt.attempt_id }}
@@ -1311,10 +1316,10 @@ onBeforeUnmount(() => {
                 <div class="flex flex-wrap gap-2 border-b border-vp-border px-3 py-2">
                   <button
                     v-for="tab in [
-                      { key: 'requestHeaders', label: '上行·请求标头' },
-                      { key: 'requestBody', label: '上行·请求体' },
-                      { key: 'responseHeaders', label: '上行·响应标头' },
-                      { key: 'responseBody', label: '上行·响应体' },
+                      { key: 'requestHeaders', label: 'Upstream · request headers' },
+                      { key: 'requestBody', label: 'Upstream · request body' },
+                      { key: 'responseHeaders', label: 'Upstream · response headers' },
+                      { key: 'responseBody', label: 'Upstream · response body' },
                     ]"
                     :key="tab.key"
                     type="button"
@@ -1376,9 +1381,9 @@ onBeforeUnmount(() => {
                     class="grid gap-3 border-t border-vp-border pt-3 sm:grid-cols-2 text-[11px] leading-relaxed"
                   >
                     <div>
-                      <div class="mb-1 font-semibold text-vp-text">上游→网关 event.type</div>
+                      <div class="mb-1 font-semibold text-vp-text">Upstream→Gateway event.type</div>
                       <div v-if="!upstream_frame_types.size" class="font-mono text-vp-muted">
-                        无帧或未存 trace
+                        No frames or trace not stored
                       </div>
                       <ul v-else class="max-h-40 space-y-0.5 overflow-auto font-mono text-vp-text">
                         <li
@@ -1390,9 +1395,9 @@ onBeforeUnmount(() => {
                       </ul>
                     </div>
                     <div>
-                      <div class="mb-1 font-semibold text-vp-text">网关→Codex event.type</div>
+                      <div class="mb-1 font-semibold text-vp-text">Gateway→Codex event.type</div>
                       <div v-if="!client_frame_types.size" class="font-mono text-vp-muted">
-                        无帧或未存 trace
+                        No frames or trace not stored
                       </div>
                       <ul v-else class="max-h-40 space-y-0.5 overflow-auto font-mono text-vp-text">
                         <li
@@ -1410,20 +1415,21 @@ onBeforeUnmount(() => {
                     v-if="trace_diff_bundle?.diff_aborted"
                     class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"
                   >
-                    两侧差异过大，diff
-                    已放弃（可缩小日志或调大网关侧截断后再试）。可改用「上游→网关」与「网关→Codex」两页人工对照。
+                    Diff too large — abandoned (narrow logs or raise gateway trace limits). Compare
+                    Upstream→Gateway and Gateway→Codex tabs manually.
                   </div>
                   <div
                     v-else-if="trace_diff_bundle?.clipped_input"
                     class="mb-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900"
                   >
-                    单侧 trace 已截断至约 48 万字符以内再算 diff，末尾可能未显示。
+                    One side was clipped to ~480k characters before diff; the tail may be missing.
                   </div>
                   <div
                     v-if="trace_diff_bundle?.truncated"
                     class="mb-2 text-xs text-vp-muted font-mono"
                   >
-                    仅显示前 {{ trace_diff_bundle.rows.length }} 行 diff（防卡顿）。
+                    Showing first {{ trace_diff_bundle.rows.length }} diff lines (performance
+                    limit).
                   </div>
                   <div
                     v-if="
@@ -1433,7 +1439,7 @@ onBeforeUnmount(() => {
                     "
                     class="text-sm text-vp-muted"
                   >
-                    两侧均为空或完全一致，无 diff 行。
+                    Both sides are empty or identical — no diff lines.
                   </div>
                   <div
                     v-else-if="!trace_diff_bundle?.diff_aborted && trace_diff_bundle?.rows.length"

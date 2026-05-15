@@ -9,8 +9,8 @@ const PKG_CODEX_CLI: &str = "@openai/codex@latest";
 
 #[derive(Parser)]
 pub struct InstallArgs {
-    /// 安装目标：`claude`（Claude Code）、`codex`（Codex CLI）、`app`（Codex Desktop）。
-    /// 省略则安装或更新全部三项。
+    /// Install targets: `claude` (Claude Code), `codex` (Codex CLI), `app` (Codex Desktop).
+    /// When omitted, installs or updates all three.
     #[arg(value_enum, num_args = 0..)]
     pub targets: Vec<InstallTarget>,
 }
@@ -45,7 +45,7 @@ pub async fn run(args: InstallArgs) -> Result<()> {
         args.targets
     };
 
-    println!("=== vibe i — 安装 / 更新 AI 客户端 ===\n");
+    println!("=== vibe i — install / update AI clients ===\n");
 
     let manager = npm_registry::package_manager();
     ensure_package_manager(manager)?;
@@ -68,10 +68,10 @@ pub async fn run(args: InstallArgs) -> Result<()> {
     }
 
     if had_error {
-        anyhow::bail!("部分安装失败，请查看上方错误信息");
+        anyhow::bail!("some installs failed — see errors above");
     }
 
-    println!("全部完成。");
+    println!("All done.");
     Ok(())
 }
 
@@ -84,7 +84,7 @@ fn ensure_package_manager(manager: PackageManager) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "未找到 `{cmd}`。请先安装 Node.js（推荐附带 npm），或安装 bun：https://bun.sh"
+        "`{cmd}` not found. Install Node.js (with npm) or bun: https://bun.sh"
     );
 }
 
@@ -105,7 +105,7 @@ fn install_codex_cli(manager: PackageManager) -> Result<()> {
 fn print_binary_version(binary: &str) {
     if !npm_registry::command_exists(binary) {
         eprintln!(
-            "  提示：`{binary}` 不在 PATH 中，请确认全局 bin 目录已加入 shell 配置。"
+            "  Note: `{binary}` is not on PATH — add the global bin directory to your shell config."
         );
         return;
     }
@@ -116,7 +116,7 @@ fn print_binary_version(binary: &str) {
         Ok(o) if o.status.success() => {
             let version = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if !version.is_empty() {
-                println!("  版本：{version}");
+                println!("  Version: {version}");
             }
         }
         _ => {}

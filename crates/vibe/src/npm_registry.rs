@@ -18,7 +18,7 @@ pub const MIRRORS: &[(&str, &str, u16, &str)] = &[
         "https://registry.npmmirror.com/",
         "registry.npmmirror.com",
         443,
-        "npmmirror.com (淘宝)",
+        "npmmirror.com (Taobao mirror)",
     ),
     (
         "https://mirrors.cloud.tencent.com/npm/",
@@ -77,7 +77,7 @@ pub fn pick_registry(manager: PackageManager) -> Option<String> {
         let normalized = configured.trim_end_matches('/');
         let default_normalized = DEFAULT_NPM_REGISTRY.trim_end_matches('/');
         if normalized != default_normalized {
-            println!("使用你已配置的 registry：{configured}");
+            println!("Using your configured registry: {configured}");
             return None;
         }
     }
@@ -85,7 +85,7 @@ pub fn pick_registry(manager: PackageManager) -> Option<String> {
     let winner = fastest_mirror();
     if let Some((url, name)) = winner {
         if url != DEFAULT_NPM_REGISTRY {
-            println!("使用测速最快的 npm 镜像：{name} ({url})");
+            println!("Using fastest npm mirror: {name} ({url})");
             return Some(url.to_string());
         }
     }
@@ -114,12 +114,12 @@ pub fn install_global(manager: PackageManager, package: &str) -> Result<()> {
 
     if !command_exists(command) {
         anyhow::bail!(
-            "未找到 `{command}`。请先安装 Node.js 包管理器，或手动执行：`{command} install -g {package}`"
+            "`{command}` not found. Install a Node.js package manager, or run: `{command} install -g {package}`"
         );
     }
 
     println!(
-        "正在安装/更新 {package}（`{}`）…",
+        "Installing/updating {package} (`{}`)…",
         std::iter::once(command)
             .chain(args.iter().copied())
             .collect::<Vec<_>>()
@@ -127,7 +127,7 @@ pub fn install_global(manager: PackageManager, package: &str) -> Result<()> {
     );
     let status = std::process::Command::new(command).args(&args).status()?;
     if !status.success() {
-        anyhow::bail!("{command} 安装失败（退出码 {status}）");
+        anyhow::bail!("{command} install failed (exit {status})");
     }
     Ok(())
 }
@@ -177,7 +177,7 @@ pub fn fastest_mirror() -> Option<(&'static str, &'static str)> {
 
     best.map(|(url, name, lat)| {
         println!(
-            "npm 镜像测速：{} — {}ms（最快）",
+            "npm mirror probe: {} — {}ms (fastest)",
             name,
             lat.as_millis()
         );
@@ -216,7 +216,7 @@ pub fn fastest_endpoint(
     }
 
     best.map(|(url, name, lat)| {
-        println!("下载源测速：{name} — {}ms（最快）", lat.as_millis());
+        println!("Download probe: {name} — {}ms (fastest)", lat.as_millis());
         url
     })
 }

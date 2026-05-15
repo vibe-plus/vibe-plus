@@ -85,7 +85,7 @@ function moneyLabel(snapshot: ProviderBalanceSnapshot | null | undefined): strin
   return `${currency} ${primary}`;
 }
 
-/** 与网关 `ProbeResult` 序列化一致，便于对照日志与排障。 */
+/** Matches gateway `ProbeResult` serialization for log correlation and debugging. */
 function probeResponseSummary(r: ProbeResult): string {
   const lines = [
     `candidate_id: ${r.candidate_id}`,
@@ -383,7 +383,7 @@ const remoteCandidateRows = computed(() =>
                     <summary
                       class="list-none cursor-pointer select-none text-[10px] font-medium text-violet-600 hover:text-violet-800 [&::-webkit-details-marker]:hidden"
                     >
-                      探测详情
+                      Probe details
                     </summary>
                     <pre
                       class="mt-1 max-h-36 overflow-y-auto rounded-md border border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_4%,var(--vp-surface))] p-2 text-[10px] font-mono leading-snug text-vp-text whitespace-pre-wrap break-all"

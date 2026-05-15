@@ -119,14 +119,16 @@ function kindLabel(kind: ProviderKind): string {
           </span>
           <div class="min-w-0 flex-1">
             <h2 id="provider-import-title" class="text-base font-semibold text-vp-text">
-              本地导入
+              Local import
             </h2>
-            <p class="mt-0.5 text-xs text-vp-muted">扫描本地已安装的 AI 工具，一键导入配置</p>
+            <p class="mt-0.5 text-xs text-vp-muted">
+              Scan locally installed AI tools and import their configuration in one click.
+            </p>
           </div>
           <button
             type="button"
             class="vp-icon-btn shrink-0"
-            aria-label="关闭"
+            aria-label="Close"
             @click="emit('close')"
           >
             <VpIcon name="x" size-class="size-5" />
@@ -141,7 +143,7 @@ function kindLabel(kind: ProviderKind): string {
             class="flex items-center justify-center gap-2 py-10 text-sm text-slate-500"
           >
             <VpIcon name="loader-2" size-class="size-4 animate-spin" />
-            正在扫描本地工具…
+            Scanning local tools…
           </div>
 
           <!-- Scan error -->
@@ -149,14 +151,14 @@ function kindLabel(kind: ProviderKind): string {
             v-else-if="scanState === 'error'"
             class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
           >
-            <p class="font-medium">扫描失败</p>
+            <p class="font-medium">Scan failed</p>
             <p class="mt-1 text-xs font-mono">{{ scanError }}</p>
             <button
               type="button"
               class="mt-2 text-xs text-red-600 underline hover:no-underline"
               @click="scan"
             >
-              重试
+              Retry
             </button>
           </div>
 
@@ -166,8 +168,10 @@ function kindLabel(kind: ProviderKind): string {
             class="flex flex-col items-center justify-center gap-2 py-10 text-sm text-slate-500"
           >
             <VpIcon name="archive" size-class="size-8 text-slate-300" />
-            <p>未发现可导入的本地工具</p>
-            <p class="text-xs text-slate-400">支持 Codex CLI（~/.codex）、Claude（~/.claude）等</p>
+            <p>No importable local tools found</p>
+            <p class="text-xs text-slate-400">
+              Supports Codex CLI (~/.codex), Claude (~/.claude), and more
+            </p>
           </div>
 
           <!-- Candidates list -->
@@ -207,7 +211,7 @@ function kindLabel(kind: ProviderKind): string {
                     "
                     class="rounded-full border px-1.5 py-0.5 text-[10px] font-medium"
                   >
-                    {{ c.token_ok ? "Token 有效" : "Token 缺失" }}
+                    {{ c.token_ok ? "Token OK" : "Token missing" }}
                   </span>
                 </div>
                 <p class="mt-1 truncate font-mono text-[11px] text-slate-400">
@@ -218,7 +222,7 @@ function kindLabel(kind: ProviderKind): string {
                   class="mt-1.5 flex flex-wrap gap-1"
                 >
                   <span class="text-[11px] text-slate-500">
-                    +{{ c.extra_credentials.length }} 个额外账号
+                    +{{ c.extra_credentials.length }} extra account(s)
                   </span>
                 </div>
               </div>
@@ -227,7 +231,7 @@ function kindLabel(kind: ProviderKind): string {
                 type="button"
                 class="shrink-0 rounded-lg bg-violet-600 p-2.5 text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
                 :disabled="importingSet.has(c.client) || importAllBusy"
-                :title="importingSet.has(c.client) ? '导入中…' : '导入'"
+                :title="importingSet.has(c.client) ? 'Importing…' : 'Import'"
                 @click="importOne(c.client)"
               >
                 <VpIcon
@@ -249,7 +253,7 @@ function kindLabel(kind: ProviderKind): string {
             class="btn-ghost inline-flex items-center gap-1.5 px-3 py-2 text-sm"
             @click="emit('close')"
           >
-            取消
+            Cancel
           </button>
           <button
             v-if="candidates.length > 0"
@@ -263,7 +267,7 @@ function kindLabel(kind: ProviderKind): string {
               size-class="size-4"
               :spin="importAllBusy"
             />
-            全部导入（{{ candidates.length }}）
+            Import all ({{ candidates.length }})
           </button>
         </div>
       </div>

@@ -44,7 +44,7 @@ pub async fn install_or_update() -> anyhow::Result<()> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        anyhow::bail!("Codex Desktop 安装目前支持 macOS 与 Windows");
+        anyhow::bail!("Codex Desktop install is only supported on macOS and Windows");
     }
 }
 
@@ -52,23 +52,23 @@ pub async fn install_or_update() -> anyhow::Result<()> {
 async fn install_macos() -> anyhow::Result<()> {
     if let Some(path) = find_existing_codex_app() {
         println!(
-            "已检测到 Codex.app：{}",
+            "Found Codex.app: {}",
             path.display()
         );
         if try_brew_cask("codex", true).await? {
-            println!("已通过 Homebrew 更新 Codex Desktop。");
+            println!("Updated Codex Desktop via Homebrew.");
             return Ok(());
         }
-        println!("正在从官方 CDN 下载最新安装包…");
+        println!("Downloading latest installer from official CDN…");
     } else if try_brew_cask("codex", false).await? {
-        println!("已通过 Homebrew 安装 Codex Desktop。");
+        println!("Installed Codex Desktop via Homebrew.");
         return Ok(());
     }
 
     let dmg_url = pick_mac_dmg_url();
     let installed = download_and_install_dmg(&dmg_url).await?;
     println!(
-        "Codex Desktop 已安装：{}",
+        "Codex Desktop installed: {}",
         installed.display()
     );
     Ok(())
@@ -97,7 +97,7 @@ fn pick_mac_dmg_url() -> String {
     let url = npm_registry::fastest_endpoint(&candidates)
         .unwrap_or(arch_url)
         .to_string();
-    println!("目标架构：{arch_label}，下载地址：{url}");
+    println!("Target arch: {arch_label}, download URL: {url}");
     url
 }
 
@@ -129,12 +129,12 @@ async fn try_brew_cask(name: &str, upgrade: bool) -> anyhow::Result<bool> {
     }
 
     let subcmd = if upgrade { "upgrade" } else { "install" };
-    println!("尝试通过 Homebrew {subcmd} --cask {name}…");
+    println!("Trying Homebrew {subcmd} --cask {name}…");
     let status = Command::new("brew")
         .args([subcmd, "--cask", name])
         .status()
         .await
-        .context("调用 brew 失败")?;
+        .context("brew command failed")?;
     Ok(status.success())
 }
 
@@ -145,24 +145,24 @@ async fn download_and_install_dmg(dmg_url: &str) -> anyhow::Result<PathBuf> {
         std::process::id()
     ));
     std::fs::create_dir_all(&tmp_root).with_context(|| {
-        format!("无法创建临时目录 {}", tmp_root.display())
+        format!("failed to create temp directory {}", tmp_root.display())
     })?;
 
     let dmg_path = tmp_root.join("Codex.dmg");
     download_dmg(dmg_url, &dmg_path).await?;
 
-    println!("正在挂载安装包…");
+    println!("Mounting installer image…");
     let mount_point = mount_dmg(&dmg_path).await?;
     let result = async {
         let app_in_volume = find_codex_app_in_mount(&mount_point)
-            .context("在 DMG 中未找到 Codex.app")?;
+            .context("Codex.app not found in DMG")?;
         install_codex_app_bundle(&app_in_volume).await
     }
     .await;
 
     if let Err(err) = detach_dmg(&mount_point).await {
         eprintln!(
-            "警告：卸载 DMG 失败（{}）：{err}",
+            "Warning: failed to unmount DMG ({}): {err}",
             mount_point.display()
         );
     }
@@ -173,15 +173,15 @@ async fn download_and_install_dmg(dmg_url: &str) -> anyhow::Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 async fn download_dmg(url: &str, dest: &Path) -> anyhow::Result<()> {
-    println!("正在下载 Codex Desktop 安装包…");
+    println!("Downloading Codex Desktop installer…");
     let status = Command::new("curl")
         .args(["-fL", "--retry", "3", "--retry-delay", "1", "-o"])
         .arg(dest)
         .arg(url)
         .status()
         .await
-        .context("调用 curl 失败")?;
-    anyhow::ensure!(status.success(), "curl 下载失败（{status}）");
+        .context("curl command failed")?;
+    anyhow::ensure!(status.success(), "curl download failed ({status})");
     Ok(())
 }
 
@@ -192,11 +192,11 @@ async fn mount_dmg(dmg_path: &Path) -> anyhow::Result<PathBuf> {
         .arg(dmg_path)
         .output()
         .await
-        .context("调用 hdiutil attach 失败")?;
+        .context("hdiutil attach failed")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "hdiutil attach 失败：{}",
+            "hdiutil attach failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -204,7 +204,7 @@ async fn mount_dmg(dmg_path: &Path) -> anyhow::Result<PathBuf> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_hdiutil_mount_point(&stdout)
         .map(PathBuf::from)
-        .with_context(|| format!("无法解析挂载点：\n{stdout}"))
+        .with_context(|| format!("failed to parse mount point:\n{stdout}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -214,8 +214,8 @@ async fn detach_dmg(mount_point: &Path) -> anyhow::Result<()> {
         .arg(mount_point)
         .status()
         .await
-        .context("调用 hdiutil detach 失败")?;
-    anyhow::ensure!(status.success(), "hdiutil detach 失败（{status}）");
+        .context("hdiutil detach failed")?;
+    anyhow::ensure!(status.success(), "hdiutil detach failed ({status})");
     Ok(())
 }
 
@@ -232,21 +232,21 @@ fn find_codex_app_in_mount(mount_point: &Path) -> anyhow::Result<PathBuf> {
             return Ok(path);
         }
     }
-    anyhow::bail!("在 {} 中未找到 .app", mount_point.display())
+    anyhow::bail!("no .app found in {}", mount_point.display())
 }
 
 #[cfg(target_os = "macos")]
 async fn install_codex_app_bundle(src_app: &Path) -> anyhow::Result<PathBuf> {
     for applications_dir in candidate_applications_dirs()? {
         println!(
-            "正在安装到 {}…",
+            "Installing to {}…",
             applications_dir.display()
         );
         std::fs::create_dir_all(&applications_dir)?;
         let dest_app = applications_dir.join("Codex.app");
         if dest_app.is_dir() {
             std::fs::remove_dir_all(&dest_app).with_context(|| {
-                format!("无法移除旧版本 {}", dest_app.display())
+                format!("failed to remove old version {}", dest_app.display())
             })?;
         }
         let status = Command::new("ditto")
@@ -254,12 +254,12 @@ async fn install_codex_app_bundle(src_app: &Path) -> anyhow::Result<PathBuf> {
             .arg(&dest_app)
             .status()
             .await
-            .context("调用 ditto 失败")?;
+            .context("ditto command failed")?;
         if status.success() {
             return Ok(dest_app);
         }
     }
-    anyhow::bail!("无法将 Codex.app 安装到任何 Applications 目录")
+    anyhow::bail!("could not install Codex.app to any Applications directory")
 }
 
 #[cfg(target_os = "macos")]
@@ -293,15 +293,15 @@ fn parse_hdiutil_mount_point(output: &str) -> Option<String> {
 #[cfg(target_os = "windows")]
 async fn install_windows() -> anyhow::Result<()> {
     if codex_app_installed_windows().await? {
-        println!("已检测到 Codex Desktop，请在 Microsoft Store 或应用内检查更新。");
+        println!("Codex Desktop detected — check for updates in Microsoft Store or the app.");
         return Ok(());
     }
 
-    println!("未检测到 Codex Desktop，正在打开官方安装程序…");
+    println!("Codex Desktop not found — opening official installer…");
     if open_url(CODEX_WINDOWS_INSTALLER_URL).await.is_err() {
         open_url(CODEX_MICROSOFT_STORE_WEB_URL).await?;
     }
-    println!("请在安装向导完成后运行 `vibe i app` 验证。");
+    println!("After setup, run `vibe i app` to verify.");
     Ok(())
 }
 
@@ -315,7 +315,7 @@ async fn codex_app_installed_windows() -> anyhow::Result<bool> {
         ])
         .output()
         .await
-        .context("调用 powershell 失败")?;
+        .context("powershell command failed")?;
     if !output.status.success() {
         return Ok(false);
     }
@@ -333,8 +333,8 @@ async fn open_url(url: &str) -> anyhow::Result<()> {
         ])
         .status()
         .await
-        .with_context(|| format!("无法打开 {url}"))?;
-    anyhow::ensure!(status.success(), "打开 {url} 失败（{status}）");
+        .with_context(|| format!("failed to open {url}"))?;
+    anyhow::ensure!(status.success(), "failed to open {url} ({status})");
     Ok(())
 }
 

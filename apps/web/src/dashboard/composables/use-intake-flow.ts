@@ -467,7 +467,7 @@ function isSelected(candidateId: string, providerId: string): boolean {
   return !!state.selections[selectionKey(candidateId, providerId)];
 }
 
-/** 仅探测成功的 candidate×provider 允许勾选（与 resetSelectionsAfterProbe 一致）。 */
+/** Only successful candidate×provider probes are selectable (matches resetSelectionsAfterProbe). */
 function isSelectable(candidateId: string, providerId: string): boolean {
   const r = resultFor(candidateId, providerId);
   if (state.probing && !r) return false;
@@ -511,7 +511,7 @@ function signatureOf(candidates: IntakeCandidateView[]): string {
     .join("|");
 }
 
-/** 同一凭据/远程块只保留一条，避免剪贴板多段解析或重复粘贴导致重复探测与重复行。 */
+/** One row per credential/remote block to avoid duplicate probes from multi-part clipboard paste. */
 function intakeCandidateDedupeKey(c: IntakeCandidateView): string {
   const rt = c.remoteText?.trim();
   if (rt) return `remote:${rt}`;

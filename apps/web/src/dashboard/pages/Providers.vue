@@ -1086,14 +1086,25 @@ function startEdit(p: Provider) {
   showForm.value = true;
 }
 
-async function save(payload: ProviderInput) {
+async function save(payload: ProviderInput, credentialAuthRef: string | null = null) {
+  const providerPayload: ProviderInput = { ...payload, auth_ref: null };
   try {
+    let providerId: string;
     if (editTarget.value) {
-      await api.providers.update(editTarget.value.id, payload);
+      providerId = editTarget.value.id;
+      await api.providers.update(providerId, providerPayload);
     } else {
-      const created = await api.providers.create(payload);
-      // Fire-and-forget: auto-refresh model list after creation so cards show model counts immediately
-      api.providers.refreshModels(created.id).catch(() => {});
+      const created = await api.providers.create(providerPayload);
+      providerId = created.id;
+      api.providers.refreshModels(providerId).catch(() => {});
+    }
+    if (credentialAuthRef?.trim()) {
+      await api.credentials.create(providerId, {
+        ...emptyCredForm(),
+        label: "API Key",
+        auth_ref: normalizeAuthRef(credentialAuthRef.trim()),
+        notes: "Created from provider wizard paste",
+      });
     }
     showForm.value = false;
     await load();
@@ -1112,7 +1123,7 @@ async function toggleProviderEnabled(p: Provider) {
       group_name: p.group_name ?? null,
       kind: p.kind,
       base_url: p.base_url,
-      auth_ref: p.auth_ref,
+      auth_ref: null,
       enabled: next,
       priority: p.priority,
       supports_websocket: p.supports_websocket ?? null,
@@ -1486,12 +1497,12 @@ useWs((ev: unknown) => {
           <button
             type="button"
             class="btn-ghost flex min-h-11 items-center justify-center gap-2 px-3 py-2 text-sm rounded-lg border border-vp-border/80 sm:py-1.5"
-            title="本地导入"
-            aria-label="本地导入"
+            title="Local import"
+            aria-label="Local import"
             @click="showImportModal = true"
           >
             <VpIcon name="folder-input" size-class="size-4 shrink-0" />
-            <span class="hidden sm:inline">导入</span>
+            <span class="hidden sm:inline">Import</span>
           </button>
           <button
             type="button"
@@ -1669,7 +1680,7 @@ useWs((ev: unknown) => {
       :model-refresh-busy="!!(editTarget && modelRefreshBusy[editTarget.id])"
       :speed-label="editProviderSpeedLabel"
       @close="showForm = false"
-      @save="save($event)"
+      @save="(form, credKey) => save(form, credKey)"
       @refresh-models="editTarget && refreshProviderModels(editTarget.id)"
       @add-credential="editTarget && startAddCred(editTarget.id)"
       @reload-creds="editTarget && reloadProviderCreds(editTarget.id)"
