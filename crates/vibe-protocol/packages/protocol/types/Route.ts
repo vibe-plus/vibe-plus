@@ -5,6 +5,9 @@ export type Route = {
   id: string;
   name: string;
   match_model: string;
+  /**
+   * Preferred upstream when this route matches; other matching providers still follow for failover.
+   */
   target_provider_id: string | null;
   target_model: string | null;
   tier: RouteTier;

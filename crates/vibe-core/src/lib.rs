@@ -14,7 +14,6 @@ pub mod claude_control;
 pub mod claude_summary;
 pub mod codex_auth_json;
 pub mod codex_config;
-pub mod codex_history;
 pub mod codex_plan_headers;
 pub mod codex_summary;
 pub mod codex_upstream_ws;

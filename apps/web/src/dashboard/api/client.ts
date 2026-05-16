@@ -607,28 +607,6 @@ export interface CodexPlanRefreshResult {
   errors: string[];
 }
 
-export interface CodexHistoryUnifyInput {
-  provider: string;
-  from_providers: string[];
-  apply: boolean;
-  no_backup: boolean;
-  codex_home: string | null;
-}
-
-export interface CodexHistorySummary {
-  codex_home: string;
-  provider: string;
-  from_providers: string[];
-  applied: boolean;
-  sqlite_files_seen: number;
-  sqlite_files_changed: number;
-  sqlite_rows_changed: number;
-  rollout_files_seen: number;
-  rollout_files_changed: number;
-  rollout_fields_changed: number;
-  backups_created: number;
-}
-
 export interface CodexAppProcess {
   pid: number;
   role: string;
@@ -1125,50 +1103,11 @@ export const api = {
         body: JSON.stringify(input),
       }),
   },
-  codexHistory: {
-    preview: (provider = "vibeplus") =>
-      req<CodexHistorySummary>(
-        `/_vp/codex-history/preview?provider=${encodeURIComponent(provider)}`,
-      ),
-    unify: (input: Partial<CodexHistoryUnifyInput> = {}) =>
-      req<CodexHistorySummary>("/_vp/codex-history/unify", {
-        method: "POST",
-        body: JSON.stringify({
-          provider: input.provider ?? "vibeplus",
-          from_providers: input.from_providers ?? [],
-          apply: true,
-          no_backup: input.no_backup ?? false,
-          codex_home: input.codex_home ?? null,
-        }),
-      }),
-  },
   codexApp: {
     status: () => req<CodexAppStatus>("/_vp/codex-app/status"),
     open: () => req<CodexAppActionResult>("/_vp/codex-app/open", { method: "POST" }),
     quit: () => req<CodexAppActionResult>("/_vp/codex-app/quit", { method: "POST" }),
     restart: () => req<CodexAppActionResult>("/_vp/codex-app/restart", { method: "POST" }),
-  },
-  intake: {
-    probe: (input: import("./intake-types.ts").ProbeInput) =>
-      req<import("./intake-types.ts").ProbeResponse>("/_vp/intake/probe", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
-    import: (input: import("./intake-types.ts").ImportInput) =>
-      req<import("./intake-types.ts").ImportResponse>("/_vp/intake/import", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
-    previewRemote: (input: import("./intake-types.ts").RemoteImportInput) =>
-      req<import("./intake-types.ts").RemotePreviewResponse>("/_vp/intake/preview-remote", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
-    importRemote: (input: import("./intake-types.ts").RemoteImportInput) =>
-      req<import("./intake-types.ts").RemoteImportResponse>("/_vp/intake/import-remote", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
   },
   codexFiles: {
     list: (path = "") => req<CodexFileList>(`/_vp/codex-files?path=${encodeURIComponent(path)}`),

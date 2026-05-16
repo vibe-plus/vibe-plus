@@ -31,15 +31,12 @@ import ProviderSmartModal from "./components/provider-smart-modal.vue";
 import ProviderImportModal from "./components/provider-import-modal.vue";
 import CredentialFormModal from "./components/CredentialFormModal.vue";
 import { requestWsSnapshot, useWs } from "../../composables/useProxy.ts";
-import { useIntakeFlow, INTAKE_FLOW_IMPORTED_EVENT } from "../../composables/use-intake-flow.ts";
 import { workspaceViewFromQuery, type WorkspaceView } from "../../utils/workspace-view.ts";
 import { buildProviderSections } from "./utils/provider-sections.ts";
 import {
   isOfficialCodexProvider,
   useProviderCodexPlans,
 } from "./composables/useProviderCodexPlans.ts";
-
-const intakeFlow = useIntakeFlow();
 
 const providers = ref<Provider[]>([]);
 const healthMap = ref<Record<string, ProviderHealthSummary>>({});
@@ -998,23 +995,6 @@ function circuitBadge(state: string, remainingSecs?: number | bigint | null) {
   };
 }
 
-function onIntakeImported(ev?: Event) {
-  const detail = (ev as CustomEvent<{ providerIds?: string[] }> | undefined)?.detail;
-  const providerIds = detail?.providerIds ?? [];
-  void load().then(async () => {
-    if (!providerIds.length) return;
-    await nextTick();
-    highlightedProviderId.value = providerIds[0] ?? null;
-    const el = document.querySelector(
-      `[data-provider-id="${providerIds[0]}"]`,
-    ) as HTMLElement | null;
-    el?.scrollIntoView({ block: "center", behavior: "smooth" });
-    window.setTimeout(() => {
-      if (highlightedProviderId.value === providerIds[0]) highlightedProviderId.value = null;
-    }, 2200);
-  });
-}
-
 watch(showForm, async (open) => {
   if (!open) return;
   if (editTarget.value) await reloadProviderCreds(editTarget.value.id);
@@ -1022,16 +1002,12 @@ watch(showForm, async (open) => {
 
 onMounted(() => {
   void loadAndScrollToTargetProvider();
-  window.addEventListener(INTAKE_FLOW_IMPORTED_EVENT, onIntakeImported);
-  intakeFlow.bindShyClipboardOnFocus();
-  void intakeFlow.tryShyClipboard();
 });
 onUnmounted(() => {
   if (providersOverviewFallbackTimer) {
     clearTimeout(providersOverviewFallbackTimer);
     providersOverviewFallbackTimer = null;
   }
-  window.removeEventListener(INTAKE_FLOW_IMPORTED_EVENT, onIntakeImported);
 });
 
 watch(

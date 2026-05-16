@@ -296,6 +296,8 @@ impl SummaryAccumulator {
     }
 
     /// Accumulate per-request input/output from `response.completed` for cost + display SUM.
+    /// Also persists to AppState keyed by turn_id so that ALL requests in a turn
+    /// (including tool-call iterations handled by separate accumulators) are counted.
     fn accumulate_request_sums(&mut self, frame_json: &str) {
         let Ok(v) = serde_json::from_str::<Value>(frame_json) else {
             return;
@@ -306,37 +308,46 @@ impl SummaryAccumulator {
         let Some(u) = v.pointer("/response/usage").or_else(|| v.get("usage")) else {
             return;
         };
-        if let Some(n) = u
+        let input = u
             .get("input_tokens")
             .or_else(|| u.get("prompt_tokens"))
             .and_then(|x| x.as_i64())
-        {
-            self.turn_input_sum += n;
-        }
-        if let Some(n) = u
+            .unwrap_or(0);
+        let output = u
             .get("output_tokens")
             .or_else(|| u.get("completion_tokens"))
             .and_then(|x| x.as_i64())
-        {
-            self.turn_output_sum += n;
+            .unwrap_or(0);
+        if input == 0 && output == 0 {
+            return;
+        }
+        self.turn_input_sum += input;
+        self.turn_output_sum += output;
+        // Persist to shared AppState so the final-request accumulator can read
+        // the running total even for requests it never saw.
+        if let (Some(state), Some(turn_id)) = (&self.state, &self.turn_id) {
+            state.accumulate_codex_turn_io(turn_id, input, output);
         }
     }
 
     /// Build SummaryMetrics (no side effects — call before slot reserve).
+    /// Uses AppState-accumulated turn IO when available so that all tool-call
+    /// requests in the same turn contribute to the cost, not just the final one.
     fn build_metrics(&self, latency_ms: i64) -> SummaryMetrics {
-        let display_output = if self.turn_output_sum > 0 {
-            self.turn_output_sum
-        } else {
-            self.usage.output_tokens
+        // Read aggregated (input_sum, output_sum) across ALL requests this turn.
+        let (agg_input, agg_output) = match (&self.state, &self.turn_id) {
+            (Some(state), Some(turn_id)) => state.get_codex_turn_io(turn_id),
+            _ => (0, 0),
         };
-        let cost_input = if self.turn_input_sum > 0 {
-            self.turn_input_sum
-        } else {
-            self.usage.input_tokens
-        };
+        // Use AppState aggregates if available; fall back to local sums.
+        let cost_input = agg_input.max(self.turn_input_sum).max(self.usage.input_tokens);
+        let cost_output = agg_output.max(self.turn_output_sum).max(self.usage.output_tokens);
+        // For display: `in` = context window size (MAX of input = last request's value),
+        // `out` = total generation across tool-call loop (SUM = agg_output).
+        let display_output = agg_output.max(self.turn_output_sum).max(self.usage.output_tokens);
         let cost_usage = Usage {
             input_tokens: cost_input,
-            output_tokens: display_output,
+            output_tokens: cost_output,
             ..Usage::default()
         };
         SummaryMetrics {

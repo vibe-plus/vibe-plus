@@ -71,7 +71,7 @@ export default defineConfig({
   },
   plugins: [
     caddyLocalhost({ host: "web.vibe-plus.localhost" }),
-    singleton(),
+    ...(process.env.NODE_ENV === "test" || process.env.VITEST ? [] : [singleton()]),
     vue(),
     UnoCSS(),
     generateUiManifest(pkg.version),

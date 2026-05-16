@@ -2,13 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RouterView, RouterLink, useRoute, useRouter } from "vue-router";
 import { useProxyStatus } from "./composables/useProxy.ts";
-import { useSmartIntake } from "./composables/use-smart-intake.ts";
-import { useIntakeFlow } from "./composables/use-intake-flow.ts";
 import { useBrandLogo } from "./composables/use-brand-logo.ts";
 import VpIcon from "./components/vp-icon.vue";
 import type { vp_icon_name } from "./components/vp-icon.vue";
-import SmartIntake from "./components/SmartIntake.vue";
-import IntakeWizard from "./components/intake-wizard.vue";
 import { useLiveWorkspaceActivity } from "./composables/use-live-workspace-activity.ts";
 import { workspaceViewFromQuery, type WorkspaceView } from "./utils/workspace-view.ts";
 import { useWebCompatibility } from "./composables/use-web-compatibility.ts";
@@ -17,33 +13,6 @@ const { online, status } = useProxyStatus();
 const route = useRoute();
 const router = useRouter();
 const { currentBrandLogo } = useBrandLogo();
-const intakeFlow = useIntakeFlow();
-const {
-  items: intakeItems,
-  authItems: intakeAuthItems,
-  configItems: intakeConfigItems,
-  ccsProfileItems: intakeCcsProfileItems,
-  dragActive: intakeDragActive,
-  dragIntent: intakeDragIntent,
-  busy: intakeBusy,
-  message: intakeMessage,
-  error: intakeError,
-  clipboardWatch: intakeClipboardWatch,
-  clipboardWatchAvailable: intakeClipboardWatchAvailable,
-  readClipboard,
-  toggleClipboardWatch,
-  importCcsProfile,
-  saveCodexConfig,
-  goCodex,
-  dismiss: dismissIntake,
-} = useSmartIntake({
-  onAuthLikeRecognized: (items) => intakeFlow.handlePaste(items),
-});
-
-function openIntakeWizardFromCard() {
-  intakeFlow.openWithCandidates(intakeItems.value);
-  dismissIntake();
-}
 
 type SidebarView = {
   id: WorkspaceView;
@@ -136,7 +105,6 @@ const viewTitle = computed<Record<WorkspaceView, string>>(() => ({
 }));
 
 onMounted(() => {
-  intakeFlow.bindShyClipboardOnFocus();
   trafficTimer = window.setInterval(() => {
     trafficPhase.value += 1;
   }, 180);
@@ -373,27 +341,6 @@ function tabLabel(label: string) {
         }}</span>
       </RouterLink>
     </nav>
-    <SmartIntake
-      :items="intakeItems"
-      :auth-count="intakeAuthItems.length"
-      :config-count="intakeConfigItems.length"
-      :ccs-profile-count="intakeCcsProfileItems.length"
-      :drag-active="intakeDragActive"
-      :drag-intent="intakeDragIntent"
-      :busy="intakeBusy"
-      :message="intakeMessage"
-      :error="intakeError"
-      :clipboard-watch="intakeClipboardWatch"
-      :clipboard-watch-available="intakeClipboardWatchAvailable"
-      @read-clipboard="readClipboard"
-      @toggle-clipboard-watch="toggleClipboardWatch"
-      @open-intake-wizard="openIntakeWizardFromCard"
-      @import-ccs-profile="importCcsProfile"
-      @save-config="saveCodexConfig"
-      @go-codex="goCodex"
-      @dismiss="dismissIntake"
-    />
-    <IntakeWizard />
   </div>
 </template>
 

@@ -6,7 +6,6 @@ import { useRoute } from "vue-router";
 import { api, type Provider, type VibeConfig } from "../api/client.ts";
 import ClaudeControlPanel from "../components/claude/ClaudeControlPanel.vue";
 import ClaudeSettingsJsonPanel from "../components/claude/claude-settings-json-panel.vue";
-import CodexHistoryUnifier from "../components/codex-history-unifier.vue";
 import CodexAppControlPanel from "../components/codex/CodexAppControlPanel.vue";
 import CodexClientSlotsPanel from "../components/codex/codex-client-slots-panel.vue";
 import CodexTomlSettingsPanel from "../components/codex/codex-toml-settings-panel.vue";
@@ -474,10 +473,6 @@ onBeforeUnmount(() => {
             </label>
           </div>
         </section>
-
-        <div v-if="view === 'codex'" id="codex-history" class="scroll-mt-20">
-          <CodexHistoryUnifier />
-        </div>
 
         <section id="cli" class="card-base p-4 sm:p-5 scroll-mt-20">
           <div class="mb-3 sm:mb-4 flex items-center gap-2">

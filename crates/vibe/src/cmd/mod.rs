@@ -1,16 +1,8 @@
-pub mod autostart;
-pub mod client;
-pub mod codex_history;
-pub mod config;
 pub mod doctor;
 pub mod gateway;
 pub mod install;
 mod install_codex_app;
 pub mod logs;
-pub mod mcp;
-pub mod pair;
-pub mod provider;
-pub mod route;
 pub mod start;
 pub mod status;
 pub mod statusline;

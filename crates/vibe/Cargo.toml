@@ -30,11 +30,6 @@ chrono = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 toml_edit = "0.22"
-rmcp = { version = "0.15", default-features = false, features = [
-  "server",
-  "transport-async-rw",
-  "base64",
-] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

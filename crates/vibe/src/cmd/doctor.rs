@@ -66,7 +66,7 @@ pub async fn run() -> Result<()> {
 
     println!();
     if running {
-        println!("Providers: run `vibe provider list` to see configured providers.");
+        println!("Providers: open the dashboard with `vibe ui` to view/edit configured providers.");
     } else {
         println!("Run `vibe start` to start the local proxy.");
     }

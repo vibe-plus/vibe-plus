@@ -1130,44 +1130,6 @@ pub struct CodexPlanRefreshResult {
     pub errors: Vec<String>,
 }
 
-/// Input for previewing or applying Codex App history provider unification.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/CodexHistoryUnifyInput.ts"
-)]
-pub struct CodexHistoryUnifyInput {
-    pub provider: String,
-    #[serde(default)]
-    pub from_providers: Vec<String>,
-    #[serde(default)]
-    pub apply: bool,
-    #[serde(default)]
-    pub no_backup: bool,
-    #[serde(default)]
-    pub codex_home: Option<String>,
-}
-
-/// Summary returned by Codex App history preview/apply endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/CodexHistorySummary.ts"
-)]
-pub struct CodexHistorySummary {
-    pub codex_home: String,
-    pub provider: String,
-    pub from_providers: Vec<String>,
-    pub applied: bool,
-    pub sqlite_files_seen: usize,
-    pub sqlite_files_changed: usize,
-    pub sqlite_rows_changed: usize,
-    pub rollout_files_seen: usize,
-    pub rollout_files_changed: usize,
-    pub rollout_fields_changed: usize,
-    pub backups_created: usize,
-}
-
 /// Enhanced stats for the dashboard.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/DashboardStats.ts")]

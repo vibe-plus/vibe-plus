@@ -236,42 +236,6 @@ pub(super) fn read_opencode_base_url(path: &PathBuf) -> anyhow::Result<Option<St
         .map(str::to_string))
 }
 
-// ---------------------------------------------------------------------------
-// Provider CRUD
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub(super) struct CodexHistoryPreviewQuery {
-    provider: Option<String>,
-}
-
-pub(super) async fn get_codex_history_preview(
-    Query(query): Query<CodexHistoryPreviewQuery>,
-) -> Result<Json<vibe_protocol::CodexHistorySummary>, AppError> {
-    let provider = query
-        .provider
-        .unwrap_or_else(|| crate::codex_history::DEFAULT_PROVIDER_ID.to_string());
-    let summary = tokio::task::spawn_blocking(move || {
-        crate::codex_history::unify(vibe_protocol::CodexHistoryUnifyInput {
-            provider,
-            from_providers: Vec::new(),
-            apply: false,
-            no_backup: false,
-            codex_home: None,
-        })
-    })
-    .await??;
-    Ok(Json(summary))
-}
-
-pub(super) async fn post_codex_history_unify(
-    Json(mut input): Json<vibe_protocol::CodexHistoryUnifyInput>,
-) -> Result<Json<vibe_protocol::CodexHistorySummary>, AppError> {
-    input.apply = true;
-    let summary = tokio::task::spawn_blocking(move || crate::codex_history::unify(input)).await??;
-    Ok(Json(summary))
-}
-
 pub(super) type CodexAppStatusResponse = CodexAppStatus;
 pub(super) type CodexAppActionResponse = CodexAppActionResult;
 

@@ -97,6 +97,9 @@ pub struct AppState {
     pub codex_sticky_routes: Arc<Mutex<HashMap<String, (CodexStickyRoute, Instant)>>>,
     /// Accumulated USD cost per thread_id (keyed by thread_id, TTL 30 min).
     pub codex_thread_costs: Arc<Mutex<HashMap<String, (f64, Instant)>>>,
+    /// Accumulated (input_sum, output_sum) per turn_id across ALL requests in a turn.
+    /// Lets the final-request summary see tokens from every tool-call iteration.
+    pub codex_turn_io: Arc<Mutex<HashMap<String, (i64, i64, Instant)>>>,
     pub dashboard_stats_publish_pending: Arc<AtomicBool>,
     pub providers_overview_publish_pending: Arc<AtomicBool>,
     codex_summary_config: Arc<Mutex<CodexSummaryConfig>>,
@@ -132,6 +135,7 @@ impl AppState {
             codex_transport: Arc::new(CodexTransportCounters::default()),
             codex_sticky_routes: Arc::new(Mutex::new(HashMap::new())),
             codex_thread_costs: Arc::new(Mutex::new(HashMap::new())),
+            codex_turn_io: Arc::new(Mutex::new(HashMap::new())),
             dashboard_stats_publish_pending: Arc::new(AtomicBool::new(false)),
             providers_overview_publish_pending: Arc::new(AtomicBool::new(false)),
         })
@@ -302,5 +306,36 @@ impl AppState {
             .filter(|(_, ts)| now.duration_since(*ts) <= ttl)
             .map(|(cost, _)| *cost)
             .unwrap_or(0.0)
+    }
+
+    /// Accumulate `input` and `output` tokens for a turn across all its tool-call requests.
+    /// Returns the new (input_sum, output_sum) for this turn.
+    pub fn accumulate_codex_turn_io(&self, turn_id: &str, input: i64, output: i64) -> (i64, i64) {
+        let ttl = Duration::from_secs(30 * 60);
+        let now = Instant::now();
+        let mut map = self
+            .codex_turn_io
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        map.retain(|_, (_, _, ts)| now.duration_since(*ts) <= ttl);
+        let entry = map.entry(turn_id.to_string()).or_insert((0, 0, now));
+        entry.0 += input;
+        entry.1 += output;
+        entry.2 = now;
+        (entry.0, entry.1)
+    }
+
+    /// Read accumulated (input_sum, output_sum) for a turn without modifying it.
+    pub fn get_codex_turn_io(&self, turn_id: &str) -> (i64, i64) {
+        let ttl = Duration::from_secs(30 * 60);
+        let now = Instant::now();
+        let map = self
+            .codex_turn_io
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        map.get(turn_id)
+            .filter(|(_, _, ts)| now.duration_since(*ts) <= ttl)
+            .map(|(i, o, _)| (*i, *o))
+            .unwrap_or((0, 0))
     }
 }

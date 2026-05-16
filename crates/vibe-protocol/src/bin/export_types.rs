@@ -55,8 +55,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     CredentialPlanSnapshot::export_all()?;
     ProviderCodexPlanItem::export_all()?;
     CodexPlanRefreshResult::export_all()?;
-    CodexHistoryUnifyInput::export_all()?;
-    CodexHistorySummary::export_all()?;
     ModelStat::export_all()?;
     ProviderStat::export_all()?;
     DashboardStats::export_all()?;

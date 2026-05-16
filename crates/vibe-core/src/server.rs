@@ -159,21 +159,6 @@ pub fn router(state: AppState) -> Router {
             "/_vp/providers/:id/circuit/reset",
             post(provider_circuit_reset),
         )
-        // Smart intake: clipboard/paste detects credential candidates -> concurrently probe all providers -> one-click persistence
-        .route("/_vp/intake/probe", post(crate::intake::probe_handler))
-        .route("/_vp/intake/import", post(crate::intake::import_handler))
-        .route(
-            "/_vp/intake/preview-remote",
-            post(crate::intake::remote_preview_handler),
-        )
-        .route(
-            "/_vp/intake/import-remote",
-            post(crate::intake::remote_import_handler),
-        )
-        .route(
-            "/_vp/intake/vendor-probe",
-            post(crate::intake::vendor_probe_handler),
-        )
         // credentials
         .route("/_vp/credentials", get(list_credentials_all))
         .route(
@@ -248,8 +233,6 @@ pub fn router(state: AppState) -> Router {
             "/_vp/tool-configs/codex/settings",
             get(get_codex_config_settings).put(put_codex_config_settings),
         )
-        .route("/_vp/codex-history/preview", get(get_codex_history_preview))
-        .route("/_vp/codex-history/unify", post(post_codex_history_unify))
         .route("/_vp/codex-app/status", get(get_codex_app_status))
         .route("/_vp/codex-app/open", post(post_codex_app_open))
         .route("/_vp/codex-app/quit", post(post_codex_app_quit))
