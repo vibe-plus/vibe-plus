@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
-import { api, type LocalCandidate, type ProviderKind, type Provider } from "../api/client.ts";
-import VpIcon from "./vp-icon.vue";
-import ProviderLogo from "./provider-logo.vue";
-import type { WorkspaceView } from "../utils/workspace-view.ts";
+import { api, type LocalCandidate, type ProviderKind, type Provider } from "../../../api/client.ts";
+import VpIcon from "../../../components/vp-icon.vue";
+import ProviderLogo from "../../../components/provider-logo.vue";
+import type { WorkspaceView } from "../../../utils/workspace-view.ts";
 
 const props = defineProps<{
   open: boolean;

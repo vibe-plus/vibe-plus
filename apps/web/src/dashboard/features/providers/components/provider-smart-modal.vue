@@ -6,10 +6,10 @@ import type {
   ProviderKind,
   Credential,
   ModelAlias,
-} from "../api/client.ts";
-import VpIcon from "./vp-icon.vue";
-import ProviderLogo from "./provider-logo.vue";
-import { credentialPrimaryAccountLabel } from "../utils/providers-display.ts";
+} from "../../../api/client.ts";
+import VpIcon from "../../../components/vp-icon.vue";
+import ProviderLogo from "../../../components/provider-logo.vue";
+import { credentialPrimaryAccountLabel } from "../../../utils/providers-display.ts";
 
 const props = defineProps<{
   open: boolean;
