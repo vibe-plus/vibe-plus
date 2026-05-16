@@ -20,7 +20,7 @@ use toml_edit::{value, DocumentMut, Item, Table};
 const DEFAULT_MCP_SERVER_NAME: &str = "vibe_plus";
 const DEFAULT_STARTUP_TIMEOUT_SEC: f64 = 10.0;
 const DEFAULT_TOOL_TIMEOUT_SEC: f64 = 120.0;
-const DEFAULT_WEBSITE_URL: &str = "https://website.localhost";
+const DEFAULT_WEBSITE_URL: &str = "https://web.vibe-plus.localhost";
 
 #[derive(Args)]
 pub struct McpArgs {
@@ -284,7 +284,7 @@ impl VibePlusMcpServer {
     }
 
     fn website_logs_url(&self, args: &OpenLogsArgs) -> String {
-        let mut url = format!("{}#/logs", self.website_url.trim_end_matches('/'));
+        let mut url = format!("{}/ui/monitor", self.website_url.trim_end_matches('/'));
         let mut query = vec![];
         if let Some(view) = args.view.as_deref().filter(|v| *v != "all") {
             query.push(format!("view={view}"));
