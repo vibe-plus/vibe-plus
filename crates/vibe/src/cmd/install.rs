@@ -1,5 +1,5 @@
-use anyhow::Result;
 use super::install_codex_app;
+use anyhow::Result;
 use clap::{Parser, ValueEnum};
 
 use crate::npm_registry::{self, PackageManager};
@@ -83,9 +83,7 @@ fn ensure_package_manager(manager: PackageManager) -> Result<()> {
     if npm_registry::command_exists(cmd) {
         return Ok(());
     }
-    anyhow::bail!(
-        "`{cmd}` not found. Install Node.js (with npm) or bun: https://bun.sh"
-    );
+    anyhow::bail!("`{cmd}` not found. Install Node.js (with npm) or bun: https://bun.sh");
 }
 
 fn install_claude_code(manager: PackageManager) -> Result<()> {
@@ -109,9 +107,7 @@ fn print_binary_version(binary: &str) {
         );
         return;
     }
-    let output = std::process::Command::new(binary)
-        .arg("--version")
-        .output();
+    let output = std::process::Command::new(binary).arg("--version").output();
     match output {
         Ok(o) if o.status.success() => {
             let version = String::from_utf8_lossy(&o.stdout).trim().to_string();

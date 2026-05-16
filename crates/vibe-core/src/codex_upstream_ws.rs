@@ -65,8 +65,7 @@ pub async fn try_forward_official_codex_ws(
     // Failover: a previous sticky route existed and the new pick is different.
     let is_failover = status_decision.is_failover
         || prev_sticky.as_ref().map_or(false, |prev| {
-            prev.provider_id != prepared.provider.id
-                || prev.credential_id != prepared.credential_id
+            prev.provider_id != prepared.provider.id || prev.credential_id != prepared.credential_id
         });
 
     if !router::provider_is_chatgpt_codex_official(&prepared.provider) {

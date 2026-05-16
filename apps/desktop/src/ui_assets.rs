@@ -59,7 +59,9 @@ pub fn ui_cache_version_file() -> Option<PathBuf> {
 fn try_cached(path: &str) -> Option<Response<Cow<'static, [u8]>>> {
     let cache_path = ui_cache_dist_dir()?.join(path);
     let data = std::fs::read(&cache_path).ok()?;
-    let mime = mime_guess::from_path(path).first_or_octet_stream().to_string();
+    let mime = mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .to_string();
     Response::builder()
         .header("Content-Type", mime)
         .header("Access-Control-Allow-Origin", "*")
@@ -70,7 +72,9 @@ fn try_cached(path: &str) -> Option<Response<Cow<'static, [u8]>>> {
 fn serve_embedded(path: &str) -> Response<Cow<'static, [u8]>> {
     match EmbeddedUi::get(path) {
         Some(file) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream().to_string();
+            let mime = mime_guess::from_path(path)
+                .first_or_octet_stream()
+                .to_string();
             Response::builder()
                 .header("Content-Type", mime)
                 .header("Access-Control-Allow-Origin", "*")

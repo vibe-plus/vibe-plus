@@ -1,13 +1,11 @@
 pub mod autostart;
-mod install_codex_app;
-pub mod install;
-pub mod gateway;
-pub mod up;
-pub mod ui;
 pub mod client;
 pub mod codex_history;
 pub mod config;
 pub mod doctor;
+pub mod gateway;
+pub mod install;
+mod install_codex_app;
 pub mod logs;
 pub mod mcp;
 pub mod pair;
@@ -18,6 +16,8 @@ pub mod status;
 pub mod statusline;
 pub mod stop;
 pub mod takeover;
+pub mod ui;
+pub mod up;
 pub mod update;
 
 use anyhow::Result;

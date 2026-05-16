@@ -194,10 +194,26 @@ fn run(args: Args) -> Result<()> {
     let frameless = args.frameless;
     let transparent = args.transparent;
     let hide_on_blur = args.hide_on_blur || (floating && !args.no_hide_on_blur && !args.no_tray);
-    let default_width = if floating { FLOATING_WIDTH } else { DEFAULT_WIDTH };
-    let default_height = if floating { FLOATING_HEIGHT } else { DEFAULT_HEIGHT };
-    let default_min_width = if floating { FLOATING_MIN_WIDTH } else { DEFAULT_MIN_WIDTH };
-    let default_min_height = if floating { FLOATING_MIN_HEIGHT } else { DEFAULT_MIN_HEIGHT };
+    let default_width = if floating {
+        FLOATING_WIDTH
+    } else {
+        DEFAULT_WIDTH
+    };
+    let default_height = if floating {
+        FLOATING_HEIGHT
+    } else {
+        DEFAULT_HEIGHT
+    };
+    let default_min_width = if floating {
+        FLOATING_MIN_WIDTH
+    } else {
+        DEFAULT_MIN_WIDTH
+    };
+    let default_min_height = if floating {
+        FLOATING_MIN_HEIGHT
+    } else {
+        DEFAULT_MIN_HEIGHT
+    };
     let width = args.width.unwrap_or(default_width);
     let height = args.height.unwrap_or(default_height);
     let min_width = args.min_width.unwrap_or(default_min_width);

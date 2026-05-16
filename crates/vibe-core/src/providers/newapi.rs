@@ -91,14 +91,8 @@ pub async fn fetch_groups(
         return obj
             .iter()
             .map(|(k, val)| {
-                let ratio = val
-                    .get("ratio")
-                    .and_then(|r| r.as_f64())
-                    .unwrap_or(1.0);
-                let desc = val
-                    .get("desc")
-                    .and_then(|d| d.as_str())
-                    .map(str::to_string);
+                let ratio = val.get("ratio").and_then(|r| r.as_f64()).unwrap_or(1.0);
+                let desc = val.get("desc").and_then(|d| d.as_str()).map(str::to_string);
                 UpstreamGroupInfo {
                     id: k.clone(),
                     name: k.clone(),

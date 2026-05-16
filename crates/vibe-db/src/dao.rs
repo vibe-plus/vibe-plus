@@ -322,10 +322,7 @@ impl Db {
         let (kind, base_url) = primary_from_protocols(&protocols)
             .map(|(k, u)| (k, u))
             .unwrap_or((input.kind, input.base_url.clone()));
-        let host = input
-            .host
-            .clone()
-            .or_else(|| host_key_from_base(&base_url));
+        let host = input.host.clone().or_else(|| host_key_from_base(&base_url));
         let aliases_json = serde_json::to_string(&input.model_aliases)?;
         let config_json = serde_json::to_string(&ProviderConfig {
             passthrough_mode: input.passthrough_mode,
@@ -376,10 +373,7 @@ impl Db {
         let (kind, base_url) = primary_from_protocols(&protocols)
             .map(|(k, u)| (k, u))
             .unwrap_or((input.kind, input.base_url.clone()));
-        let host = input
-            .host
-            .clone()
-            .or_else(|| host_key_from_base(&base_url));
+        let host = input.host.clone().or_else(|| host_key_from_base(&base_url));
         let config_json = serde_json::to_string(&ProviderConfig {
             passthrough_mode: input.passthrough_mode,
             group_name: normalize_opt_string(input.group_name),
@@ -1849,7 +1843,12 @@ impl Db {
     ) -> Result<vibe_protocol::Credential> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
-        let vendor_str = input.upstream_vendor.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default().trim_matches('"').to_string());
+        let vendor_str = input.upstream_vendor.as_ref().map(|v| {
+            serde_json::to_string(v)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string()
+        });
         self.with(|c| {
             c.execute(
                 "INSERT INTO credentials
@@ -1902,7 +1901,12 @@ impl Db {
     ) -> Result<vibe_protocol::Credential> {
         let now = now_secs();
         // oauth_refresh_token is write-only: only update it when the caller provides a value.
-        let vendor_str = input.upstream_vendor.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default().trim_matches('"').to_string());
+        let vendor_str = input.upstream_vendor.as_ref().map(|v| {
+            serde_json::to_string(v)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string()
+        });
         let n = self.with(|c| {
             Ok(c.execute(
                 "UPDATE credentials
@@ -2033,7 +2037,8 @@ impl Db {
             )?;
             Ok(())
         })?;
-        self.credential_get(id)?.context("credential missing after session update")
+        self.credential_get(id)?
+            .context("credential missing after session update")
     }
 
     /// Store rolling-window usage snapshots fetched from the upstream platform.
@@ -2051,7 +2056,8 @@ impl Db {
             )?;
             Ok(())
         })?;
-        self.credential_get(id)?.context("credential missing after windows update")
+        self.credential_get(id)?
+            .context("credential missing after windows update")
     }
 
     pub fn credential_update_financials(
@@ -2061,10 +2067,7 @@ impl Db {
         usage: Option<ProviderBalanceSnapshot>,
         fetched_at: i64,
     ) -> Result<vibe_protocol::Credential> {
-        let balance_json = balance
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
+        let balance_json = balance.as_ref().map(serde_json::to_string).transpose()?;
         let usage_json = usage.as_ref().map(serde_json::to_string).transpose()?;
         let now = now_secs();
         self.with(|c| {
@@ -2229,10 +2232,7 @@ fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
             model_aliases: serde_json::from_str(&aliases_json).unwrap_or_default(),
         });
     }
-    let host = cfg
-        .host
-        .clone()
-        .or_else(|| host_key_from_base(&base_url));
+    let host = cfg.host.clone().or_else(|| host_key_from_base(&base_url));
     Ok(Provider {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -2570,7 +2570,8 @@ mod tests {
             avatar_url: None,
             base_url: "https://api.anthropic.com".into(),
             protocols: vec![],
-            host: None,auth_ref: Some("keyring:anthropic-prod".into()),
+            host: None,
+            auth_ref: Some("keyring:anthropic-prod".into()),
             enabled: true,
             priority: 100,
             supports_websocket: None,
@@ -2579,6 +2580,104 @@ mod tests {
                 alias: "high".into(),
                 upstream_model: "claude-sonnet-4-6".into(),
             }],
+        }
+    }
+
+    fn sample_route_input() -> RouteInput {
+        RouteInput {
+            name: "high route".into(),
+            match_model: "high".into(),
+            target_provider_id: None,
+            target_model: Some("claude-sonnet-4-6".into()),
+            tier: RouteTier::High,
+            priority: 10,
+        }
+    }
+
+    fn sample_credential_input(label: &str) -> CredentialInput {
+        CredentialInput {
+            label: label.into(),
+            auth_ref: Some(format!("keyring:{label}")),
+            plan_type: Some("pro".into()),
+            notes: Some("primary credential".into()),
+            enabled: true,
+            priority: 10,
+            upstream_vendor: Some(CredentialVendor::NewApi),
+            upstream_username: Some(format!("{label}@example.com")),
+            upstream_session: Some(format!("session-{label}")),
+            upstream_session_expires_at: Some(12_345),
+            upstream_group: Some("default".into()),
+            price_multiplier: 1.25,
+            ..CredentialInput::default()
+        }
+    }
+
+    fn sample_log(
+        id: &str,
+        started_at: i64,
+        provider_id: Option<&str>,
+        status_code: Option<i32>,
+    ) -> RequestLog {
+        RequestLog {
+            id: id.into(),
+            started_at,
+            app: Some("claude-code".into()),
+            provider_id: provider_id.map(str::to_string),
+            requested_model: Some("high".into()),
+            upstream_model: Some("claude-sonnet-4-6".into()),
+            status_code,
+            error: if matches!(status_code, Some(400..=599) | None) {
+                Some("upstream failed".into())
+            } else {
+                None
+            },
+            latency_ms: Some(123),
+            first_token_ms: Some(50),
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 3,
+            cache_creation_tokens: 4,
+            estimated_cost_usd: "0.001".into(),
+            wire: Some("anthropic".into()),
+            route_prefix: Some("codex-v1".into()),
+            credential_id: Some("cred-1".into()),
+            cb_key: Some("cb-1".into()),
+            upstream_http_status: status_code,
+            upstream_error_preview: None,
+            dedupe_key: Some(format!("dedupe-{id}")),
+            client_transport: Some("http-sse".into()),
+            request_headers: Some("x-test: 1".into()),
+            request_body: Some(format!(r#"{{"id":"{id}"}}"#)),
+            response_body: Some("upstream-body".into()),
+            client_response_body: Some("client-body".into()),
+            stream_kind: Some("sse".into()),
+            stream_terminal_seen: Some(true),
+            stream_end_reason: Some("stop".into()),
+            stream_error_detail: None,
+            upstream_first_byte_ms: Some(25),
+            client_first_write_ms: Some(30),
+            last_upstream_event_ms: Some(120),
+            last_client_write_ms: Some(125),
+            upstream_chunk_count: 5,
+            upstream_bytes: 500,
+            client_chunk_count: 6,
+            client_bytes: 600,
+            sse_event_count: 7,
+            sse_data_count: 8,
+            sse_comment_count: 1,
+            sse_keepalive_count: 2,
+            sse_done_count: 1,
+            parse_error_count: 0,
+            first_keepalive_ms: Some(60),
+            last_keepalive_ms: Some(90),
+            max_gap_between_upstream_events_ms: Some(40),
+            max_gap_between_data_events_ms: Some(45),
+            keepalive_after_last_data_count: 1,
+            last_data_event_ms: Some(110),
+            bridge_mode: Some("chat-to-responses".into()),
+            status_injected: true,
+            terminal_injected: true,
+            upstream_terminal_type: Some("done".into()),
         }
     }
 
@@ -2601,66 +2700,165 @@ mod tests {
     }
 
     #[test]
+    fn provider_host_lookup_and_consolidate_moves_credentials() {
+        let db = Db::memory().unwrap();
+        let mut first = sample_input();
+        first.name = "deepseek-hk".into();
+        first.kind = ProviderKind::OpenaiChat;
+        first.base_url = "https://API.DeepSeek.com/v1/".into();
+        first.host = None;
+        first.priority = 20;
+        let keep = db.provider_insert(first).unwrap();
+        assert_eq!(keep.host.as_deref(), Some("api.deepseek.com"));
+
+        let mut dupe_input = sample_input();
+        dupe_input.name = "deepseek-sg".into();
+        dupe_input.kind = ProviderKind::OpenaiResponses;
+        dupe_input.base_url = "https://proxy.local/responses".into();
+        dupe_input.host = Some("www.API.DeepSeek.COM".into());
+        dupe_input.priority = 10;
+        let dupe = db.provider_insert(dupe_input).unwrap();
+
+        let cred = db
+            .credential_insert(
+                &dupe.id,
+                sample_credential_input("dupe-key"),
+                Some("fp:dupe".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            db.provider_find_by_host("https://www.api.deepseek.com/v1")
+                .unwrap()
+                .unwrap()
+                .id,
+            dupe.id,
+            "host lookup follows provider ordering before consolidation"
+        );
+        assert_eq!(
+            db.provider_find_all_by_host("api.deepseek.com")
+                .unwrap()
+                .len(),
+            2
+        );
+
+        db.provider_consolidate_by_host(&keep.id, "https://api.deepseek.com/v1")
+            .unwrap();
+
+        assert!(db.provider_get(&dupe.id).unwrap().is_none());
+        assert_eq!(
+            db.provider_find_all_by_host("api.deepseek.com")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.credential_get(&cred.id).unwrap().unwrap().provider_id,
+            keep.id
+        );
+    }
+
+    #[test]
+    fn route_crud_orders_by_priority_and_reports_missing_rows() {
+        let db = Db::memory().unwrap();
+        let provider = db.provider_insert(sample_input()).unwrap();
+
+        let mut low = sample_route_input();
+        low.name = "low route".into();
+        low.match_model = "low".into();
+        low.tier = RouteTier::Low;
+        low.priority = 50;
+        let low = db.route_insert(low).unwrap();
+
+        let mut high = sample_route_input();
+        high.target_provider_id = Some(provider.id.clone());
+        high.priority = 5;
+        let high = db.route_insert(high).unwrap();
+
+        let listed = db.route_list().unwrap();
+        assert_eq!(
+            listed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec![high.id.as_str(), low.id.as_str()]
+        );
+
+        let mut update = sample_route_input();
+        update.name = "updated high".into();
+        update.match_model = "sonnet".into();
+        update.target_provider_id = Some(provider.id);
+        update.target_model = Some("claude-3-7-sonnet-latest".into());
+        update.tier = RouteTier::Default;
+        update.priority = 1;
+        let updated = db.route_update(&high.id, update).unwrap();
+        assert_eq!(updated.name, "updated high");
+        assert_eq!(
+            db.route_get(&high.id).unwrap().unwrap().match_model,
+            "sonnet"
+        );
+
+        db.route_delete(&low.id).unwrap();
+        assert!(db.route_get(&low.id).unwrap().is_none());
+        assert!(db.route_update("missing", sample_route_input()).is_err());
+        assert!(db.route_delete("missing").is_err());
+    }
+
+    #[test]
+    fn log_insert_list_filter_and_get_preserve_summary_vs_body_fields() {
+        let db = Db::memory().unwrap();
+        let p1 = db.provider_insert(sample_input()).unwrap();
+        let mut p2_input = sample_input();
+        p2_input.name = "other".into();
+        p2_input.base_url = "https://api.other.example/v1".into();
+        let p2 = db.provider_insert(p2_input).unwrap();
+        let base = now_secs() - 100;
+
+        db.log_insert(&sample_log("ok-old", base, Some(&p1.id), Some(200)))
+            .unwrap();
+        db.log_insert(&sample_log("fail-new", base + 10, Some(&p1.id), Some(500)))
+            .unwrap();
+        db.log_insert(&sample_log("ok-other", base + 20, Some(&p2.id), Some(204)))
+            .unwrap();
+
+        let page = db.log_list(2, 0).unwrap();
+        assert_eq!(
+            page.items.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+            vec!["ok-other", "fail-new"]
+        );
+        assert!(page.has_more);
+        assert_eq!(
+            page.items[0].request_headers, None,
+            "list endpoint omits bulky/sensitive request headers"
+        );
+        assert_eq!(page.items[0].request_body, None);
+
+        let filtered_ok = db
+            .log_list_filtered(10, 0, Some(base + 5), Some(&p1.id), Some(true))
+            .unwrap();
+        assert!(filtered_ok.items.is_empty());
+        let filtered_fail = db
+            .log_list_filtered(10, 0, Some(base + 5), Some(&p1.id), Some(false))
+            .unwrap();
+        assert_eq!(
+            filtered_fail
+                .items
+                .iter()
+                .map(|l| l.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fail-new"]
+        );
+
+        let detail = db.log_get("fail-new").unwrap().unwrap();
+        assert_eq!(detail.request_headers.as_deref(), Some("x-test: 1"));
+        assert_eq!(detail.request_body.as_deref(), Some(r#"{"id":"fail-new"}"#));
+        assert_eq!(detail.response_body.as_deref(), Some("upstream-body"));
+        assert_eq!(detail.stream_terminal_seen, Some(true));
+        assert!(detail.status_injected);
+        assert_eq!(db.log_get("missing").unwrap().map(|l| l.id), None);
+    }
+
+    #[test]
     fn log_insert_and_summary() {
         let db = Db::memory().unwrap();
-        db.log_insert(&RequestLog {
-            id: "log-1".into(),
-            started_at: now_secs(),
-            app: Some("claude-code".into()),
-            provider_id: None,
-            requested_model: Some("claude".into()),
-            upstream_model: Some("claude-sonnet-4-6".into()),
-            status_code: Some(200),
-            error: None,
-            latency_ms: Some(123),
-            first_token_ms: Some(50),
-            input_tokens: 10,
-            output_tokens: 20,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            estimated_cost_usd: "0".into(),
-            wire: None,
-            route_prefix: None,
-            credential_id: None,
-            cb_key: None,
-            upstream_http_status: None,
-            upstream_error_preview: None,
-            dedupe_key: None,
-            client_transport: None,
-            request_headers: None,
-            request_body: None,
-            response_body: None,
-            client_response_body: None,
-            stream_kind: Some("none".into()),
-            stream_terminal_seen: None,
-            stream_end_reason: None,
-            stream_error_detail: None,
-            upstream_first_byte_ms: None,
-            client_first_write_ms: None,
-            last_upstream_event_ms: None,
-            last_client_write_ms: None,
-            upstream_chunk_count: 0,
-            upstream_bytes: 0,
-            client_chunk_count: 0,
-            client_bytes: 0,
-            sse_event_count: 0,
-            sse_data_count: 0,
-            sse_comment_count: 0,
-            sse_keepalive_count: 0,
-            sse_done_count: 0,
-            parse_error_count: 0,
-            first_keepalive_ms: None,
-            last_keepalive_ms: None,
-            max_gap_between_upstream_events_ms: None,
-            max_gap_between_data_events_ms: None,
-            keepalive_after_last_data_count: 0,
-            last_data_event_ms: None,
-            bridge_mode: Some("none".into()),
-            status_injected: false,
-            terminal_injected: false,
-            upstream_terminal_type: None,
-        })
-        .unwrap();
+        db.log_insert(&sample_log("log-1", now_secs(), None, Some(200)))
+            .unwrap();
 
         let page = db.log_list(50, 0).unwrap();
         assert_eq!(page.items.len(), 1);
@@ -2668,5 +2866,129 @@ mod tests {
         assert_eq!(summary.requests, 1);
         assert_eq!(summary.input_tokens, 10);
         assert_eq!(summary.output_tokens, 20);
+        assert_eq!(summary.cache_read_tokens, 3);
+        assert_eq!(summary.cache_creation_tokens, 4);
+    }
+
+    #[test]
+    fn credential_crud_enable_rate_limit_financials_and_sensitive_reads() {
+        let db = Db::memory().unwrap();
+        let provider = db.provider_insert(sample_input()).unwrap();
+
+        let cred = db
+            .credential_insert(
+                &provider.id,
+                sample_credential_input("primary"),
+                Some("fp:primary".into()),
+            )
+            .unwrap();
+        assert_eq!(cred.provider_id, provider.id);
+        assert_eq!(cred.label, "primary");
+        assert_eq!(cred.auth_fingerprint.as_deref(), Some("fp:primary"));
+        assert_eq!(cred.upstream_vendor, Some(CredentialVendor::NewApi));
+        assert!(cred.upstream_has_session);
+        assert_eq!(
+            db.credential_get_session(&cred.id).unwrap().as_deref(),
+            Some("session-primary")
+        );
+        assert_eq!(
+            db.credential_list_for_provider(&provider.id).unwrap().len(),
+            1
+        );
+        assert!(db
+            .credential_has_fingerprint_for_provider(&provider.id, "fp:primary")
+            .unwrap());
+
+        let disabled = db.credential_set_enabled(&cred.id, false).unwrap();
+        assert!(!disabled.enabled);
+
+        db.credential_update_rate_limit(
+            &cred.id,
+            Some(100),
+            Some(42),
+            Some(1_000),
+            Some(200),
+            Some(99),
+            Some(2_000),
+        )
+        .unwrap();
+        let limited = db.credential_get(&cred.id).unwrap().unwrap();
+        assert_eq!(limited.rl_requests_limit, Some(100));
+        assert_eq!(limited.rl_requests_remaining, Some(42));
+        assert_eq!(limited.rl_tokens_limit, Some(200));
+        assert_eq!(limited.rl_tokens_remaining, Some(99));
+
+        db.credential_record_failure(&cred.id, Some("rate limited"))
+            .unwrap();
+        let failed = db.credential_get(&cred.id).unwrap().unwrap();
+        assert_eq!(failed.consecutive_failures, 1);
+        assert_eq!(failed.last_error.as_deref(), Some("rate limited"));
+        assert!(failed.last_used_at.is_some());
+        db.credential_record_success(&cred.id).unwrap();
+        let recovered = db.credential_get(&cred.id).unwrap().unwrap();
+        assert_eq!(recovered.consecutive_failures, 0);
+        assert_eq!(recovered.last_error, None);
+
+        let balance = ProviderBalanceSnapshot {
+            currency: "USD".into(),
+            balance: Some("12.34".into()),
+            remaining: Some("10.00".into()),
+            used: Some("2.34".into()),
+            total: None,
+            period: Some("monthly".into()),
+            note: Some("test balance".into()),
+        };
+        let usage = ProviderBalanceSnapshot {
+            currency: "USD".into(),
+            balance: None,
+            remaining: None,
+            used: Some("1.23".into()),
+            total: Some("20.00".into()),
+            period: Some("daily".into()),
+            note: None,
+        };
+        let with_money = db
+            .credential_update_financials(
+                &cred.id,
+                Some(balance.clone()),
+                Some(usage.clone()),
+                55_555,
+            )
+            .unwrap();
+        assert_eq!(with_money.balance.unwrap().balance, balance.balance);
+        assert_eq!(with_money.usage.unwrap().total, usage.total);
+        assert_eq!(with_money.balance_fetched_at, Some(55_555));
+
+        let mut update = sample_credential_input("updated");
+        update.oauth_access_token = Some("access-2".into());
+        update.oauth_refresh_token = Some("refresh-2".into());
+        update.oauth_expires_at = Some(99_999);
+        update.upstream_session = None;
+        update.enabled = true;
+        let updated = db
+            .credential_update(&cred.id, update, Some("fp:updated".into()))
+            .unwrap();
+        assert_eq!(updated.label, "updated");
+        assert!(updated.oauth_has_refresh);
+        assert_eq!(
+            db.credential_get_refresh_token(&cred.id)
+                .unwrap()
+                .as_deref(),
+            Some("refresh-2")
+        );
+        assert_eq!(
+            db.credential_count_same_fingerprint("fp:updated", None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.credential_count_same_fingerprint("fp:updated", Some(&cred.id))
+                .unwrap(),
+            0
+        );
+
+        db.credential_delete(&cred.id).unwrap();
+        assert!(db.credential_get(&cred.id).unwrap().is_none());
+        assert!(db.credential_delete(&cred.id).is_err());
     }
 }

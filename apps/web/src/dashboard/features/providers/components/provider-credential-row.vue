@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import type { Credential, CredentialPoolStatus, CredentialPlanSnapshot } from "../api/client.ts";
-import VpIcon from "./vp-icon.vue";
+import type {
+  Credential,
+  CredentialPoolStatus,
+  CredentialPlanSnapshot,
+} from "../../../api/client.ts";
+import VpIcon from "../../../components/vp-icon.vue";
 import {
   authRefPreview,
   credentialJwtPlanSlugDisplay,
@@ -18,7 +22,7 @@ import {
   rlClass,
   rlPercent,
   credentialAuthShort,
-} from "../utils/providers-display.ts";
+} from "../../../utils/providers-display.ts";
 
 const props = defineProps<{
   credential: Credential;

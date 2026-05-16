@@ -95,7 +95,10 @@ pub struct UpstreamGroupInfo {
 
 /// Body for `POST /_vp/credentials/:id/login`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/CredentialLoginRequest.ts")]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CredentialLoginRequest.ts"
+)]
 pub struct CredentialLoginRequest {
     pub username: String,
     pub password: String,
@@ -103,7 +106,10 @@ pub struct CredentialLoginRequest {
 
 /// Response from `POST /_vp/credentials/:id/login`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/CredentialLoginResponse.ts")]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CredentialLoginResponse.ts"
+)]
 pub struct CredentialLoginResponse {
     pub ok: bool,
     pub note: Option<String>,
@@ -229,6 +235,14 @@ impl Provider {
             base_url: self.base_url.clone(),
             model_aliases: self.model_aliases.clone(),
         }]
+    }
+
+    /// Primary protocol entry used for legacy `kind` / `base_url` compatibility.
+    pub fn primary_protocol(&self) -> ProviderProtocol {
+        self.effective_protocols()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| ProviderProtocol::from_kind_base(self.kind, self.base_url.clone()))
     }
 
     /// Pick the protocol entry that matches `wire_kind`, or the primary (`kind` / first).
@@ -1354,4 +1368,276 @@ pub struct CredentialInput {
 
 pub fn ts_out_dir() -> &'static str {
     TS_OUT_DIR
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alias(alias: &str, upstream_model: &str) -> ModelAlias {
+        ModelAlias {
+            alias: alias.to_string(),
+            upstream_model: upstream_model.to_string(),
+        }
+    }
+
+    fn provider_with(protocols: Vec<ProviderProtocol>, model_aliases: Vec<ModelAlias>) -> Provider {
+        Provider {
+            id: "provider-1".to_string(),
+            name: "Provider 1".to_string(),
+            group_name: None,
+            avatar_url: None,
+            kind: ProviderKind::OpenaiChat,
+            base_url: "https://legacy.example.com/v1".to_string(),
+            protocols,
+            host: None,
+            auth_ref: Some("env:TEST_KEY".to_string()),
+            enabled: true,
+            priority: 10,
+            supports_websocket: None,
+            passthrough_mode: true,
+            remote_models: vec!["remote-model".to_string()],
+            remote_models_fetched_at: Some(123),
+            last_speedtest: None,
+            model_aliases,
+            created_at: 1,
+            updated_at: 2,
+        }
+    }
+
+    #[test]
+    fn host_from_base_url_extracts_http_hosts_only() {
+        assert_eq!(
+            host_from_base_url("https://api.deepseek.com/v1"),
+            Some("api.deepseek.com".to_string())
+        );
+        assert_eq!(
+            host_from_base_url("  http://api.openai.com:8443/v1/chat/completions  "),
+            Some("api.openai.com".to_string())
+        );
+        assert_eq!(host_from_base_url("api.deepseek.com/v1"), None);
+        assert_eq!(host_from_base_url("https:///v1"), None);
+        assert_eq!(host_from_base_url(""), None);
+    }
+
+    #[test]
+    fn canonical_provider_host_normalizes_urls_and_hostnames() {
+        assert_eq!(
+            canonical_provider_host(" HTTPS://API.DeepSeek.COM/v1 "),
+            None,
+            "scheme matching is currently case-sensitive"
+        );
+        assert_eq!(
+            canonical_provider_host(" https://www.API.DeepSeek.COM:443/v1 "),
+            Some("api.deepseek.com".to_string())
+        );
+        assert_eq!(
+            canonical_provider_host(" www.OpenRouter.AI "),
+            Some("openrouter.ai".to_string())
+        );
+        assert_eq!(canonical_provider_host("   "), None);
+    }
+
+    #[test]
+    fn host_to_brand_label_covers_known_hosts_and_normalizes_www() {
+        assert_eq!(host_to_brand_label(" api.deepseek.com "), Some("DeepSeek"));
+        assert_eq!(
+            host_to_brand_label("www.api.openrouter.ai"),
+            Some("OpenRouter")
+        );
+        assert_eq!(host_to_brand_label("API.OPENAI.COM"), Some("OpenAI"));
+        assert_eq!(host_to_brand_label("unknown.example.com"), None);
+    }
+
+    #[test]
+    fn host_label_camel_fallback_uses_non_generic_domain_segments() {
+        assert_eq!(host_label_camel_fallback("api.deepseek.com"), "Deepseek");
+        assert_eq!(host_label_camel_fallback("www.foo-bar.dev"), "Foo-bar");
+        assert_eq!(
+            host_label_camel_fallback("gateway.eu.example.co.uk"),
+            "Gateway Eu Example"
+        );
+        assert_eq!(host_label_camel_fallback(" api.com "), "api.com");
+    }
+
+    #[test]
+    fn display_name_for_remote_prefers_branding_then_known_brand_then_fallback() {
+        assert_eq!(
+            display_name_for_remote(
+                Some("  Custom Name  "),
+                "https://api.deepseek.com/v1",
+                ProviderKind::OpenaiChat
+            ),
+            "Custom Name"
+        );
+        assert_eq!(
+            display_name_for_remote(
+                Some("   "),
+                "https://api.deepseek.com/v1",
+                ProviderKind::OpenaiChat
+            ),
+            "DeepSeek"
+        );
+        assert_eq!(
+            display_name_for_remote(
+                None,
+                "https://api.unknown-provider.example.com/v1",
+                ProviderKind::OpenaiChat
+            ),
+            "Unknown-provider Example"
+        );
+        assert_eq!(
+            display_name_for_remote(None, "not a url", ProviderKind::OpenaiChat),
+            "not a url"
+        );
+    }
+
+    #[test]
+    fn provider_kind_slug_and_protocol_display_label_are_stable() {
+        let cases = [
+            (ProviderKind::Anthropic, "anthropic", "Messages"),
+            (ProviderKind::OpenaiChat, "openai-chat", "Chat"),
+            (
+                ProviderKind::OpenaiResponses,
+                "openai-responses",
+                "Responses",
+            ),
+            (ProviderKind::GeminiNative, "gemini-native", "Generate"),
+        ];
+
+        for (kind, slug, label) in cases {
+            assert_eq!(provider_kind_slug(kind), slug);
+            assert_eq!(protocol_display_label(kind), label);
+        }
+    }
+
+    #[test]
+    fn provider_protocol_from_kind_base_sets_kind_url_and_empty_aliases() {
+        let proto = ProviderProtocol::from_kind_base(
+            ProviderKind::OpenaiResponses,
+            "https://api.openai.com/v1",
+        );
+
+        assert_eq!(proto.kind, ProviderKind::OpenaiResponses);
+        assert_eq!(proto.base_url, "https://api.openai.com/v1");
+        assert!(proto.model_aliases.is_empty());
+    }
+
+    #[test]
+    fn provider_effective_protocols_falls_back_to_legacy_fields_with_aliases() {
+        let aliases = vec![alias("high", "claude-sonnet-4")];
+        let provider = provider_with(Vec::new(), aliases.clone());
+
+        assert_eq!(
+            provider.effective_protocols(),
+            vec![ProviderProtocol {
+                kind: ProviderKind::OpenaiChat,
+                base_url: "https://legacy.example.com/v1".to_string(),
+                model_aliases: aliases,
+            }]
+        );
+    }
+
+    #[test]
+    fn provider_effective_protocols_uses_stored_protocols_as_is() {
+        let protocols = vec![
+            ProviderProtocol {
+                kind: ProviderKind::Anthropic,
+                base_url: "https://messages.example.com".to_string(),
+                model_aliases: vec![alias("sonnet", "claude-sonnet-4")],
+            },
+            ProviderProtocol::from_kind_base(
+                ProviderKind::OpenaiResponses,
+                "https://responses.example.com/v1",
+            ),
+        ];
+        let provider = provider_with(protocols.clone(), vec![alias("legacy", "legacy-model")]);
+
+        assert_eq!(provider.effective_protocols(), protocols);
+    }
+
+    #[test]
+    fn provider_primary_protocol_returns_first_effective_protocol() {
+        let provider = provider_with(
+            vec![
+                ProviderProtocol::from_kind_base(
+                    ProviderKind::Anthropic,
+                    "https://messages.example.com",
+                ),
+                ProviderProtocol::from_kind_base(
+                    ProviderKind::OpenaiChat,
+                    "https://chat.example.com/v1",
+                ),
+            ],
+            vec![alias("legacy", "legacy-model")],
+        );
+
+        let primary = provider.primary_protocol();
+        assert_eq!(primary.kind, ProviderKind::Anthropic);
+        assert_eq!(primary.base_url, "https://messages.example.com");
+        assert!(primary.model_aliases.is_empty());
+    }
+
+    #[test]
+    fn provider_protocol_for_kind_matches_requested_kind_or_legacy_fallback() {
+        let responses = ProviderProtocol {
+            kind: ProviderKind::OpenaiResponses,
+            base_url: "https://responses.example.com/v1".to_string(),
+            model_aliases: vec![alias("codex", "gpt-5.1-codex")],
+        };
+        let provider = provider_with(
+            vec![
+                ProviderProtocol::from_kind_base(
+                    ProviderKind::Anthropic,
+                    "https://messages.example.com",
+                ),
+                responses.clone(),
+            ],
+            vec![alias("legacy", "legacy-model")],
+        );
+
+        assert_eq!(
+            provider.protocol_for_kind(ProviderKind::OpenaiResponses),
+            responses
+        );
+        assert_eq!(
+            provider.protocol_for_kind(ProviderKind::GeminiNative),
+            ProviderProtocol::from_kind_base(
+                ProviderKind::OpenaiChat,
+                "https://legacy.example.com/v1"
+            )
+        );
+    }
+
+    #[test]
+    fn provider_with_protocol_updates_wire_fields_and_preserves_aliases_when_proto_aliases_empty() {
+        let provider = provider_with(Vec::new(), vec![alias("legacy", "legacy-model")]);
+        let proto = ProviderProtocol::from_kind_base(
+            ProviderKind::OpenaiResponses,
+            "https://responses.example.com/v1",
+        );
+
+        let updated = provider.with_protocol(&proto);
+        assert_eq!(updated.kind, ProviderKind::OpenaiResponses);
+        assert_eq!(updated.base_url, "https://responses.example.com/v1");
+        assert_eq!(updated.model_aliases, vec![alias("legacy", "legacy-model")]);
+    }
+
+    #[test]
+    fn provider_with_protocol_replaces_aliases_when_proto_aliases_are_present() {
+        let provider = provider_with(Vec::new(), vec![alias("legacy", "legacy-model")]);
+        let proto = ProviderProtocol {
+            kind: ProviderKind::Anthropic,
+            base_url: "https://messages.example.com".to_string(),
+            model_aliases: vec![alias("sonnet", "claude-sonnet-4")],
+        };
+
+        let updated = provider.with_protocol(&proto);
+        assert_eq!(updated.kind, ProviderKind::Anthropic);
+        assert_eq!(updated.base_url, "https://messages.example.com");
+        assert_eq!(
+            updated.model_aliases,
+            vec![alias("sonnet", "claude-sonnet-4")]
+        );
+    }
 }

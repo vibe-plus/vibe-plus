@@ -6,18 +6,18 @@ import type {
   CredentialPoolStatus,
   Provider,
   ProviderHealthSummary,
-} from "../api/client.ts";
-import VpIcon from "./vp-icon.vue";
-import ProviderLogo from "./provider-logo.vue";
-import UsageRing from "./UsageRing.vue";
+} from "../../../api/client.ts";
+import VpIcon from "../../../components/vp-icon.vue";
+import ProviderLogo from "../../../components/provider-logo.vue";
+import UsageRing from "../../../components/UsageRing.vue";
 import {
   credentialPlanTierHint,
   credentialPrimaryAccountLabel,
   mergedPoolStatus,
   primaryPlanPercent,
-} from "../utils/providers-display.ts";
-import { protocolLabelsForProvider } from "../utils/protocol-label.ts";
-import { brandHintFromHost } from "../utils/brand-hint.ts";
+} from "../../../utils/providers-display.ts";
+import { protocolLabelsForProvider } from "../../../utils/protocol-label.ts";
+import { brandHintFromHost } from "../../../utils/brand-hint.ts";
 
 type ProviderGroupKey = "native" | "bridged" | "other";
 type ClientToolId = "codex" | "opencode" | "claude-code";

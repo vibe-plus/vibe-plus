@@ -2969,6 +2969,222 @@ async fn do_oauth_refresh(
     })
 }
 
-// Tests for plan-percent and sticky-key logic now live in their respective submodules:
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header_value(value: &str) -> HeaderValue {
+        HeaderValue::from_str(value).expect("test header value should be valid")
+    }
+
+    #[test]
+    fn body_wants_stream_only_when_stream_boolean_true() {
+        assert!(body_wants_stream(br#"{"model":"gpt-4.1","stream":true}"#));
+
+        assert!(!body_wants_stream(br#"{"model":"gpt-4.1","stream":false}"#));
+        assert!(!body_wants_stream(br#"{"model":"gpt-4.1"}"#));
+        assert!(!body_wants_stream(br#"{"stream":"true"}"#));
+        assert!(!body_wants_stream(b"not json"));
+    }
+
+    #[test]
+    fn codex_sticky_key_only_applies_to_responses_wire() {
+        let mut headers = HeaderMap::new();
+        headers.insert("thread_id", header_value("thread-from-header"));
+        let body = br#"{"thread_id":"thread-from-body"}"#;
+
+        assert_eq!(
+            codex_sticky_key(Wire::OpenaiResponses, &headers, body).as_deref(),
+            Some("hdr:thread_id:thread-from-header")
+        );
+        assert_eq!(codex_sticky_key(Wire::OpenaiChat, &headers, body), None);
+        assert_eq!(codex_sticky_key(Wire::Anthropic, &headers, body), None);
+    }
+
+    #[test]
+    fn codex_sticky_key_prefers_thread_header_then_session_then_body() {
+        let body = br#"{"previous_response_id":"resp-123"}"#;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("session_id", header_value("session-1"));
+        assert_eq!(
+            codex_sticky_key(Wire::OpenaiResponses, &headers, body).as_deref(),
+            Some("hdr:session_id:session-1")
+        );
+
+        headers.insert("thread_id", header_value(" thread-1 "));
+        assert_eq!(
+            codex_sticky_key(Wire::OpenaiResponses, &headers, body).as_deref(),
+            Some("hdr:thread_id:thread-1")
+        );
+
+        let headers = HeaderMap::new();
+        assert_eq!(
+            codex_sticky_key(Wire::OpenaiResponses, &headers, body).as_deref(),
+            Some("body:/previous_response_id:resp-123")
+        );
+    }
+
+    #[test]
+    fn update_peak_ignores_none_and_non_finite_and_keeps_maximum() {
+        let mut peak = None;
+
+        update_peak(&mut peak, None);
+        update_peak(&mut peak, Some(f64::NAN));
+        update_peak(&mut peak, Some(f64::INFINITY));
+        assert_eq!(peak, None);
+
+        update_peak(&mut peak, Some(7.5));
+        assert_eq!(peak, Some(7.5));
+
+        update_peak(&mut peak, Some(3.0));
+        assert_eq!(peak, Some(7.5));
+
+        update_peak(&mut peak, Some(8.25));
+        assert_eq!(peak, Some(8.25));
+    }
+
+    #[test]
+    fn find_sse_delimiter_detects_lf_and_crlf_block_boundaries() {
+        assert_eq!(find_sse_delimiter(b"data: one\n\nrest"), Some((9, 2)));
+        assert_eq!(
+            find_sse_delimiter(b"event: message\r\ndata: one\r\n\r\nrest"),
+            Some((25, 4))
+        );
+        assert_eq!(find_sse_delimiter(b"data: partial\n"), None);
+        assert_eq!(find_sse_delimiter(b""), None);
+    }
+
+    #[test]
+    fn find_sse_delimiter_prefers_earliest_lf_boundary() {
+        // Current behavior checks LF/LF first, so a later LF delimiter wins even
+        // when an earlier CRLF delimiter also exists. This locks in the behavior
+        // before splitting the module.
+        assert_eq!(
+            find_sse_delimiter(b"data: a\r\n\r\nx\ndata: b\n\nrest"),
+            Some((20, 2))
+        );
+    }
+
+    #[test]
+    fn extract_model_reads_top_level_string_model_only() {
+        assert_eq!(
+            extract_model(br#"{"model":"gpt-4.1","input":"hi"}"#).as_deref(),
+            Some("gpt-4.1")
+        );
+        assert_eq!(extract_model(br#"{"model":42}"#), None);
+        assert_eq!(extract_model(br#"{"input":"hi"}"#), None);
+        assert_eq!(extract_model(b"not json"), None);
+    }
+
+    #[test]
+    fn detect_app_returns_user_agent_when_utf8() {
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", header_value("codex-cli/1.2.3"));
+        assert_eq!(detect_app(&headers).as_deref(), Some("codex-cli/1.2.3"));
+
+        assert_eq!(detect_app(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn is_hop_header_matches_case_insensitively_and_excludes_end_to_end_headers() {
+        assert!(is_hop_header("Connection"));
+        assert!(is_hop_header("TRANSFER-ENCODING"));
+        assert!(is_hop_header("content-length"));
+        assert!(is_hop_header("proxy-authorization"));
+
+        assert!(!is_hop_header("content-type"));
+        assert!(!is_hop_header("x-request-id"));
+        assert!(!is_hop_header("authorization"));
+    }
+
+    #[test]
+    fn copy_response_headers_drops_hop_headers_and_keeps_response_metadata() {
+        let mut src = reqwest::header::HeaderMap::new();
+        src.insert(
+            reqwest::header::CONTENT_TYPE,
+            header_value("application/json"),
+        );
+        src.insert(reqwest::header::CONTENT_LENGTH, header_value("123"));
+        src.insert(reqwest::header::TRANSFER_ENCODING, header_value("chunked"));
+        src.insert("x-request-id", header_value("req-1"));
+
+        let dst = copy_response_headers(&src);
+
+        assert_eq!(
+            dst.get("content-type").and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            dst.get("x-request-id").and_then(|v| v.to_str().ok()),
+            Some("req-1")
+        );
+        assert!(!dst.contains_key("content-length"));
+        assert!(!dst.contains_key("transfer-encoding"));
+    }
+
+    #[test]
+    fn parse_duration_secs_accepts_seconds_minutes_and_minute_second_pairs() {
+        assert_eq!(parse_duration_secs("3s"), Some(3));
+        assert_eq!(parse_duration_secs("90s"), Some(90));
+        assert_eq!(parse_duration_secs("1m"), Some(60));
+        assert_eq!(parse_duration_secs("1ms"), Some(60));
+        assert_eq!(parse_duration_secs("1m30s"), Some(90));
+        assert_eq!(parse_duration_secs(" 2m05s "), Some(125));
+
+        assert_eq!(parse_duration_secs("90"), None);
+        assert_eq!(parse_duration_secs("1h"), None);
+        assert_eq!(parse_duration_secs("m30s"), None);
+    }
+
+    #[test]
+    fn sanitized_headers_json_redacts_sensitive_headers_and_omits_vibe_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", header_value("Bearer secret"));
+        headers.insert("cookie", header_value("sid=secret"));
+        headers.insert("x-api-key", header_value("api-secret"));
+        headers.insert("x-custom-token", header_value("token-secret"));
+        headers.insert("x-vibe-internal", header_value("do-not-log"));
+        headers.insert("content-type", header_value("application/json"));
+
+        let json = sanitized_headers_json(&headers, true).expect("headers should be serialized");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("sanitized headers should be valid json");
+
+        assert_eq!(value["authorization"], "<redacted>");
+        assert_eq!(value["cookie"], "<redacted>");
+        assert_eq!(value["x-api-key"], "<redacted>");
+        assert_eq!(value["x-custom-token"], "<redacted>");
+        assert_eq!(value["content-type"], "application/json");
+        assert!(value.get("x-vibe-internal").is_none());
+    }
+
+    #[test]
+    fn sanitized_headers_json_can_preserve_sensitive_headers_for_debugging() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", header_value("Bearer visible"));
+
+        let json = sanitized_headers_json(&headers, false).expect("headers should be serialized");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("sanitized headers should be valid json");
+
+        assert_eq!(value["authorization"], "Bearer visible");
+    }
+
+    #[test]
+    fn sanitized_headers_json_returns_none_for_empty_or_only_vibe_headers() {
+        assert_eq!(sanitized_headers_json(&HeaderMap::new(), true), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-vibe-trace", header_value("internal"));
+        assert_eq!(sanitized_headers_json(&headers, true), None);
+    }
+}
+
+// Tests for plan-percent and selector-specific sticky-key logic live in:
 //   forward::selector (expand_picks, sticky_key, plan exhaustion)
 //   forward::outcome  (classify_retryable)
