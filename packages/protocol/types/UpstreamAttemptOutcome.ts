@@ -7,4 +7,5 @@ export type UpstreamAttemptOutcome =
   | "rate-limit"
   | "transport-error"
   | "fallback-abandon"
-  | "circuit-skip";
+  | "circuit-skip"
+  | "race-aborted";

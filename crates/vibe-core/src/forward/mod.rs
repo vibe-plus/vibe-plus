@@ -20,6 +20,7 @@
 //! - `outcome`  — pure HTTP status → retry-decision mapping (testable in isolation)
 
 pub mod outcome;
+pub mod race;
 pub mod selector;
 
 use crate::cache;
@@ -737,7 +738,7 @@ pub(crate) async fn prepare_forward_once(
                 route_id = %route.id,
                 route_name = %route.name,
                 fanout_n = route.fanout_n,
-                "race strategy requested — execution falls back to sequential pending Phase 3b harness"
+                "race strategy requested — falling back to sequential; race harness is scaffolded in forward::race but try_one_pick is pending Phase 3c"
             );
         }
     }
@@ -1402,7 +1403,7 @@ pub async fn forward(
                 route_id = %route.id,
                 route_name = %route.name,
                 fanout_n = route.fanout_n,
-                "race strategy requested — execution falls back to sequential pending Phase 3b harness"
+                "race strategy requested — falling back to sequential; race harness is scaffolded in forward::race but try_one_pick is pending Phase 3c"
             );
         }
     }

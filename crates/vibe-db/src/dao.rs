@@ -218,6 +218,7 @@ fn upstream_attempt_outcome_to_str(o: UpstreamAttemptOutcome) -> &'static str {
         UpstreamAttemptOutcome::TransportError => "transport-error",
         UpstreamAttemptOutcome::FallbackAbandon => "fallback-abandon",
         UpstreamAttemptOutcome::CircuitSkip => "circuit-skip",
+        UpstreamAttemptOutcome::RaceAborted => "race-aborted",
     }
 }
 
@@ -230,6 +231,7 @@ fn upstream_attempt_outcome_from_str(s: &str) -> Result<UpstreamAttemptOutcome> 
         "transport-error" => UpstreamAttemptOutcome::TransportError,
         "fallback-abandon" => UpstreamAttemptOutcome::FallbackAbandon,
         "circuit-skip" => UpstreamAttemptOutcome::CircuitSkip,
+        "race-aborted" => UpstreamAttemptOutcome::RaceAborted,
         other => anyhow::bail!("unknown upstream attempt outcome: {other}"),
     })
 }

@@ -864,6 +864,9 @@ pub enum UpstreamAttemptOutcome {
     TransportError,
     FallbackAbandon,
     CircuitSkip,
+    /// A loser in a race fanout — request was sent but cancelled because
+    /// another credential won. Body may or may not have started streaming.
+    RaceAborted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
