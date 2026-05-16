@@ -567,6 +567,59 @@ pub fn thread_id_from_request(body: &[u8]) -> Option<String> {
     thread_id_from_value(&v)
 }
 
+/// Whether this request belongs to the user-facing main conversation or to a
+/// background subagent thread, as declared by `x-codex-turn-metadata
+/// .thread_source`. See CLAUDE.md → Codex Protocol → Thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexThreadSource {
+    User,
+    Subagent,
+    /// Field present but value isn't recognised; treat conservatively.
+    Other,
+}
+
+pub fn thread_source_from_request(body: &[u8]) -> Option<CodexThreadSource> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    thread_source_from_value(&v)
+}
+
+pub fn thread_source_from_value(v: &Value) -> Option<CodexThreadSource> {
+    for pointer in [
+        "/client_metadata/x-codex-turn-metadata",
+        "/response/client_metadata/x-codex-turn-metadata",
+        "/x-codex-turn-metadata",
+        "/turn_metadata",
+        "/client_metadata",
+        "/response/client_metadata",
+    ] {
+        if let Some(src) = v
+            .pointer(pointer)
+            .and_then(thread_source_from_metadata_value_inner)
+        {
+            return Some(src);
+        }
+    }
+    None
+}
+
+fn thread_source_from_metadata_value_inner(v: &Value) -> Option<CodexThreadSource> {
+    match v {
+        Value::String(s) => serde_json::from_str::<Value>(s)
+            .ok()
+            .as_ref()
+            .and_then(thread_source_from_metadata_value_inner),
+        Value::Object(_) => v
+            .get("thread_source")
+            .and_then(Value::as_str)
+            .map(|s| match s {
+                "user" => CodexThreadSource::User,
+                "subagent" => CodexThreadSource::Subagent,
+                _ => CodexThreadSource::Other,
+            }),
+        _ => None,
+    }
+}
+
 pub fn thread_id_from_value(v: &Value) -> Option<String> {
     for pointer in [
         "/client_metadata/x-codex-turn-metadata",
@@ -576,7 +629,10 @@ pub fn thread_id_from_value(v: &Value) -> Option<String> {
         "/client_metadata",
         "/response/client_metadata",
     ] {
-        if let Some(thread_id) = v.pointer(pointer).and_then(thread_id_from_metadata_value_inner) {
+        if let Some(thread_id) = v
+            .pointer(pointer)
+            .and_then(thread_id_from_metadata_value_inner)
+        {
             return Some(thread_id);
         }
     }
@@ -593,7 +649,10 @@ fn thread_id_from_metadata_value_inner(v: &Value) -> Option<String> {
             .ok()
             .as_ref()
             .and_then(thread_id_from_metadata_value_inner),
-        Value::Object(_) => v.get("thread_id").and_then(Value::as_str).map(str::to_owned),
+        Value::Object(_) => v
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         _ => None,
     }
 }
@@ -1059,10 +1118,7 @@ fn metric_label(overrides: &CodexSummaryLabelOverrides, key: &str) -> String {
             .first_token
             .clone()
             .unwrap_or_else(|| "first".to_string()),
-        "cost" => overrides
-            .cost
-            .clone()
-            .unwrap_or_else(|| "~usd".to_string()),
+        "cost" => overrides.cost.clone().unwrap_or_else(|| "~usd".to_string()),
         "thread_cost" => overrides
             .thread_cost
             .clone()
@@ -1393,9 +1449,8 @@ mod tests {
                      codex-rs sees a typed event with empty payload:\n{raw_block}"
                 );
                 let data = &data_payloads[0];
-                let v: Value = serde_json::from_str(data).unwrap_or_else(|e| {
-                    panic!("block #{idx} data is not valid JSON: {e}\n{data}")
-                });
+                let v: Value = serde_json::from_str(data)
+                    .unwrap_or_else(|e| panic!("block #{idx} data is not valid JSON: {e}\n{data}"));
                 let inner = v
                     .get("type")
                     .and_then(Value::as_str)

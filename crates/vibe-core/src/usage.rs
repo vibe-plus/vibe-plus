@@ -20,7 +20,11 @@ struct ModelPricing {
 fn model_pricing(model: &str) -> Option<ModelPricing> {
     let m = model.to_ascii_lowercase();
     // Strip provider prefix (e.g. "openai/gpt-5.4" → "gpt-5.4")
-    let m = if let Some(pos) = m.rfind('/') { &m[pos + 1..] } else { &m };
+    let m = if let Some(pos) = m.rfind('/') {
+        &m[pos + 1..]
+    } else {
+        &m
+    };
 
     // Match longest/most-specific prefix first.
     let (inp, out) = if m.starts_with("o1-mini") {
@@ -77,7 +81,10 @@ fn model_pricing(model: &str) -> Option<ModelPricing> {
         return None;
     };
 
-    Some(ModelPricing { input_per_m: inp, output_per_m: out })
+    Some(ModelPricing {
+        input_per_m: inp,
+        output_per_m: out,
+    })
 }
 
 impl Usage {
@@ -107,20 +114,32 @@ mod tests {
 
     #[test]
     fn gpt4o_mini_cost() {
-        let u = Usage { input_tokens: 1_000_000, output_tokens: 1_000_000, ..Default::default() };
+        let u = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..Default::default()
+        };
         let cost = u.cost_usd("gpt-4o-mini").unwrap();
         assert!((cost - 0.75).abs() < 0.001, "expected ~0.75 got {cost}");
     }
 
     #[test]
     fn unknown_model_returns_none() {
-        let u = Usage { input_tokens: 100, output_tokens: 50, ..Default::default() };
+        let u = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            ..Default::default()
+        };
         assert!(u.cost_usd("some-unknown-model-xyz").is_none());
     }
 
     #[test]
     fn provider_prefix_stripped() {
-        let u = Usage { input_tokens: 1_000_000, output_tokens: 0, ..Default::default() };
+        let u = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            ..Default::default()
+        };
         let with_prefix = u.cost_usd("openai/gpt-4o-mini").unwrap();
         let without_prefix = u.cost_usd("gpt-4o-mini").unwrap();
         assert!((with_prefix - without_prefix).abs() < 1e-9);

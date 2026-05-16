@@ -35,19 +35,19 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use vibe_protocol::{
-    AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexAppActionResult,
-    CodexAppStatus, CodexPlanRefreshResult, Credential, CredentialInput,
-    CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats, Health, HealthSummary, LogPage,
-    Meta, Provider, ProviderAuthPoolSummary, ProviderBalanceSnapshot, ProviderCodexPlanItem,
-    ProviderHealth, ProviderHealthSummary, ProviderInput, ProviderSpeedtestInput,
-    ProviderSpeedtestResult, ProvidersOverview, ProvidersOverviewCodexPlansChunk,
-    ProvidersOverviewCredentialsChunk, ProvidersOverviewHealthChunk, ProvidersOverviewPoolsChunk,
-    ProvidersOverviewProvidersChunk, ProvidersOverviewStreamEnded, ProvidersOverviewStreamStarted,
-    Status, UpstreamAttemptLog, UsageSummary, WsEvent,
-};
 #[cfg(target_os = "macos")]
 use vibe_protocol::CodexAppProcess;
+use vibe_protocol::{
+    AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexAppActionResult,
+    CodexAppStatus, CodexPlanRefreshResult, Credential, CredentialInput, CredentialPlanSnapshot,
+    CredentialPoolStatus, DashboardStats, Health, HealthSummary, LogPage, Meta, Provider,
+    ProviderAuthPoolSummary, ProviderBalanceSnapshot, ProviderCodexPlanItem, ProviderHealth,
+    ProviderHealthSummary, ProviderInput, ProviderSpeedtestInput, ProviderSpeedtestResult,
+    ProvidersOverview, ProvidersOverviewCodexPlansChunk, ProvidersOverviewCredentialsChunk,
+    ProvidersOverviewHealthChunk, ProvidersOverviewPoolsChunk, ProvidersOverviewProvidersChunk,
+    ProvidersOverviewStreamEnded, ProvidersOverviewStreamStarted, Status, UpstreamAttemptLog,
+    UsageSummary, WsEvent,
+};
 
 #[derive(Debug, Deserialize)]
 struct ProviderSyncInput {
@@ -804,7 +804,16 @@ async fn codex_responses_handler(
             HeaderValue::from_static(client_transport),
         );
         let stripped = transforms::strip_ws_envelope(&body);
-        let should_show_status = transforms::responses_input_ends_with_user_message(&stripped);
+        let thread_source = codex_summary::thread_source_from_request(&body)
+            .or_else(|| codex_summary::thread_source_from_request(&stripped));
+        // Begin-slot is meant for user-facing thread display. Subagent
+        // threads run as background workers but Codex Desktop renders their
+        // assistant messages inline with the main thread, so emitting a
+        // begin slot for each subagent request causes "multiple begin slots
+        // on the main side" (see CLAUDE.md → Codex Protocol → Thread).
+        let is_subagent = thread_source == Some(codex_summary::CodexThreadSource::Subagent);
+        let should_show_status =
+            !is_subagent && transforms::responses_input_ends_with_user_message(&stripped);
         let turn_id = codex_summary::turn_id_from_request(&body)
             .or_else(|| codex_summary::turn_id_from_request(&stripped));
         let thread_id = codex_summary::thread_id_from_request(&body)
@@ -1111,7 +1120,10 @@ async fn codex_plain_http_maybe_chat_to_responses_sse(
             Some(state.clone()),
             summary_turn_id,
             summary_thread_id,
-            visual.as_ref().map(|v| v.upstream_model.clone()).unwrap_or_default(),
+            visual
+                .as_ref()
+                .map(|v| v.upstream_model.clone())
+                .unwrap_or_default(),
         );
         let mut trace_stats = StreamTraceStats::new("sse", "chat_to_responses");
 
@@ -1566,7 +1578,14 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
             tracing::debug!(preview = %preview, "codex ws body (first 300 bytes)");
         }
         let stripped = transforms::strip_ws_envelope(&body_bytes);
-        let should_show_status = transforms::responses_input_ends_with_user_message(&stripped);
+        let thread_source = codex_summary::thread_source_from_request(&body_bytes)
+            .or_else(|| codex_summary::thread_source_from_request(&stripped));
+        // Suppress the begin slot for subagent requests so they don't bleed
+        // into the main thread's chat display. See CLAUDE.md → Codex
+        // Protocol → Thread.
+        let is_subagent = thread_source == Some(codex_summary::CodexThreadSource::Subagent);
+        let should_show_status =
+            !is_subagent && transforms::responses_input_ends_with_user_message(&stripped);
         let turn_id = codex_summary::turn_id_from_request(&body_bytes)
             .or_else(|| codex_summary::turn_id_from_request(&stripped));
         let thread_id = codex_summary::thread_id_from_request(&body_bytes)
@@ -1667,7 +1686,10 @@ async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_headers: Hea
             Some(state.clone()),
             turn_id.clone(),
             thread_id.clone(),
-            visual.as_ref().map(|v| v.upstream_model.clone()).unwrap_or_default(),
+            visual
+                .as_ref()
+                .map(|v| v.upstream_model.clone())
+                .unwrap_or_default(),
         );
 
         // 5. Non-2xx: emit a Responses-shaped `response.failed` frame so Codex CLI can
@@ -2251,38 +2273,52 @@ async fn refresh_credential_balance(
     match credential.upstream_vendor.as_ref() {
         Some(CredentialVendor::NewApi) => {
             let cred_id_s = credential.id.clone();
-            let session = run_blocking(state.clone(), move |s| s.db.credential_get_session(&cred_id_s)).await?;
+            let session = run_blocking(state.clone(), move |s| {
+                s.db.credential_get_session(&cred_id_s)
+            })
+            .await?;
             let token = session
                 .as_deref()
                 .or(credential.auth_ref.as_deref())
                 .map(|s| resolve_secret(s))
                 .unwrap_or_default();
-            let balance = crate::providers::newapi::fetch_balance(&state.http, &base_url, &token).await;
-            let windows = crate::providers::newapi::fetch_key_usage(&state.http, &base_url, &token).await;
+            let balance =
+                crate::providers::newapi::fetch_balance(&state.http, &base_url, &token).await;
+            let windows =
+                crate::providers::newapi::fetch_key_usage(&state.http, &base_url, &token).await;
             let fetched_at = chrono::Utc::now().timestamp();
             let cred_id = credential.id.clone();
             let updated = run_blocking(state.clone(), move |s| {
                 s.db.credential_update_financials(&cred_id, balance, None, fetched_at)?;
                 s.db.credential_update_windows(&cred_id, &windows)
-            }).await?;
+            })
+            .await?;
             publish_providers_overview_soon(state);
             return Ok(Json(updated));
         }
         Some(CredentialVendor::Sub2Api) => {
             let cred_id_s2 = credential.id.clone();
-            let session2 = run_blocking(state.clone(), move |s| s.db.credential_get_session(&cred_id_s2)).await?;
+            let session2 = run_blocking(state.clone(), move |s| {
+                s.db.credential_get_session(&cred_id_s2)
+            })
+            .await?;
             let token = session2.as_deref().unwrap_or_default();
             if token.is_empty() {
-                return Err(anyhow::anyhow!("sub2api credential has no session — login first").into());
+                return Err(
+                    anyhow::anyhow!("sub2api credential has no session — login first").into(),
+                );
             }
-            let balance = crate::providers::sub2api::fetch_balance(&state.http, &base_url, token).await;
-            let windows = crate::providers::sub2api::fetch_windows(&state.http, &base_url, token).await;
+            let balance =
+                crate::providers::sub2api::fetch_balance(&state.http, &base_url, token).await;
+            let windows =
+                crate::providers::sub2api::fetch_windows(&state.http, &base_url, token).await;
             let fetched_at = chrono::Utc::now().timestamp();
             let cred_id = credential.id.clone();
             let updated = run_blocking(state.clone(), move |s| {
                 s.db.credential_update_financials(&cred_id, balance, None, fetched_at)?;
                 s.db.credential_update_windows(&cred_id, &windows)
-            }).await?;
+            })
+            .await?;
             publish_providers_overview_soon(state);
             return Ok(Json(updated));
         }
@@ -2302,13 +2338,9 @@ async fn refresh_credential_balance(
     let Some(proto) = primary else {
         return Err(anyhow::anyhow!("provider has no protocols").into());
     };
-    let financials = crate::intake::fetch_financials_for_base(
-        &state.http,
-        proto.kind,
-        &proto.base_url,
-        &secret,
-    )
-    .await;
+    let financials =
+        crate::intake::fetch_financials_for_base(&state.http, proto.kind, &proto.base_url, &secret)
+            .await;
     let fetched_at = chrono::Utc::now().timestamp();
     let cred_id = credential.id.clone();
     let updated = run_blocking(state.clone(), move |s| {
@@ -2346,7 +2378,8 @@ async fn detect_provider_vendor(
         .unwrap_or_else(|| provider.base_url.clone());
 
     let timeout = std::time::Duration::from_secs(6);
-    let upstream_vendor = crate::intake::probe_upstream_vendor(&state.http, &base_url, timeout).await;
+    let upstream_vendor =
+        crate::intake::probe_upstream_vendor(&state.http, &base_url, timeout).await;
 
     let updated_count = if let Some(ref vendor) = upstream_vendor {
         let pid = provider.id.clone();
@@ -2399,7 +2432,10 @@ async fn credential_upstream_login(
     match credential.upstream_vendor.as_ref() {
         Some(CredentialVendor::NewApi) => {
             let token = crate::providers::newapi::login(
-                &state.http, &base_url, &body.username, &body.password,
+                &state.http,
+                &base_url,
+                &body.username,
+                &body.password,
             )
             .await
             .map_err(|e| AppError(e))?;
@@ -2409,11 +2445,17 @@ async fn credential_upstream_login(
             })
             .await?;
             publish_providers_overview_soon(state);
-            Ok(Json(vibe_protocol::CredentialLoginResponse { ok: true, note: None }))
+            Ok(Json(vibe_protocol::CredentialLoginResponse {
+                ok: true,
+                note: None,
+            }))
         }
         Some(CredentialVendor::Sub2Api) => {
             let (token, expires_at) = crate::providers::sub2api::login(
-                &state.http, &base_url, &body.username, &body.password,
+                &state.http,
+                &base_url,
+                &body.username,
+                &body.password,
             )
             .await
             .map_err(|e| AppError(e))?;
@@ -2423,12 +2465,12 @@ async fn credential_upstream_login(
             })
             .await?;
             publish_providers_overview_soon(state);
-            Ok(Json(vibe_protocol::CredentialLoginResponse { ok: true, note: None }))
+            Ok(Json(vibe_protocol::CredentialLoginResponse {
+                ok: true,
+                note: None,
+            }))
         }
-        _ => Err(anyhow::anyhow!(
-            "login not supported for this credential vendor"
-        )
-        .into()),
+        _ => Err(anyhow::anyhow!("login not supported for this credential vendor").into()),
     }
 }
 
@@ -2454,7 +2496,10 @@ async fn credential_upstream_groups(
         .map(|p| p.base_url.clone())
         .unwrap_or_else(|| provider.base_url.clone());
     let cred_id_g = credential.id.clone();
-    let session_g = run_blocking(state.clone(), move |s| s.db.credential_get_session(&cred_id_g)).await?;
+    let session_g = run_blocking(state.clone(), move |s| {
+        s.db.credential_get_session(&cred_id_g)
+    })
+    .await?;
     let token = session_g
         .as_deref()
         .or(credential.auth_ref.as_deref())
@@ -2544,8 +2589,12 @@ fn merge_codex_credential_on_reimport(
         oauth_cached_plan_slug: incoming
             .oauth_cached_plan_slug
             .or(existing.oauth_chatgpt_plan_slug.clone()),
-        upstream_vendor: incoming.upstream_vendor.or(existing.upstream_vendor.clone()),
-        upstream_username: incoming.upstream_username.or(existing.upstream_username.clone()),
+        upstream_vendor: incoming
+            .upstream_vendor
+            .or(existing.upstream_vendor.clone()),
+        upstream_username: incoming
+            .upstream_username
+            .or(existing.upstream_username.clone()),
         upstream_session: incoming.upstream_session,
         upstream_session_expires_at: incoming.upstream_session_expires_at,
         upstream_group: incoming.upstream_group.or(existing.upstream_group.clone()),
@@ -6179,7 +6228,7 @@ mod request_body_limit_tests {
     use super::*;
     use axum::http::Request;
     use tower::ServiceExt;
-    use vibe_protocol::{ModelAlias, ProviderInput, ProviderKind};
+    use vibe_protocol::{CredentialVendor, ModelAlias, ProviderInput, ProviderKind};
 
     #[tokio::test]
     async fn codex_responses_allows_payloads_above_axum_default_body_limit() {
@@ -6192,7 +6241,8 @@ mod request_body_limit_tests {
                 kind: ProviderKind::OpenaiResponses,
                 base_url: "http://127.0.0.1:9".into(),
                 protocols: vec![],
-                host: None,auth_ref: None,
+                host: None,
+                auth_ref: None,
                 enabled: true,
                 priority: 100,
                 supports_websocket: None,
@@ -6237,6 +6287,132 @@ mod request_body_limit_tests {
     }
 
     #[test]
+    fn speedtest_timeout_is_clamped_to_safe_bounds() {
+        assert_eq!(
+            sanitize_speedtest_timeout(None),
+            SPEEDTEST_DEFAULT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            sanitize_speedtest_timeout(Some(0)),
+            SPEEDTEST_MIN_TIMEOUT_SECS
+        );
+        assert_eq!(
+            sanitize_speedtest_timeout(Some(1)),
+            SPEEDTEST_MIN_TIMEOUT_SECS
+        );
+        assert_eq!(sanitize_speedtest_timeout(Some(12)), 12);
+        assert_eq!(
+            sanitize_speedtest_timeout(Some(120)),
+            SPEEDTEST_MAX_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn credential_rate_limit_only_counts_unexpired_exhaustion() {
+        let now = 1_700_000_000;
+        let mut credential = test_credential("cred-a", "provider-a");
+
+        assert!(!credential_is_rate_limited(&credential, now));
+
+        credential.rl_requests_remaining = Some(0);
+        credential.rl_requests_reset_at = Some(now + 60);
+        assert!(credential_is_rate_limited(&credential, now));
+
+        credential.rl_requests_reset_at = Some(now - 1);
+        assert!(!credential_is_rate_limited(&credential, now));
+
+        credential.rl_requests_remaining = Some(10);
+        credential.rl_tokens_remaining = Some(0);
+        credential.rl_tokens_reset_at = Some(now + 60);
+        assert!(credential_is_rate_limited(&credential, now));
+    }
+
+    #[test]
+    fn provider_pool_summary_counts_availability_and_statuses() {
+        let mut config = crate::config::Config::default();
+        config.failover.failure_threshold = 1;
+        let state = AppState::init(vibe_db::Db::memory().expect("db"), config, 0).expect("state");
+        let provider = test_provider("provider-a");
+
+        let mut available = test_credential("cred-available", &provider.id);
+        available.enabled = true;
+        let mut disabled = test_credential("cred-disabled", &provider.id);
+        disabled.enabled = false;
+        disabled.last_error = Some("previous auth error".into());
+        let mut limited = test_credential("cred-limited", &provider.id);
+        limited.rl_requests_remaining = Some(0);
+        limited.rl_requests_reset_at = Some(chrono::Utc::now().timestamp() + 60);
+        let open = test_credential("cred-open", &provider.id);
+        state.cb.force_open(&open.id);
+
+        let summary = build_provider_pool_summary(
+            &state,
+            &provider,
+            vec![
+                open.clone(),
+                limited.clone(),
+                disabled.clone(),
+                available.clone(),
+            ],
+            &[vibe_db::CredentialRollingStat {
+                credential_id: available.id.clone(),
+                requests: 7,
+                successes: 5,
+                failures: 2,
+                avg_latency_ms: Some(123),
+            }],
+            &HashMap::new(),
+            24,
+        );
+
+        assert_eq!(summary.provider_id, provider.id);
+        assert_eq!(summary.total_credentials, 4);
+        assert_eq!(summary.enabled_credentials, 3);
+        assert_eq!(summary.available_credentials, 1);
+        assert_eq!(summary.rate_limited_credentials, 1);
+        assert_eq!(summary.open_circuit_credentials, 1);
+        assert_eq!(summary.provider_circuit_state, "open");
+        assert!(summary.provider_circuit_open);
+        assert_eq!(
+            summary
+                .credentials
+                .iter()
+                .map(|c| c.credential_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "cred-available",
+                "cred-disabled",
+                "cred-limited",
+                "cred-open"
+            ]
+        );
+
+        let available_status = summary
+            .credentials
+            .iter()
+            .find(|c| c.credential_id == available.id)
+            .expect("available status");
+        assert_eq!(available_status.rolling_requests, 7);
+        assert_eq!(available_status.rolling_successes, 5);
+        assert_eq!(available_status.rolling_failures, 2);
+        assert_eq!(available_status.rolling_avg_latency_ms, Some(123));
+
+        let limited_status = summary
+            .credentials
+            .iter()
+            .find(|c| c.credential_id == limited.id)
+            .expect("limited status");
+        assert!(limited_status.is_rate_limited);
+
+        let open_status = summary
+            .credentials
+            .iter()
+            .find(|c| c.credential_id == open.id)
+            .expect("open status");
+        assert!(open_status.circuit_open);
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn codex_app_process_roles_are_specific() {
         assert_eq!(
@@ -6267,5 +6443,72 @@ mod request_body_limit_tests {
             ),
             "crashpad"
         );
+    }
+
+    fn test_provider(id: &str) -> Provider {
+        Provider {
+            id: id.into(),
+            name: "Provider A".into(),
+            group_name: None,
+            avatar_url: None,
+            kind: ProviderKind::OpenaiResponses,
+            base_url: "https://api.openai.com/v1".into(),
+            protocols: vec![],
+            host: Some("api.openai.com".into()),
+            auth_ref: None,
+            enabled: true,
+            priority: 10,
+            supports_websocket: Some(true),
+            passthrough_mode: false,
+            remote_models: vec![],
+            remote_models_fetched_at: None,
+            last_speedtest: None,
+            model_aliases: vec![],
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_credential(id: &str, provider_id: &str) -> Credential {
+        Credential {
+            id: id.into(),
+            provider_id: provider_id.into(),
+            label: id.into(),
+            auth_ref: Some("literal:test".into()),
+            plan_type: None,
+            notes: None,
+            enabled: true,
+            priority: 1,
+            oauth_access_token: None,
+            oauth_has_refresh: false,
+            oauth_expires_at: None,
+            rl_requests_limit: None,
+            rl_requests_remaining: None,
+            rl_requests_reset_at: None,
+            rl_tokens_limit: None,
+            rl_tokens_remaining: None,
+            rl_tokens_reset_at: None,
+            last_used_at: None,
+            last_error: None,
+            consecutive_failures: 0,
+            created_at: 1,
+            updated_at: 1,
+            auth_fingerprint: None,
+            oauth_account_email: None,
+            oauth_account_subject: None,
+            oauth_chatgpt_plan_slug: None,
+            remote_models: vec![],
+            remote_models_fetched_at: None,
+            balance: None,
+            usage: None,
+            balance_fetched_at: None,
+            upstream_vendor: Some(CredentialVendor::Generic),
+            upstream_username: None,
+            upstream_has_session: false,
+            upstream_session_expires_at: None,
+            upstream_group: None,
+            price_multiplier: 1.0,
+            windows: vec![],
+        }
     }
 }

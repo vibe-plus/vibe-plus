@@ -220,10 +220,7 @@ pub fn token_plan_rate_limit_event(ctx: &CodexVisualContext) -> Option<String> {
 /// Rendered in orange (warning colour) inside the Codex App using the same
 /// LaTeX math block pattern as the route-status message, so it visually
 /// distinguishes itself from regular assistant output without being intrusive.
-pub fn failover_announcement_events(
-    ctx: &CodexVisualContext,
-    response_id: &str,
-) -> Vec<String> {
+pub fn failover_announcement_events(ctx: &CodexVisualContext, response_id: &str) -> Vec<String> {
     let item_id = format!(
         "vibe_failover_{}",
         response_id.replace(|c: char| !c.is_ascii_alphanumeric(), "_")

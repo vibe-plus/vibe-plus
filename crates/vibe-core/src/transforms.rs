@@ -1356,7 +1356,11 @@ pub fn translate_reasoning_effort(body: &[u8], upstream_model: &str) -> Option<B
     let effort = effort_val.as_str().unwrap_or("medium");
 
     let m = upstream_model.to_ascii_lowercase();
-    let m = if let Some(pos) = m.rfind('/') { &m[pos + 1..] } else { &m };
+    let m = if let Some(pos) = m.rfind('/') {
+        &m[pos + 1..]
+    } else {
+        &m
+    };
 
     if m.starts_with("deepseek-r1")
         || m.contains("deepseek-reasoner")

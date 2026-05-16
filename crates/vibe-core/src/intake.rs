@@ -26,10 +26,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use vibe_protocol::{
-    canonical_provider_host, display_name_for_remote, host_from_base_url, host_label_camel_fallback,
-    host_to_brand_label, protocol_display_label, provider_kind_slug, Credential, CredentialInput,
-    ModelAlias, Provider, ProviderBalanceSnapshot, ProviderInput, ProviderKind, ProviderProtocol,
-    RemoteDetectedProtocol, RemoteProviderCapabilities, RemoteProviderPreview,
+    canonical_provider_host, display_name_for_remote, host_from_base_url,
+    host_label_camel_fallback, host_to_brand_label, protocol_display_label, provider_kind_slug,
+    Credential, CredentialInput, ModelAlias, Provider, ProviderBalanceSnapshot, ProviderInput,
+    ProviderKind, ProviderProtocol, RemoteDetectedProtocol, RemoteProviderCapabilities,
+    RemoteProviderPreview,
 };
 
 const DEFAULT_PROBE_TIMEOUT_MS: u64 = 8_000;
@@ -360,12 +361,8 @@ pub async fn remote_import_handler(
         .iter()
         .map(|d| ProviderProtocol::from_kind_base(d.kind, d.base_url.clone()))
         .collect();
-    let financials = fetch_remote_financials_for_discoveries(
-        &state.http,
-        &discoveries,
-        &snippet.secret,
-    )
-    .await;
+    let financials =
+        fetch_remote_financials_for_discoveries(&state.http, &discoveries, &snippet.secret).await;
     let provider_input = ProviderInput {
         name: display_name.clone(),
         group_name: None,
@@ -416,7 +413,9 @@ pub async fn remote_import_handler(
         let models = merged_models.clone();
         let state_cl = state.clone();
         tokio::task::spawn_blocking(move || {
-            state_cl.db.provider_update_remote_models(&id, models, fetched_at)
+            state_cl
+                .db
+                .provider_update_remote_models(&id, models, fetched_at)
         })
         .await??
     };
@@ -517,12 +516,8 @@ pub async fn remote_preview_handler(
     merged_models.dedup();
     provider.remote_models = merged_models;
 
-    let financials = fetch_remote_financials_for_discoveries(
-        &state.http,
-        &discoveries,
-        &snippet.secret,
-    )
-    .await;
+    let financials =
+        fetch_remote_financials_for_discoveries(&state.http, &discoveries, &snippet.secret).await;
     let preview = build_remote_preview(&discoveries, &provider, &branding, &financials);
 
     Ok(Json(preview))
@@ -1140,11 +1135,7 @@ async fn resolve_remote_display_name(
         }
         if let Some(site) = marketing_site_url(host) {
             if let Ok(branding) = fetch_remote_branding(http, &site).await {
-                if let Some(name) = branding
-                    .display_name
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                {
+                if let Some(name) = branding.display_name.as_deref().filter(|s| !s.is_empty()) {
                     return name.to_string();
                 }
             }
@@ -1247,7 +1238,6 @@ fn pick_primary_discovery<'a>(discoveries: &'a [DiscoveryProbe]) -> &'a Discover
     }
     &discoveries[0]
 }
-
 
 async fn fetch_remote_branding(http: &reqwest::Client, raw_url: &str) -> Result<RemoteBranding> {
     let url = Url::parse(raw_url)?;
@@ -1852,7 +1842,11 @@ pub(crate) async fn probe_upstream_vendor(
         let code = resp.status().as_u16();
         // 401 = endpoint exists but auth required → Sub2API
         // 404 = endpoint not found → not Sub2API
-        if code == 401 || code == 403 { Some("sub2-api") } else { None }
+        if code == 401 || code == 403 {
+            Some("sub2-api")
+        } else {
+            None
+        }
     };
 
     let newapi_future = async {
@@ -1861,17 +1855,26 @@ pub(crate) async fn probe_upstream_vendor(
             .ok()?
             .ok()?;
         let code = resp.status().as_u16();
-        if code == 401 || code == 403 { Some("new-api") } else { None }
+        if code == 401 || code == 403 {
+            Some("new-api")
+        } else {
+            None
+        }
     };
 
     // Run all three concurrently and take the first definitive answer
-    let (title_res, sub2_res, newapi_res) =
-        tokio::join!(title_future, sub2_future, newapi_future);
+    let (title_res, sub2_res, newapi_res) = tokio::join!(title_future, sub2_future, newapi_future);
 
     // Title takes priority (explicit branding)
-    if let Some(v) = title_res { return Some(v); }
-    if let Some(v) = sub2_res { return Some(v.to_string()); }
-    if let Some(v) = newapi_res { return Some(v.to_string()); }
+    if let Some(v) = title_res {
+        return Some(v);
+    }
+    if let Some(v) = sub2_res {
+        return Some(v.to_string());
+    }
+    if let Some(v) = newapi_res {
+        return Some(v.to_string());
+    }
     None
 }
 
@@ -2068,8 +2071,10 @@ async fn upsert_remote_provider(state: AppState, input: ProviderInput) -> Result
     if let Some(hk) = host_key {
         let keep_id = provider.id.clone();
         let state_cl = state.clone();
-        tokio::task::spawn_blocking(move || state_cl.db.provider_consolidate_by_host(&keep_id, &hk))
-            .await??;
+        tokio::task::spawn_blocking(move || {
+            state_cl.db.provider_consolidate_by_host(&keep_id, &hk)
+        })
+        .await??;
         let state_cl = state.clone();
         let keep_id = provider.id.clone();
         if let Some(refreshed) =
@@ -2134,7 +2139,8 @@ mod tests {
             kind,
             base_url: base.into(),
             protocols: vec![],
-            host: None,auth_ref: None,
+            host: None,
+            auth_ref: None,
             enabled: true,
             priority: 100,
             supports_websocket: None,
@@ -2261,16 +2267,13 @@ mod tests {
         let parsed = parse_remote_snippet(raw).expect("parsed");
 
         assert_eq!(parsed.url, "https://new-api.example.invalid");
-        assert_eq!(
-            parsed.secret,
-            "sk-test-placeholder-not-a-real-key"
-        );
+        assert_eq!(parsed.secret, "sk-test-placeholder-not-a-real-key");
     }
 
     #[test]
     fn remote_snippet_parses_url_plus_key() {
-        let parsed =
-            parse_remote_snippet("https://proxy.example.invalid sk-test-url-plus-key").expect("parsed");
+        let parsed = parse_remote_snippet("https://proxy.example.invalid sk-test-url-plus-key")
+            .expect("parsed");
 
         assert_eq!(parsed.url, "https://proxy.example.invalid");
         assert_eq!(parsed.secret, "sk-test-url-plus-key");

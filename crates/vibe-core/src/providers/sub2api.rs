@@ -27,9 +27,7 @@ pub async fn login(
         .and_then(|t| t.as_str())
         .map(str::to_string)
         .context("sub2api login: no access_token in response")?;
-    let expires_in = v
-        .get("expires_in")
-        .and_then(|x| x.as_i64());
+    let expires_in = v.get("expires_in").and_then(|x| x.as_i64());
     let expires_at = expires_in.map(|s| chrono::Utc::now().timestamp() + s);
     Ok((token, expires_at))
 }
@@ -47,9 +45,7 @@ pub async fn fetch_balance(
     }
     let v: serde_json::Value = resp.json().await.ok()?;
     let balance = v.get("balance").and_then(|x| x.as_f64());
-    let recharged = v
-        .get("total_recharged")
-        .and_then(|x| x.as_f64());
+    let recharged = v.get("total_recharged").and_then(|x| x.as_f64());
     Some(ProviderBalanceSnapshot {
         currency: "USD".into(),
         balance: balance.map(|b| format!("{b:.4}")),
@@ -89,9 +85,24 @@ pub async fn fetch_windows(
 
     let mut windows = Vec::new();
     for (label, used_key, limit_key, reset_key) in &[
-        ("daily",   "daily_usage_usd",   "daily_limit_usd",   "daily_window_start"),
-        ("weekly",  "weekly_usage_usd",  "weekly_limit_usd",  "weekly_window_start"),
-        ("monthly", "monthly_usage_usd", "monthly_limit_usd", "monthly_window_start"),
+        (
+            "daily",
+            "daily_usage_usd",
+            "daily_limit_usd",
+            "daily_window_start",
+        ),
+        (
+            "weekly",
+            "weekly_usage_usd",
+            "weekly_limit_usd",
+            "weekly_window_start",
+        ),
+        (
+            "monthly",
+            "monthly_usage_usd",
+            "monthly_limit_usd",
+            "monthly_window_start",
+        ),
     ] {
         let used = data.get(used_key).and_then(|x| x.as_f64());
         let limit = data.get(limit_key).and_then(|x| x.as_f64());
@@ -134,10 +145,7 @@ pub async fn fetch_groups(
     base_url: &str,
     token: &str,
 ) -> Vec<UpstreamGroupInfo> {
-    let url = format!(
-        "{}/api/v1/groups/available",
-        base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/api/v1/groups/available", base_url.trim_end_matches('/'));
     let resp = match http.get(&url).bearer_auth(token).send().await {
         Ok(r) => r,
         Err(_) => return vec![],

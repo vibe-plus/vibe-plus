@@ -19,7 +19,9 @@ use url::Url;
 use vibe_protocol::{CredentialInput, ModelAlias, ProviderInput, ProviderKind};
 
 fn is_localhost_url(url: &str) -> bool {
-    let s = url.trim_start_matches("http://").trim_start_matches("https://");
+    let s = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     s.starts_with("127.") || s.starts_with("localhost") || s.starts_with("[::1]")
 }
 
@@ -709,9 +711,7 @@ fn scan_ccs_db() -> Vec<LocalCandidate> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    let mut stmt = match conn.prepare(
-        "SELECT id, app_type, name, settings_config FROM providers",
-    ) {
+    let mut stmt = match conn.prepare("SELECT id, app_type, name, settings_config FROM providers") {
         Ok(s) => s,
         Err(_) => return vec![],
     };
@@ -843,9 +843,11 @@ fn ccs_db_gemini(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<Lo
     if !token_ok {
         return None;
     }
-    let base_url =
-        first_env_string(env, &["GOOGLE_GEMINI_BASE_URL", "GEMINI_BASE_URL", "BASE_URL"])
-            .unwrap_or_else(|| "https://generativelanguage.googleapis.com".into());
+    let base_url = first_env_string(
+        env,
+        &["GOOGLE_GEMINI_BASE_URL", "GEMINI_BASE_URL", "BASE_URL"],
+    )
+    .unwrap_or_else(|| "https://generativelanguage.googleapis.com".into());
     if is_localhost_url(&base_url) {
         return None;
     }
@@ -868,26 +870,25 @@ fn ccs_db_opencode(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<
     // OpenCode entries store base_url and api_key at the top level of settings_config.
     let base_url = first_json_string(cfg, &["base_url", "baseUrl", "baseURL", "OPENAI_BASE_URL"])
         .or_else(|| {
-            cfg.get("env")
-                .and_then(|e| e.as_object())
-                .and_then(|env| first_env_string(env, &["OPENAI_BASE_URL", "BASE_URL"]))
-        })?;
+        cfg.get("env")
+            .and_then(|e| e.as_object())
+            .and_then(|env| first_env_string(env, &["OPENAI_BASE_URL", "BASE_URL"]))
+    })?;
     if is_localhost_url(&base_url) {
         return None;
     }
-    let raw_key = first_json_string(cfg, &["api_key", "apiKey", "OPENAI_API_KEY"])
-        .or_else(|| {
-            cfg.get("env")
-                .and_then(|e| e.as_object())
-                .and_then(|env| first_env_string(env, &["OPENAI_API_KEY", "API_KEY"]))
-        });
+    let raw_key = first_json_string(cfg, &["api_key", "apiKey", "OPENAI_API_KEY"]).or_else(|| {
+        cfg.get("env")
+            .and_then(|e| e.as_object())
+            .and_then(|env| first_env_string(env, &["OPENAI_API_KEY", "API_KEY"]))
+    });
     let auth_ref = raw_key.and_then(|v| ccs_env_string_to_auth_ref(&v));
     let token_ok = auth_ref
         .as_ref()
         .map(|r| crate::secrets::resolve(r).is_ok())
         .unwrap_or(false);
-    let kind = model_defaults::detect_kind_from_base_url(&base_url)
-        .unwrap_or(ProviderKind::OpenaiChat);
+    let kind =
+        model_defaults::detect_kind_from_base_url(&base_url).unwrap_or(ProviderKind::OpenaiChat);
     Some(LocalCandidate {
         client: format!("ccs-db:{id}"),
         name: name.to_string(),
@@ -910,7 +911,8 @@ fn ccs_candidate_to_plan(c: &LocalCandidate) -> ImportPlan {
             kind: c.kind,
             base_url: c.base_url.clone(),
             protocols: vec![],
-            host: None,avatar_url: None,
+            host: None,
+            avatar_url: None,
             auth_ref: c.auth_ref.clone(),
             enabled: true,
             priority: 10,
@@ -1326,7 +1328,8 @@ fn codex_candidate_to_plan(c: &LocalCandidate) -> anyhow::Result<ImportPlan> {
             kind: c.kind.clone(),
             base_url: c.base_url.clone(),
             protocols: vec![],
-            host: None,avatar_url: None,
+            host: None,
+            avatar_url: None,
             auth_ref: None,
             enabled: true,
             priority: 10,
@@ -1346,7 +1349,8 @@ fn claude_candidate_to_plan(c: &LocalCandidate) -> ImportPlan {
             kind: c.kind.clone(),
             base_url: c.base_url.clone(),
             protocols: vec![],
-            host: None,avatar_url: None,
+            host: None,
+            avatar_url: None,
             auth_ref: c.auth_ref.clone(),
             enabled: true,
             priority: 10,
@@ -1374,7 +1378,8 @@ pub fn candidate_to_input(c: &LocalCandidate) -> ProviderInput {
         kind: c.kind.clone(),
         base_url: c.base_url.clone(),
         protocols: vec![],
-        host: None,avatar_url: None,
+        host: None,
+        avatar_url: None,
         auth_ref: c.auth_ref.clone(),
         enabled: true,
         priority: 10,
@@ -1504,14 +1509,22 @@ mod tests {
         });
         let dir = make_test_db(&[("kimi-id", "claude", "Kimi", &cfg.to_string())]);
         let candidates = scan_test_db(&dir);
-        assert!(candidates.is_empty(), "localhost proxy must not be imported");
+        assert!(
+            candidates.is_empty(),
+            "localhost proxy must not be imported"
+        );
     }
 
     #[test]
     fn ccs_db_claude_skips_missing_base_url() {
         // "Claude Official" entry with empty env — nothing to import.
         let cfg = serde_json::json!({ "env": {} });
-        let dir = make_test_db(&[("claude-official", "claude", "Claude Official", &cfg.to_string())]);
+        let dir = make_test_db(&[(
+            "claude-official",
+            "claude",
+            "Claude Official",
+            &cfg.to_string(),
+        )]);
         let candidates = scan_test_db(&dir);
         assert!(candidates.is_empty());
     }
@@ -1541,7 +1554,10 @@ base_url = "https://free.example.cc/v1"
         assert_eq!(c.kind, ProviderKind::OpenaiResponses);
         assert_eq!(c.base_url, "https://free.example.cc/v1");
         assert!(c.auth_ref.as_deref().unwrap().starts_with("literal:sk-"));
-        assert!(c.default_aliases.iter().any(|a| a.alias == "default" && a.upstream_model == "gpt-5.4"));
+        assert!(c
+            .default_aliases
+            .iter()
+            .any(|a| a.alias == "default" && a.upstream_model == "gpt-5.4"));
     }
 
     #[test]
@@ -1559,7 +1575,10 @@ requires_openai_auth = false
         });
         let dir = make_test_db(&[("local-1", "codex", "LocalModel", &cfg.to_string())]);
         let candidates = scan_test_db(&dir);
-        assert!(candidates.is_empty(), "localhost codex provider must be skipped");
+        assert!(
+            candidates.is_empty(),
+            "localhost codex provider must be skipped"
+        );
     }
 
     #[test]
@@ -1578,13 +1597,21 @@ requires_openai_auth = true
         });
         let dir = make_test_db(&[("no-key", "codex", "NoKey", &cfg.to_string())]);
         let candidates = scan_test_db(&dir);
-        assert!(candidates.is_empty(), "entry without API key must be skipped");
+        assert!(
+            candidates.is_empty(),
+            "entry without API key must be skipped"
+        );
     }
 
     #[test]
     fn ccs_db_gemini_skips_official_entry_without_key() {
         let cfg = serde_json::json!({ "env": {}, "config": {} });
-        let dir = make_test_db(&[("gemini-official", "gemini", "Google Official", &cfg.to_string())]);
+        let dir = make_test_db(&[(
+            "gemini-official",
+            "gemini",
+            "Google Official",
+            &cfg.to_string(),
+        )]);
         let candidates = scan_test_db(&dir);
         assert!(candidates.is_empty());
     }
@@ -1614,12 +1641,19 @@ requires_openai_auth = true
             ("kimi-id", "claude", "Kimi", &claude_cfg.to_string()),
             ("codex-id", "codex", "MyCodex", &codex_cfg.to_string()),
             // Official entries with no keys — should be skipped
-            ("claude-official", "claude", "Claude Official", r#"{"env":{}}"#),
+            (
+                "claude-official",
+                "claude",
+                "Claude Official",
+                r#"{"env":{}}"#,
+            ),
         ]);
         let candidates = scan_test_db(&dir);
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().any(|c| c.kind == ProviderKind::Anthropic));
-        assert!(candidates.iter().any(|c| c.kind == ProviderKind::OpenaiResponses));
+        assert!(candidates
+            .iter()
+            .any(|c| c.kind == ProviderKind::OpenaiResponses));
     }
 
     // -----------------------------------------------------------------------
@@ -1644,11 +1678,17 @@ requires_openai_auth = true
         };
         // ccs_profile_to_candidate itself still converts it (used by bundle/deeplink)
         let candidate = ccs_profile_to_candidate(&profile);
-        assert!(candidate.is_some(), "ccs_profile_to_candidate must not filter localhost");
+        assert!(
+            candidate.is_some(),
+            "ccs_profile_to_candidate must not filter localhost"
+        );
 
         // But the file scan filter should reject it
         let c = candidate.unwrap();
-        assert!(is_localhost_url(&c.base_url), "should be detected as localhost");
+        assert!(
+            is_localhost_url(&c.base_url),
+            "should be detected as localhost"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1665,10 +1705,18 @@ requires_openai_auth = true
             &opusModel=test-opus";
         let plan = cc_switch_deeplink_to_plan(url)?;
         let aliases = &plan.provider.model_aliases;
-        assert!(aliases.iter().any(|a| a.alias == "default" && a.upstream_model == "test-default"));
-        assert!(aliases.iter().any(|a| a.alias == "haiku" && a.upstream_model == "test-haiku"));
-        assert!(aliases.iter().any(|a| a.alias == "sonnet" && a.upstream_model == "test-sonnet"));
-        assert!(aliases.iter().any(|a| a.alias == "opus" && a.upstream_model == "test-opus"));
+        assert!(aliases
+            .iter()
+            .any(|a| a.alias == "default" && a.upstream_model == "test-default"));
+        assert!(aliases
+            .iter()
+            .any(|a| a.alias == "haiku" && a.upstream_model == "test-haiku"));
+        assert!(aliases
+            .iter()
+            .any(|a| a.alias == "sonnet" && a.upstream_model == "test-sonnet"));
+        assert!(aliases
+            .iter()
+            .any(|a| a.alias == "opus" && a.upstream_model == "test-opus"));
         Ok(())
     }
 
