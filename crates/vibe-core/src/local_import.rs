@@ -1834,6 +1834,70 @@ requires_openai_auth = true
     }
 
     #[test]
+    fn cc_switch_deeplink_uses_first_endpoint_and_rejects_missing_endpoint() -> anyhow::Result<()> {
+        let url = "ccswitch://v1/import?resource=provider&app=codex&name=Multi&endpoint=https%3A%2F%2Ffirst.example%2Fv1%2C%20https%3A%2F%2Fsecond.example%2Fv1&apiKey=sk-test&model=gpt-5.4";
+        let plan = cc_switch_deeplink_to_plan(url)?;
+
+        assert_eq!(plan.provider.kind, ProviderKind::OpenaiResponses);
+        assert_eq!(plan.provider.base_url, "https://first.example/v1");
+        assert!(plan
+            .provider
+            .model_aliases
+            .iter()
+            .any(|a| a.alias == "default" && a.upstream_model == "gpt-5.4"));
+
+        let missing =
+            "ccswitch://v1/import?resource=provider&app=codex&name=NoEndpoint&apiKey=sk-test";
+        let err = match cc_switch_deeplink_to_plan(missing) {
+            Ok(_) => panic!("expected missing endpoint error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("missing endpoint"));
+        Ok(())
+    }
+
+    #[test]
+    fn cc_switch_deeplink_imports_toml_inline_codex_config() -> anyhow::Result<()> {
+        let config = r#"
+model_provider = "deepseek"
+model = "deepseek-chat"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.example/v1"
+"#;
+        let wrapped = serde_json::json!({
+            "config": config,
+            "auth": {"OPENAI_API_KEY": "sk-deepseek"}
+        });
+        let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(wrapped.to_string());
+        let url = format!(
+            "ccswitch://v1/import?resource=provider&app=codex&name=DeepSeek&config={config_b64}&configFormat=json"
+        );
+        let plan = cc_switch_deeplink_to_plan(&url)?;
+
+        assert_eq!(plan.provider.kind, ProviderKind::OpenaiResponses);
+        assert_eq!(plan.provider.base_url, "https://api.deepseek.example/v1");
+        assert_eq!(
+            plan.provider.auth_ref.as_deref(),
+            Some("literal:sk-deepseek")
+        );
+        assert!(plan
+            .provider
+            .model_aliases
+            .iter()
+            .any(|a| a.alias == "default" && a.upstream_model == "deepseek-chat"));
+        Ok(())
+    }
+
+    #[test]
+    fn local_import_dedup_todo_for_credentials_with_same_fingerprint() {
+        // TODO: Confirm the exact UX with the product owner, then add the behavior
+        // test for local credential deduplication during import. Desired direction:
+        // importing the same host/fingerprint should update or reuse the existing
+        // credential instead of creating duplicates.
+    }
+
+    #[test]
     fn cc_switch_deeplink_imports_inline_claude_config() -> anyhow::Result<()> {
         let config = serde_json::json!({
             "env": {

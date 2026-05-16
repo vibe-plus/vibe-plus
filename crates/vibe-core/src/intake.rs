@@ -2384,6 +2384,130 @@ mod tests {
     }
 
     #[test]
+    fn response_confirms_success_body_must_match_probe_wire() {
+        let openai_body = br#"{"object":"list","data":[{"id":"gpt-4o"}]}"#;
+        let anthropic_body =
+            br#"{"type":"message","role":"assistant","content":[{"type":"text","text":"pong"}]}"#;
+        let gemini_body = br#"{"candidates":[{"content":{"parts":[{"text":"pong"}]}}],"usageMetadata":{"totalTokenCount":1}}"#;
+
+        assert!(response_confirms_probe_kind(
+            ProviderKind::OpenaiResponses,
+            200,
+            &reqwest::header::HeaderMap::new(),
+            openai_body,
+        ));
+        assert!(!response_confirms_probe_kind(
+            ProviderKind::Anthropic,
+            200,
+            &reqwest::header::HeaderMap::new(),
+            openai_body,
+        ));
+        assert!(response_confirms_probe_kind(
+            ProviderKind::Anthropic,
+            200,
+            &reqwest::header::HeaderMap::new(),
+            anthropic_body,
+        ));
+        assert!(response_confirms_probe_kind(
+            ProviderKind::GeminiNative,
+            200,
+            &reqwest::header::HeaderMap::new(),
+            gemini_body,
+        ));
+    }
+
+    #[test]
+    fn build_credential_input_prefers_explicit_label_and_defaults_intake_metadata() {
+        let assignment = ImportAssignment {
+            candidate: IntakeCandidate {
+                id: "cand-1".into(),
+                label: Some("Candidate Label".into()),
+                auth: CandidateAuth::ApiKey {
+                    value: "  sk-test-key  ".into(),
+                },
+                hints: Some(CandidateHints {
+                    email: Some("user@example.com".into()),
+                    subject: Some("sub-123".into()),
+                    plan_slug: Some("team".into()),
+                }),
+            },
+            provider_id: "provider-1".into(),
+            label: Some("Explicit Label".into()),
+            plan_type: None,
+            priority: None,
+            notes: None,
+            enabled: None,
+        };
+
+        let input = build_credential_input(&assignment).expect("credential input");
+
+        assert_eq!(input.label, "Explicit Label");
+        assert_eq!(input.auth_ref.as_deref(), Some("literal:sk-test-key"));
+        assert_eq!(input.plan_type.as_deref(), Some("team"));
+        assert_eq!(input.notes.as_deref(), Some("intake"));
+        assert_eq!(input.priority, 100);
+        assert!(input.enabled);
+        assert_eq!(
+            input.oauth_cached_email.as_deref(),
+            Some("user@example.com")
+        );
+        assert_eq!(input.oauth_cached_subject.as_deref(), Some("sub-123"));
+    }
+
+    #[test]
+    fn build_credential_input_rejects_empty_secret_and_keeps_oauth_out_of_auth_ref() {
+        let empty_key = ImportAssignment {
+            candidate: IntakeCandidate {
+                id: "empty".into(),
+                label: None,
+                auth: CandidateAuth::ApiKey {
+                    value: "   ".into(),
+                },
+                hints: None,
+            },
+            provider_id: "provider-1".into(),
+            label: None,
+            plan_type: None,
+            priority: None,
+            notes: None,
+            enabled: None,
+        };
+        assert!(build_credential_input(&empty_key).is_err());
+
+        let oauth = ImportAssignment {
+            candidate: IntakeCandidate {
+                id: "oauth".into(),
+                label: None,
+                auth: CandidateAuth::Oauth {
+                    access: " access-token ".into(),
+                    refresh: Some(" refresh-token ".into()),
+                    expires_at: Some(123),
+                },
+                hints: Some(CandidateHints {
+                    email: Some("oauth@example.com".into()),
+                    ..CandidateHints::default()
+                }),
+            },
+            provider_id: "provider-1".into(),
+            label: None,
+            plan_type: None,
+            priority: Some(7),
+            notes: Some("manual".into()),
+            enabled: Some(false),
+        };
+        let input = build_credential_input(&oauth).expect("oauth credential input");
+
+        assert_eq!(input.label, "oauth@example.com");
+        assert_eq!(input.auth_ref, None);
+        assert_eq!(input.oauth_access_token.as_deref(), Some("access-token"));
+        assert_eq!(input.oauth_refresh_token.as_deref(), Some("refresh-token"));
+        assert_eq!(input.oauth_expires_at, Some(123));
+        assert_eq!(input.notes.as_deref(), Some("manual"));
+        assert_eq!(input.priority, 7);
+        assert!(!input.enabled);
+    }
+
+    #[test]
     fn suggested_aliases_include_remote_models_first() {
         let mut provider = fake_provider(ProviderKind::OpenaiResponses, "https://example.com");
         provider.model_aliases.clear();

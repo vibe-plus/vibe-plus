@@ -1305,6 +1305,86 @@ mod tests {
     }
 
     #[test]
+    fn extracts_turn_and_thread_ids_from_nested_metadata_variants() {
+        let v = serde_json::json!({
+            "response": {
+                "client_metadata": {
+                    "x-codex-turn-metadata": "{\"turn_id\":\"turn-nested\",\"thread_id\":\"thread-nested\"}"
+                }
+            }
+        });
+
+        assert_eq!(turn_id_from_value(&v).as_deref(), Some("turn-nested"));
+        assert_eq!(thread_id_from_value(&v).as_deref(), Some("thread-nested"));
+
+        let direct = serde_json::json!({
+            "client_metadata": { "turn_id": "turn-direct", "thread_id": "thread-direct" }
+        });
+        assert_eq!(turn_id_from_value(&direct).as_deref(), Some("turn-direct"));
+        assert_eq!(
+            thread_id_from_value(&direct).as_deref(),
+            Some("thread-direct")
+        );
+    }
+
+    #[test]
+    fn append_summary_targets_last_message_output_text_without_touching_tool_items() {
+        let mut response = serde_json::json!({
+            "id": "resp-1",
+            "output": [
+                {
+                    "id": "msg-1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type":"output_text","text":"first"}]
+                },
+                {"type":"function_call","name":"shell","arguments":"{}","call_id":"call-1"},
+                {
+                    "id": "msg-2",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type":"reasoning_text","text":"hidden"},
+                        {"type":"output_text","text":"second"}
+                    ]
+                }
+            ]
+        });
+
+        append_summary_to_response_value(&mut response, "summary").expect("append summary");
+
+        assert_eq!(response["output"][0]["content"][0]["text"], "first");
+        assert_eq!(response["output"][1]["type"], "function_call");
+        assert_eq!(response["output"][2]["content"][0]["text"], "hidden");
+        assert_eq!(
+            response["output"][2]["content"][1]["text"],
+            "second\n\nsummary"
+        );
+    }
+
+    #[test]
+    fn apply_usage_from_frame_accepts_chat_and_responses_usage_shapes() {
+        let mut usage = Usage::default();
+        apply_usage_from_frame(
+            r#"{"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"cache_creation_tokens":2}}"#,
+            &mut usage,
+        );
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.cache_read_tokens, 4);
+        assert_eq!(usage.cache_creation_tokens, 2);
+
+        apply_usage_from_frame(
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":20,"output_tokens":5,"input_tokens_details":{"cached_tokens":6},"cache_creation_input_tokens":7}}}"#,
+            &mut usage,
+        );
+        assert_eq!(usage.input_tokens, 20);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_read_tokens, 6);
+        assert_eq!(usage.cache_creation_tokens, 7);
+    }
+
+    #[test]
     fn extracts_turn_id_from_ws_envelope_client_metadata() {
         let body = serde_json::json!({
             "type": "response.create",

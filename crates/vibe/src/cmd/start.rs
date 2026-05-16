@@ -64,7 +64,8 @@ pub fn spawn_background(port: u16) -> Result<()> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
-        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn()?;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .spawn()?;
     }
 
     println!("vibe started in background.");

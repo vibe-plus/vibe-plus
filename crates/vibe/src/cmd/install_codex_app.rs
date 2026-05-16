@@ -1,8 +1,8 @@
 use anyhow::Context as _;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::path::PathBuf;
 use tokio::process::Command;
 
 #[cfg(target_os = "macos")]
@@ -51,10 +51,7 @@ pub async fn install_or_update() -> anyhow::Result<()> {
 #[cfg(target_os = "macos")]
 async fn install_macos() -> anyhow::Result<()> {
     if let Some(path) = find_existing_codex_app() {
-        println!(
-            "Found Codex.app: {}",
-            path.display()
-        );
+        println!("Found Codex.app: {}", path.display());
         if try_brew_cask("codex", true).await? {
             println!("Updated Codex Desktop via Homebrew.");
             return Ok(());
@@ -67,10 +64,7 @@ async fn install_macos() -> anyhow::Result<()> {
 
     let dmg_url = pick_mac_dmg_url();
     let installed = download_and_install_dmg(&dmg_url).await?;
-    println!(
-        "Codex Desktop installed: {}",
-        installed.display()
-    );
+    println!("Codex Desktop installed: {}", installed.display());
     Ok(())
 }
 
@@ -108,9 +102,7 @@ fn is_apple_silicon_mac() -> bool {
 
 #[cfg(target_os = "macos")]
 fn find_existing_codex_app() -> Option<PathBuf> {
-    candidate_codex_app_paths()
-        .into_iter()
-        .find(|p| p.is_dir())
+    candidate_codex_app_paths().into_iter().find(|p| p.is_dir())
 }
 
 #[cfg(target_os = "macos")]
@@ -140,13 +132,9 @@ async fn try_brew_cask(name: &str, upgrade: bool) -> anyhow::Result<bool> {
 
 #[cfg(target_os = "macos")]
 async fn download_and_install_dmg(dmg_url: &str) -> anyhow::Result<PathBuf> {
-    let tmp_root = std::env::temp_dir().join(format!(
-        "vibe-codex-install-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&tmp_root).with_context(|| {
-        format!("failed to create temp directory {}", tmp_root.display())
-    })?;
+    let tmp_root = std::env::temp_dir().join(format!("vibe-codex-install-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_root)
+        .with_context(|| format!("failed to create temp directory {}", tmp_root.display()))?;
 
     let dmg_path = tmp_root.join("Codex.dmg");
     download_dmg(dmg_url, &dmg_path).await?;
@@ -154,8 +142,8 @@ async fn download_and_install_dmg(dmg_url: &str) -> anyhow::Result<PathBuf> {
     println!("Mounting installer image…");
     let mount_point = mount_dmg(&dmg_path).await?;
     let result = async {
-        let app_in_volume = find_codex_app_in_mount(&mount_point)
-            .context("Codex.app not found in DMG")?;
+        let app_in_volume =
+            find_codex_app_in_mount(&mount_point).context("Codex.app not found in DMG")?;
         install_codex_app_bundle(&app_in_volume).await
     }
     .await;
@@ -238,16 +226,12 @@ fn find_codex_app_in_mount(mount_point: &Path) -> anyhow::Result<PathBuf> {
 #[cfg(target_os = "macos")]
 async fn install_codex_app_bundle(src_app: &Path) -> anyhow::Result<PathBuf> {
     for applications_dir in candidate_applications_dirs()? {
-        println!(
-            "Installing to {}…",
-            applications_dir.display()
-        );
+        println!("Installing to {}…", applications_dir.display());
         std::fs::create_dir_all(&applications_dir)?;
         let dest_app = applications_dir.join("Codex.app");
         if dest_app.is_dir() {
-            std::fs::remove_dir_all(&dest_app).with_context(|| {
-                format!("failed to remove old version {}", dest_app.display())
-            })?;
+            std::fs::remove_dir_all(&dest_app)
+                .with_context(|| format!("failed to remove old version {}", dest_app.display()))?;
         }
         let status = Command::new("ditto")
             .arg(src_app)

@@ -609,6 +609,18 @@ struct StreamingToolFragment {
     arguments: String,
 }
 
+impl StreamingToolFragment {
+    fn missing_identity_field(&self) -> Option<&'static str> {
+        if self.id.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            return Some("id");
+        }
+        if self.name.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            return Some("function.name");
+        }
+        None
+    }
+}
+
 /// Aggregate Chat Completions streaming text plus `delta.tool_calls` fragments so C2R can emit `function_call` events at `finish_reason`.
 #[derive(Default)]
 pub struct ChatCompletionsC2rAccumulator {
@@ -777,6 +789,42 @@ impl ChatCompletionsC2rAccumulator {
     }
 }
 
+fn invalid_tool_call_response_event(session_id: &str, detail: &str) -> String {
+    serde_json::json!({
+        "type": "response.failed",
+        "response": {
+            "id": session_id,
+            "status": "failed",
+            "error": {
+                "code": "invalid_tool_call",
+                "message": detail,
+            }
+        }
+    })
+    .to_string()
+}
+
+fn invalid_tool_call_response_body(session_id: &str, detail: &str) -> Bytes {
+    Bytes::from(
+        serde_json::json!({
+            "id": session_id,
+            "object": "response",
+            "status": "failed",
+            "output": [],
+            "error": {
+                "code": "invalid_tool_call",
+                "message": detail,
+            },
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
+            }
+        })
+        .to_string(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Response (streaming): Chat Completions SSE event → Responses API WS events
 // ---------------------------------------------------------------------------
@@ -909,6 +957,21 @@ pub fn chat_event_to_responses_events(
             }
 
             if reason == "tool_calls" && !accumulator.tool_calls_by_index.is_empty() {
+                if let Some((idx, field)) =
+                    accumulator
+                        .tool_calls_by_index
+                        .iter()
+                        .find_map(|(idx, frag)| {
+                            frag.missing_identity_field().map(|field| (*idx, field))
+                        })
+                {
+                    out.push(invalid_tool_call_response_event(
+                        session_id,
+                        &format!("tool_call[{idx}] missing {field}"),
+                    ));
+                    accumulator.clear_tool_calls();
+                    return out;
+                }
                 let start_idx = if emit_assistant_message { 1 } else { 0 };
                 accumulator.push_function_call_done_events(&mut out, session_id, start_idx);
             }
@@ -1082,6 +1145,16 @@ pub fn chat_body_to_responses(body: &[u8], session_id: &str, item_id: &str) -> B
             }
         }
     }
+    if let Some((idx, field)) = fragments
+        .iter()
+        .find_map(|(idx, frag)| frag.missing_identity_field().map(|field| (*idx, field)))
+    {
+        return invalid_tool_call_response_body(
+            session_id,
+            &format!("tool_call[{idx}] missing {field}"),
+        );
+    }
+
     for frag in fragments.values() {
         let call_id = frag
             .id
@@ -1769,6 +1842,66 @@ mod tests {
             .expect("completed");
         let d: serde_json::Value = serde_json::from_str(done).unwrap();
         assert_eq!(d["response"]["end_turn"], false);
+    }
+
+    #[test]
+    fn chat_event_tool_calls_requires_complete_tool_identity() {
+        let mut accum = ChatCompletionsC2rAccumulator::default();
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"arguments": "{\"cmd\":\"pwd\"}"}
+                    }]
+                }
+            }]
+        });
+        assert!(
+            chat_event_to_responses_events(&chunk.to_string(), "resp-1", "msg-1", &mut accum)
+                .is_empty()
+        );
+
+        let finish = serde_json::json!({"choices":[{"finish_reason":"tool_calls"}]});
+        let frames =
+            chat_event_to_responses_events(&finish.to_string(), "resp-1", "msg-1", &mut accum);
+
+        assert!(
+            frames.iter().any(|frame| frame.contains("response.failed")),
+            "incomplete tool calls should fail directly instead of fabricating unknown_tool: {frames:?}"
+        );
+        assert!(
+            !frames.iter().any(|frame| frame.contains("unknown_tool")),
+            "must not silently downgrade incomplete tool calls to unknown_tool: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn chat_body_tool_calls_requires_complete_tool_identity() {
+        let body = serde_json::json!({
+            "id": "chatcmpl-1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"arguments": "{}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let out = chat_body_to_responses(&serde_json::to_vec(&body).unwrap(), "resp-1", "msg-1");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        assert_eq!(v["status"], "failed");
+        assert_eq!(v["error"]["code"], "invalid_tool_call");
+        assert!(v["output"].as_array().unwrap().is_empty());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use anyhow::Result;
 use std::time::Instant;
-use vibe_core::{UI_CDN_BASE_URL, UI_CDN_MIRROR_BASE_URL, UI_DASHBOARD_MIRROR_URL, UI_DASHBOARD_URL};
+use vibe_core::{
+    UI_CDN_BASE_URL, UI_CDN_MIRROR_BASE_URL, UI_DASHBOARD_MIRROR_URL, UI_DASHBOARD_URL,
+};
 
 const CDN_BASES: &[(&str, &str, &str)] = &[
     ("github", UI_CDN_BASE_URL, UI_DASHBOARD_URL),
