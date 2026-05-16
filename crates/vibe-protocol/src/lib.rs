@@ -274,6 +274,36 @@ pub enum RouteTier {
     Default,
 }
 
+/// Per-route forwarding strategy.
+///
+/// - `Rotate`: today's default — try expanded picks sequentially, round-robin
+///   counter chooses the starting index, circuit-open picks skipped.
+/// - `Race`: fan out the first `Route::fanout_n` credentials concurrently.
+///   Winner = first upstream to emit HTTP 200 + first body byte; losers are
+///   aborted via `CancellationToken`. Costs N× token spend on losers, so this
+///   suits latency-critical short replies, not big agent loops.
+/// - `Fallback`: strict sequential mode (no rotation across requests). The
+///   first pick is always tried first; later picks only on failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/ForwardStrategy.ts")]
+#[serde(rename_all = "kebab-case")]
+pub enum ForwardStrategy {
+    Rotate,
+    Race,
+    Fallback,
+}
+
+impl Default for ForwardStrategy {
+    fn default() -> Self {
+        ForwardStrategy::Rotate
+    }
+}
+
+/// Hard cap on `Route::fanout_n` to prevent absurd cost on misconfigured routes.
+pub const ROUTE_FANOUT_N_MAX: u8 = 4;
+/// Default fanout breadth used when a route opts into Race without specifying.
+pub const ROUTE_FANOUT_N_DEFAULT: u8 = 2;
+
 /// A configured upstream provider.
 ///
 /// `auth_ref` is a string that resolves to a real secret via the `secrets`
@@ -411,6 +441,10 @@ pub struct Route {
     pub target_model: Option<String>,
     pub tier: RouteTier,
     pub priority: i32,
+    #[serde(default)]
+    pub strategy: ForwardStrategy,
+    #[serde(default = "default_fanout_n")]
+    pub fanout_n: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -422,6 +456,14 @@ pub struct RouteInput {
     pub target_model: Option<String>,
     pub tier: RouteTier,
     pub priority: i32,
+    #[serde(default)]
+    pub strategy: ForwardStrategy,
+    #[serde(default = "default_fanout_n")]
+    pub fanout_n: u8,
+}
+
+fn default_fanout_n() -> u8 {
+    ROUTE_FANOUT_N_DEFAULT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

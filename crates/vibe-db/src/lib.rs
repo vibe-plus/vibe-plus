@@ -71,6 +71,9 @@ impl Db {
             M::up(include_str!(
                 "../migrations/017_upstream_provider_support.sql"
             )),
+            M::up(include_str!(
+                "../migrations/018_route_forward_strategy.sql"
+            )),
         ])
     }
 

@@ -167,6 +167,27 @@ fn _route_tier_from_str(s: &str) -> Result<RouteTier> {
     })
 }
 
+fn forward_strategy_to_str(s: vibe_protocol::ForwardStrategy) -> &'static str {
+    match s {
+        vibe_protocol::ForwardStrategy::Rotate => "rotate",
+        vibe_protocol::ForwardStrategy::Race => "race",
+        vibe_protocol::ForwardStrategy::Fallback => "fallback",
+    }
+}
+
+fn forward_strategy_from_str(s: &str) -> Result<vibe_protocol::ForwardStrategy> {
+    Ok(match s {
+        "rotate" => vibe_protocol::ForwardStrategy::Rotate,
+        "race" => vibe_protocol::ForwardStrategy::Race,
+        "fallback" => vibe_protocol::ForwardStrategy::Fallback,
+        other => anyhow::bail!("unknown forward strategy: {other}"),
+    })
+}
+
+fn clamp_fanout_n(n: u8) -> u8 {
+    n.clamp(1, vibe_protocol::ROUTE_FANOUT_N_MAX)
+}
+
 fn upstream_attempt_phase_to_str(p: UpstreamAttemptPhase) -> &'static str {
     match p {
         UpstreamAttemptPhase::Connecting => "connecting",
@@ -514,7 +535,7 @@ impl Db {
     pub fn route_list(&self) -> Result<Vec<Route>> {
         self.with(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, name, match_model, target_provider_id, target_model, tier, priority
+                "SELECT id, name, match_model, target_provider_id, target_model, tier, priority, strategy, fanout_n
                  FROM routes ORDER BY priority ASC",
             )?;
             let rows = stmt.query_map([], row_to_route)?;
@@ -529,15 +550,17 @@ impl Db {
     pub fn route_upsert(&self, route: Route) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO routes (id, name, match_model, target_provider_id, target_model, tier, priority)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO routes (id, name, match_model, target_provider_id, target_model, tier, priority, strategy, fanout_n)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
                    match_model = excluded.match_model,
                    target_provider_id = excluded.target_provider_id,
                    target_model = excluded.target_model,
                    tier = excluded.tier,
-                   priority = excluded.priority",
+                   priority = excluded.priority,
+                   strategy = excluded.strategy,
+                   fanout_n = excluded.fanout_n",
                 params![
                     route.id,
                     route.name,
@@ -546,6 +569,8 @@ impl Db {
                     route.target_model,
                     route_tier_to_str(route.tier),
                     route.priority,
+                    forward_strategy_to_str(route.strategy),
+                    clamp_fanout_n(route.fanout_n) as i64,
                 ],
             )?;
             Ok(())
@@ -555,7 +580,7 @@ impl Db {
     pub fn route_get(&self, id: &str) -> Result<Option<Route>> {
         self.with(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, name, match_model, target_provider_id, target_model, tier, priority
+                "SELECT id, name, match_model, target_provider_id, target_model, tier, priority, strategy, fanout_n
                  FROM routes WHERE id = ?1",
             )?;
             let r = stmt.query_row(params![id], row_to_route).optional()?;
@@ -572,6 +597,8 @@ impl Db {
             target_model: input.target_model,
             tier: input.tier,
             priority: input.priority,
+            strategy: input.strategy,
+            fanout_n: clamp_fanout_n(input.fanout_n),
         };
         self.route_upsert(route.clone())?;
         Ok(route)
@@ -589,6 +616,8 @@ impl Db {
             target_model: input.target_model,
             tier: input.tier,
             priority: input.priority,
+            strategy: input.strategy,
+            fanout_n: clamp_fanout_n(input.fanout_n),
         };
         self.route_upsert(route.clone())?;
         Ok(route)
@@ -2258,6 +2287,8 @@ fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
 
 fn row_to_route(r: &rusqlite::Row) -> rusqlite::Result<Route> {
     let tier_s: String = r.get(5)?;
+    let strategy_s: String = r.get(7)?;
+    let fanout_n: i64 = r.get(8)?;
     Ok(Route {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -2268,6 +2299,10 @@ fn row_to_route(r: &rusqlite::Row) -> rusqlite::Result<Route> {
             rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, e.into())
         })?,
         priority: r.get(6)?,
+        strategy: forward_strategy_from_str(&strategy_s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, e.into())
+        })?,
+        fanout_n: clamp_fanout_n(fanout_n.clamp(0, u8::MAX as i64) as u8),
     })
 }
 

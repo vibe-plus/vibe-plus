@@ -32,6 +32,9 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
 
 export type ProviderKind = "anthropic" | "openai-chat" | "openai-responses" | "gemini-native";
 export type RouteTier = "high" | "low" | "default";
+export type ForwardStrategy = "rotate" | "race" | "fallback";
+export const ROUTE_FANOUT_N_MAX = 4;
+export const ROUTE_FANOUT_N_DEFAULT = 2;
 
 export interface ModelAlias {
   alias: string;
@@ -131,6 +134,8 @@ export interface Route {
   target_model: string | null;
   tier: RouteTier;
   priority: number;
+  strategy: ForwardStrategy;
+  fanout_n: number;
 }
 export interface RouteInput {
   name: string;
@@ -139,6 +144,8 @@ export interface RouteInput {
   target_model: string | null;
   tier: RouteTier;
   priority: number;
+  strategy: ForwardStrategy;
+  fanout_n: number;
 }
 export interface RequestLog {
   id: string;

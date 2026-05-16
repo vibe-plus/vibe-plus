@@ -716,7 +716,7 @@ pub(crate) async fn prepare_forward_once(
     };
 
     let counter = state.lb_counter.fetch_add(1, Ordering::Relaxed);
-    let (_route, routed_candidates) = if wire == Wire::Anthropic {
+    let (matched_route, routed_candidates) = if wire == Wire::Anthropic {
         let claude_cfg = state.claude_config();
         crate::claude_control::candidates_for_request(
             &providers_list,
@@ -730,6 +730,18 @@ pub(crate) async fn prepare_forward_once(
     } else {
         router::candidates_with_routes(&providers_list, &routes, wire, &requested_model)
     };
+    // Phase 3a: see the matching block in `forward()`. Race execution lands in 3b.
+    if let Some(route) = matched_route.as_ref() {
+        if route.strategy == vibe_protocol::ForwardStrategy::Race {
+            tracing::info!(
+                route_id = %route.id,
+                route_name = %route.name,
+                fanout_n = route.fanout_n,
+                "race strategy requested — execution falls back to sequential pending Phase 3b harness"
+            );
+        }
+    }
+    let _ = matched_route;
     let candidates = selector::shuffle_candidates(routed_candidates, &state.cb);
     let empty_log_ctx = LogCtx {
         wire,
@@ -1368,7 +1380,7 @@ pub async fn forward(
     };
 
     let counter = state.lb_counter.fetch_add(1, Ordering::Relaxed);
-    let (_route, routed_candidates) = if wire == Wire::Anthropic {
+    let (matched_route, routed_candidates) = if wire == Wire::Anthropic {
         let claude_cfg = state.claude_config();
         crate::claude_control::candidates_for_request(
             &providers_list,
@@ -1382,6 +1394,19 @@ pub async fn forward(
     } else {
         router::candidates_with_routes(&providers_list, &routes, wire, &requested_model)
     };
+    // Phase 3a: read route-level forwarding strategy. The harness in 3b will
+    // dispatch fanout-race here; for now we log and fall through to sequential.
+    if let Some(route) = matched_route.as_ref() {
+        if route.strategy == vibe_protocol::ForwardStrategy::Race {
+            tracing::info!(
+                route_id = %route.id,
+                route_name = %route.name,
+                fanout_n = route.fanout_n,
+                "race strategy requested — execution falls back to sequential pending Phase 3b harness"
+            );
+        }
+    }
+    let _ = matched_route;
     let candidates = selector::shuffle_candidates(routed_candidates, &state.cb);
     if candidates.is_empty() {
         let log_ctx = LogCtx {
