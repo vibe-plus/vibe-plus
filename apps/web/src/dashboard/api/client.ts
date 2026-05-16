@@ -739,6 +739,49 @@ export interface Credential {
   balance?: ProviderBalanceSnapshot | null;
   usage?: ProviderBalanceSnapshot | null;
   balance_fetched_at?: number | null;
+  // Upstream vendor / login / group
+  upstream_vendor?: CredentialVendor | null;
+  upstream_username?: string | null;
+  /** true when a session token is cached (token itself never returned). */
+  upstream_has_session?: boolean;
+  upstream_session_expires_at?: number | null;
+  upstream_group?: string | null;
+  price_multiplier?: number;
+  windows?: UsageWindow[];
+}
+
+export type CredentialVendor =
+  | "generic"
+  | "new-api"
+  | "sub2-api"
+  | "anthropic-payg"
+  | "anthropic-plan";
+
+export interface UsageWindow {
+  label: string;
+  used_usd: number;
+  limit_usd: number | null;
+  /** 0–100 or null when limit unknown */
+  used_pct: number | null;
+  reset_at: number | null;
+}
+
+export interface UpstreamGroupInfo {
+  id: string;
+  name: string;
+  description: string | null;
+  platform: string | null;
+  rate_multiplier: number;
+}
+
+export interface CredentialLoginRequest {
+  username: string;
+  password: string;
+}
+
+export interface CredentialLoginResponse {
+  ok: boolean;
+  note: string | null;
 }
 
 export interface ProviderBalanceSnapshot {
@@ -758,15 +801,16 @@ export interface CredentialInput {
   notes: string | null;
   enabled: boolean;
   priority: number;
-  /** OAuth: access token stored directly in SQLite. */
   oauth_access_token: string | null;
-  /** OAuth: refresh token (write-only; never returned by server). */
   oauth_refresh_token: string | null;
   oauth_expires_at: number | null;
-  /** Parsed and stored when importing Codex `id_token`; server merges it into Credential display fields. */
   oauth_cached_email?: string | null;
   oauth_cached_subject?: string | null;
   oauth_cached_plan_slug?: string | null;
+  upstream_vendor?: CredentialVendor | null;
+  upstream_username?: string | null;
+  upstream_group?: string | null;
+  price_multiplier?: number;
 }
 
 export interface ExtraCredential {
@@ -783,6 +827,8 @@ export interface LocalCandidate {
   /** Runtime auth hint when not using DB OAuth (e.g. Claude literal). Null for Codex after scan. */
   auth_ref: string | null;
   token_ok: boolean;
+  /** True when ANTHROPIC_AUTH_TOKEN = "PROXY_MANAGED" — vibe already handles auth for this client. */
+  proxy_managed?: boolean;
   source_path: string;
   default_aliases: ModelAlias[];
   extra_credentials: ExtraCredential[];
@@ -943,6 +989,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ timeout_secs: timeoutSecs ?? null }),
       }),
+    detectVendor: (id: string) =>
+      req<{ upstream_vendor: string | null; updated_credentials: number; base_url: string }>(
+        `/_vp/providers/${id}/detect-vendor`,
+        { method: "POST" },
+      ),
     refreshModels: (id: string) =>
       req<Provider>(`/_vp/providers/${id}/models/refresh`, { method: "POST" }),
     sync: (id: string, scope: "all" | "brand" | "protocol" | "models" | "usage") =>
@@ -1000,6 +1051,12 @@ export const api = {
       req<Credential>(`/_vp/credentials/${id}/models/refresh`, { method: "POST" }),
     refreshBalance: (id: string) =>
       req<Credential>(`/_vp/credentials/${id}/balance/refresh`, { method: "POST" }),
+    login: (id: string, body: CredentialLoginRequest) =>
+      req<CredentialLoginResponse>(`/_vp/credentials/${id}/login`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    groups: (id: string) => req<UpstreamGroupInfo[]>(`/_vp/credentials/${id}/groups`),
   },
   routes: {
     list: () => req<Route[]>("/_vp/routes"),

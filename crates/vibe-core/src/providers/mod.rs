@@ -3,7 +3,9 @@
 
 pub mod anthropic;
 pub mod gemini;
+pub mod newapi;
 pub mod openai;
+pub mod sub2api;
 
 use anyhow::Result;
 use bytes::Bytes;

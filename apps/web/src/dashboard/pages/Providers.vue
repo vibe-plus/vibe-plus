@@ -13,6 +13,7 @@ import {
   type ProviderCodexPlanItem,
   type ProvidersOverview,
   type RequestRuntimeStats,
+  type UpstreamGroupInfo,
   isProviderHealthSummary,
 } from "../api/client.ts";
 import {
@@ -81,6 +82,8 @@ const toggleBusy = ref<Record<string, boolean>>({});
 const circuitResetBusy = ref<Record<string, boolean>>({});
 /** Per-provider protocol probe busy state (POST /_vp/providers/:id/probe). */
 const speedtestBusy = ref<Record<string, boolean>>({});
+/** Per-provider vendor auto-detect busy state. */
+const detectVendorBusy = ref<Record<string, boolean>>({});
 /** Per-provider remote model refresh busy state. */
 const modelRefreshBusy = ref<Record<string, boolean>>({});
 const credModelRefreshBusy = ref<Record<string, boolean>>({});
@@ -116,6 +119,12 @@ const credsByProvider = ref<Record<string, Credential[]>>({});
 const loadingCreds = ref<Record<string, boolean>>({});
 const showCredForm = ref(false);
 const editCred = ref<Credential | null>(null);
+// Upstream login UI
+const credLoginPassword = ref("");
+const credLoginBusy = ref(false);
+const credLoginNote = ref<string | null>(null);
+const credGroups = ref<UpstreamGroupInfo[]>([]);
+const credGroupsBusy = ref(false);
 const credProviderId = ref("");
 const emptyCredForm = (): CredentialInput => ({
   label: "",
@@ -130,6 +139,10 @@ const emptyCredForm = (): CredentialInput => ({
   oauth_cached_email: null,
   oauth_cached_subject: null,
   oauth_cached_plan_slug: null,
+  upstream_vendor: null,
+  upstream_username: null,
+  upstream_group: null,
+  price_multiplier: 1.0,
 });
 const credForm = ref<CredentialInput>(emptyCredForm());
 // Credential form auth mode: "apikey" or "oauth"
@@ -626,6 +639,30 @@ async function refreshCredentialBalance(credentialId: string) {
   } finally {
     const { [credentialId]: _, ...rest } = credBalanceRefreshBusy.value;
     credBalanceRefreshBusy.value = rest;
+  }
+}
+
+async function detectVendor(providerId: string) {
+  if (detectVendorBusy.value[providerId]) return;
+  detectVendorBusy.value = { ...detectVendorBusy.value, [providerId]: true };
+  try {
+    const result = await api.providers.detectVendor(providerId);
+    // Reload credentials for this provider so vendor badges appear
+    const creds = await api.credentials.list(providerId);
+    credsByProvider.value = { ...credsByProvider.value, [providerId]: creds };
+    // Auto-refresh balance for all creds that now have a vendor
+    const vendored = creds.filter((c) => c.upstream_vendor);
+    await Promise.all(vendored.map((c) => refreshCredentialBalance(c.id)));
+    if (result.upstream_vendor) {
+      error.value = "";
+    } else {
+      error.value = `未能识别 ${providerId} 的供应商类型（无 NewAPI/Sub2API 特征）`;
+    }
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    const { [providerId]: _, ...rest } = detectVendorBusy.value;
+    detectVendorBusy.value = rest;
   }
 }
 
@@ -1188,6 +1225,9 @@ function startAddCred(providerId: string) {
   credAuthMode.value = "apikey";
   editCred.value = null;
   credProviderId.value = providerId;
+  credLoginPassword.value = "";
+  credLoginNote.value = null;
+  credGroups.value = [];
   resetAuthJsonImportUi();
   showCredForm.value = true;
 }
@@ -1206,6 +1246,10 @@ function startEditCred(cred: Credential) {
     oauth_access_token: cred.oauth_access_token,
     oauth_refresh_token: null, // write-only: never returned from server
     oauth_expires_at: cred.oauth_expires_at,
+    upstream_vendor: cred.upstream_vendor ?? null,
+    upstream_username: cred.upstream_username ?? null,
+    upstream_group: cred.upstream_group ?? null,
+    price_multiplier: cred.price_multiplier ?? 1.0,
   };
   editCred.value = cred;
   credProviderId.value = cred.provider_id;
@@ -1223,6 +1267,36 @@ function normalizeAuthRef(raw: string | null): string | null {
     return trimmed;
   }
   return `literal:${trimmed}`;
+}
+
+async function doCredLogin() {
+  if (!editCred.value) return;
+  const username = credForm.value.upstream_username?.trim();
+  const password = credLoginPassword.value.trim();
+  if (!username || !password) return;
+  credLoginBusy.value = true;
+  credLoginNote.value = null;
+  try {
+    const res = await api.credentials.login(editCred.value.id, { username, password });
+    credLoginNote.value = res.ok ? "登录成功" : (res.note ?? "登录失败");
+    if (res.ok) credLoginPassword.value = "";
+  } catch (e) {
+    credLoginNote.value = String(e);
+  } finally {
+    credLoginBusy.value = false;
+  }
+}
+
+async function fetchCredGroups() {
+  if (!editCred.value) return;
+  credGroupsBusy.value = true;
+  try {
+    credGroups.value = await api.credentials.groups(editCred.value.id);
+  } catch {
+    credGroups.value = [];
+  } finally {
+    credGroupsBusy.value = false;
+  }
 }
 
 async function saveCred() {
@@ -1646,12 +1720,14 @@ useWs((ev: unknown) => {
                 providerRollingStatById.get(card.provider.id)?.decode_output_tokens_per_sec ||
                 providerRollingStatById.get(card.provider.id)?.output_tokens_per_sec
               "
+              :detect-vendor-busy="!!detectVendorBusy[card.provider.id]"
               :class="[
                 highlightedProviderId === card.provider.id
                   ? 'ring-2 ring-sky-300 ring-offset-2 ring-offset-vp-bg'
                   : '',
               ]"
               @sync-creds="reloadProviderCreds($event)"
+              @detect-vendor="detectVendor($event)"
               @speedtest-provider="speedtestProvider($event)"
               @refresh-models="refreshProviderModels($event)"
               @refresh-cred-models="refreshCredentialModels($event)"
@@ -1691,6 +1767,7 @@ useWs((ev: unknown) => {
 
     <ProviderImportModal
       :open="showImportModal"
+      :view="workspaceView"
       @close="showImportModal = false"
       @imported="load()"
     />
@@ -1879,6 +1956,132 @@ useWs((ev: unknown) => {
                 class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
               />
             </label>
+
+            <!-- ── Upstream vendor ── -->
+            <label class="block">
+              <span class="text-xs text-slate-500 font-medium">供应商类型</span>
+              <select
+                v-model="credForm.upstream_vendor"
+                class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+              >
+                <option :value="null">— 通用（Generic）</option>
+                <option value="new-api">NewAPI / One-API</option>
+                <option value="sub2-api">Sub2API</option>
+                <option value="anthropic-payg">Anthropic 官方 API Key（PAYG）</option>
+                <option value="anthropic-plan">Anthropic 官方订阅（Pro / Max）</option>
+              </select>
+            </label>
+
+            <!-- ── Username / password login (NewAPI + Sub2API) ── -->
+            <template
+              v-if="
+                credForm.upstream_vendor === 'new-api' || credForm.upstream_vendor === 'sub2-api'
+              "
+            >
+              <label class="block">
+                <span class="text-xs text-slate-500 font-medium">用户名 / 邮箱</span>
+                <input
+                  v-model="credForm.upstream_username"
+                  placeholder="user@example.com"
+                  autocomplete="username"
+                  class="mt-1 w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+                />
+              </label>
+
+              <!-- Login section (only when editing an existing credential) -->
+              <template v-if="editCred">
+                <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
+                  <p class="text-xs font-medium text-slate-600">登录获取 Session Token</p>
+                  <div class="flex gap-2">
+                    <input
+                      v-model="credLoginPassword"
+                      type="password"
+                      placeholder="密码"
+                      autocomplete="current-password"
+                      class="flex-1 bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-900"
+                      @keydown.enter="doCredLogin"
+                    />
+                    <button
+                      type="button"
+                      :disabled="
+                        credLoginBusy ||
+                        !credForm.upstream_username?.trim() ||
+                        !credLoginPassword.trim()
+                      "
+                      class="shrink-0 px-3 py-1.5 text-xs rounded-lg bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-40 transition-colors"
+                      @click="doCredLogin"
+                    >
+                      {{ credLoginBusy ? "登录中…" : "登录" }}
+                    </button>
+                  </div>
+                  <p
+                    v-if="credLoginNote"
+                    :class="credLoginNote === '登录成功' ? 'text-emerald-600' : 'text-red-600'"
+                    class="text-xs"
+                  >
+                    {{ credLoginNote }}
+                  </p>
+                  <p v-if="editCred.upstream_has_session" class="text-xs text-slate-500">
+                    ✓ Session 已缓存
+                    <template v-if="editCred.upstream_session_expires_at">
+                      · 到期
+                      {{ new Date(editCred.upstream_session_expires_at * 1000).toLocaleString() }}
+                    </template>
+                  </p>
+                </div>
+              </template>
+
+              <!-- Group picker -->
+              <div class="space-y-1.5">
+                <div class="flex items-center gap-2">
+                  <span class="text-xs text-slate-500 font-medium">分组</span>
+                  <button
+                    v-if="editCred"
+                    type="button"
+                    :disabled="credGroupsBusy"
+                    class="text-[10px] px-2 py-0.5 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 disabled:opacity-40"
+                    @click="fetchCredGroups"
+                  >
+                    {{ credGroupsBusy ? "获取中…" : "获取分组" }}
+                  </button>
+                </div>
+                <select
+                  v-if="credGroups.length"
+                  v-model="credForm.upstream_group"
+                  class="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+                >
+                  <option :value="null">— 不指定</option>
+                  <option v-for="g in credGroups" :key="g.id" :value="g.name">
+                    {{ g.name }}
+                    <template v-if="g.description"> · {{ g.description }}</template>
+                    (×{{ g.rate_multiplier }})
+                  </option>
+                </select>
+                <input
+                  v-else
+                  v-model="credForm.upstream_group"
+                  placeholder="分组名称（留空自动）"
+                  class="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+                />
+              </div>
+            </template>
+
+            <!-- ── Price multiplier ── -->
+            <label class="block">
+              <span class="text-xs text-slate-500 font-medium">成本倍率</span>
+              <div class="mt-1 flex items-center gap-2">
+                <input
+                  v-model.number="credForm.price_multiplier"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="1.0"
+                  class="w-28 bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900"
+                />
+                <span class="text-xs text-slate-400">× 官方价格（1.0 = 1:1）</span>
+              </div>
+            </label>
+
             <label class="block">
               <span class="sr-only">priority</span>
               <input

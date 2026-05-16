@@ -117,9 +117,7 @@ pub fn credential_input_from_codex_tokens(
 ) -> CredentialInput {
     CredentialInput {
         label,
-        auth_ref: None,
         // Plan/tier is represented by upstream JWT and wham/usage snapshots; do not hard-code codex-pro during import to avoid misleading UI plan labels.
-        plan_type: None,
         notes: Some(notes),
         enabled: true,
         priority,
@@ -129,6 +127,7 @@ pub fn credential_input_from_codex_tokens(
         oauth_cached_email: tokens.oauth_cached_email,
         oauth_cached_subject: tokens.oauth_cached_subject,
         oauth_cached_plan_slug: tokens.oauth_cached_plan_slug,
+        ..CredentialInput::default()
     }
 }
 

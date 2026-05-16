@@ -18,7 +18,7 @@
 use crate::model_defaults;
 use crate::secrets;
 use crate::state::AppState;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use axum::{extract::State, Json};
 use reqwest::{RequestBuilder, Url};
 use scraper::{Html, Selector};
@@ -174,6 +174,9 @@ pub struct VendorDiscovery {
     pub vendor_hint: Option<String>,
     /// Model IDs returned by /v1/models when no_auth is true.
     pub model_ids: Vec<String>,
+    /// Management-platform vendor detected by probing admin endpoints.
+    /// "new-api" | "sub2-api" | null when unrecognized.
+    pub upstream_vendor: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -381,16 +384,10 @@ pub async fn remote_import_handler(
     let credential_input = CredentialInput {
         label: credential_label_from_secret(&snippet.secret),
         auth_ref: Some(format!("literal:{}", snippet.secret)),
-        plan_type: None,
         notes: Some("remote-intake".into()),
         enabled: true,
         priority: 100,
-        oauth_access_token: None,
-        oauth_refresh_token: None,
-        oauth_expires_at: None,
-        oauth_cached_email: None,
-        oauth_cached_subject: None,
-        oauth_cached_plan_slug: None,
+        ..CredentialInput::default()
     };
 
     let provider = upsert_remote_provider(state.clone(), provider_input).await?;
@@ -810,6 +807,7 @@ fn build_credential_input(a: &ImportAssignment) -> Result<CredentialInput> {
         oauth_cached_email: hints.email,
         oauth_cached_subject: hints.subject,
         oauth_cached_plan_slug: hints.plan_slug,
+        ..CredentialInput::default()
     })
 }
 
@@ -1656,6 +1654,11 @@ async fn discover_vendor_by_url(
     let base = normalize_remote_base(raw_url).map_err(|e| anyhow!("invalid URL: {e}"))?;
     let openai_base = normalize_openai_base(&base);
 
+    // ── Step 0: probe management platform (NewAPI / Sub2API) ─────────────
+    // Fire this early; wire detection probes run below. We await the result
+    // once at the end and patch it into the struct we already built.
+    let upstream_vendor = probe_upstream_vendor(http, &base, timeout).await;
+
     // ── Step 1: no-auth GET /v1/models ────────────────────────────────────
     let models_url = format!("{openai_base}/v1/models");
     let no_auth_resp = tokio::time::timeout(timeout, http.get(&models_url).send()).await;
@@ -1688,6 +1691,7 @@ async fn discover_vendor_by_url(
                 confidence: "high".into(),
                 vendor_hint,
                 model_ids,
+                upstream_vendor: upstream_vendor.clone(),
             });
         }
     }
@@ -1732,6 +1736,7 @@ async fn discover_vendor_by_url(
                 confidence: "medium".into(),
                 vendor_hint,
                 model_ids,
+                upstream_vendor: upstream_vendor.clone(),
             });
         }
 
@@ -1748,6 +1753,7 @@ async fn discover_vendor_by_url(
                     confidence,
                     vendor_hint,
                     model_ids: vec![],
+                    upstream_vendor: upstream_vendor.clone(),
                 });
             }
         }
@@ -1783,6 +1789,7 @@ async fn discover_vendor_by_url(
                             confidence: "high".into(),
                             vendor_hint,
                             model_ids: vec![],
+                            upstream_vendor: upstream_vendor.clone(),
                         });
                     }
                 }
@@ -1801,7 +1808,71 @@ async fn discover_vendor_by_url(
         confidence: "low".into(),
         vendor_hint: None,
         model_ids: vec![],
+        upstream_vendor,
     })
+}
+
+/// Probe a base URL to detect whether it runs NewAPI or Sub2API.
+///
+/// Fingerprint rules (from live traffic):
+/// - `GET /api/v1/auth/me → 401` (not 404) ⇒ Sub2API
+/// - `GET /api/user/self  → 401` (not 404) ⇒ NewAPI
+/// - HTML title contains "Sub2API"           ⇒ Sub2API (high confidence)
+///
+/// Returns the `CredentialVendor` kebab-case slug or None when unrecognized.
+pub(crate) async fn probe_upstream_vendor(
+    http: &reqwest::Client,
+    base_url: &str,
+    timeout: Duration,
+) -> Option<String> {
+    let root = base_url.trim_end_matches('/');
+
+    // Check HTML title for explicit "Sub2API" branding first (fast, single request)
+    let title_future = async {
+        let resp = tokio::time::timeout(timeout, http.get(root).send())
+            .await
+            .ok()?
+            .ok()?;
+        let text = resp.text().await.ok()?;
+        if text.contains("Sub2API") || text.contains("sub2api") {
+            return Some("sub2-api".to_string());
+        }
+        if text.contains("New API") || text.contains("One API") || text.contains("new-api") {
+            return Some("new-api".to_string());
+        }
+        None
+    };
+
+    // Probe both management API endpoints in parallel
+    let sub2_future = async {
+        let resp = tokio::time::timeout(timeout, http.get(format!("{root}/api/v1/auth/me")).send())
+            .await
+            .ok()?
+            .ok()?;
+        let code = resp.status().as_u16();
+        // 401 = endpoint exists but auth required → Sub2API
+        // 404 = endpoint not found → not Sub2API
+        if code == 401 || code == 403 { Some("sub2-api") } else { None }
+    };
+
+    let newapi_future = async {
+        let resp = tokio::time::timeout(timeout, http.get(format!("{root}/api/user/self")).send())
+            .await
+            .ok()?
+            .ok()?;
+        let code = resp.status().as_u16();
+        if code == 401 || code == 403 { Some("new-api") } else { None }
+    };
+
+    // Run all three concurrently and take the first definitive answer
+    let (title_res, sub2_res, newapi_res) =
+        tokio::join!(title_future, sub2_future, newapi_future);
+
+    // Title takes priority (explicit branding)
+    if let Some(v) = title_res { return Some(v); }
+    if let Some(v) = sub2_res { return Some(v.to_string()); }
+    if let Some(v) = newapi_res { return Some(v.to_string()); }
+    None
 }
 
 /// Read response headers for vendor-specific signals.

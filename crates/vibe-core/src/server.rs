@@ -237,6 +237,18 @@ pub fn router(state: AppState) -> Router {
             "/_vp/credentials/:id/balance/refresh",
             post(refresh_credential_balance),
         )
+        .route(
+            "/_vp/providers/:id/detect-vendor",
+            post(detect_provider_vendor),
+        )
+        .route(
+            "/_vp/credentials/:id/login",
+            post(credential_upstream_login),
+        )
+        .route(
+            "/_vp/credentials/:id/groups",
+            get(credential_upstream_groups),
+        )
         // health overview
         .route("/_vp/health/providers", get(health_all_providers))
         // logs + usage + stats
@@ -2228,6 +2240,56 @@ async fn refresh_credential_balance(
     .await?
     .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
 
+    let base_url = provider
+        .effective_protocols()
+        .into_iter()
+        .next()
+        .map(|p| p.base_url.clone())
+        .unwrap_or_else(|| provider.base_url.clone());
+
+    use vibe_protocol::CredentialVendor;
+    match credential.upstream_vendor.as_ref() {
+        Some(CredentialVendor::NewApi) => {
+            let cred_id_s = credential.id.clone();
+            let session = run_blocking(state.clone(), move |s| s.db.credential_get_session(&cred_id_s)).await?;
+            let token = session
+                .as_deref()
+                .or(credential.auth_ref.as_deref())
+                .map(|s| resolve_secret(s))
+                .unwrap_or_default();
+            let balance = crate::providers::newapi::fetch_balance(&state.http, &base_url, &token).await;
+            let windows = crate::providers::newapi::fetch_key_usage(&state.http, &base_url, &token).await;
+            let fetched_at = chrono::Utc::now().timestamp();
+            let cred_id = credential.id.clone();
+            let updated = run_blocking(state.clone(), move |s| {
+                s.db.credential_update_financials(&cred_id, balance, None, fetched_at)?;
+                s.db.credential_update_windows(&cred_id, &windows)
+            }).await?;
+            publish_providers_overview_soon(state);
+            return Ok(Json(updated));
+        }
+        Some(CredentialVendor::Sub2Api) => {
+            let cred_id_s2 = credential.id.clone();
+            let session2 = run_blocking(state.clone(), move |s| s.db.credential_get_session(&cred_id_s2)).await?;
+            let token = session2.as_deref().unwrap_or_default();
+            if token.is_empty() {
+                return Err(anyhow::anyhow!("sub2api credential has no session — login first").into());
+            }
+            let balance = crate::providers::sub2api::fetch_balance(&state.http, &base_url, token).await;
+            let windows = crate::providers::sub2api::fetch_windows(&state.http, &base_url, token).await;
+            let fetched_at = chrono::Utc::now().timestamp();
+            let cred_id = credential.id.clone();
+            let updated = run_blocking(state.clone(), move |s| {
+                s.db.credential_update_financials(&cred_id, balance, None, fetched_at)?;
+                s.db.credential_update_windows(&cred_id, &windows)
+            }).await?;
+            publish_providers_overview_soon(state);
+            return Ok(Json(updated));
+        }
+        _ => {}
+    }
+
+    // Generic path (original logic)
     let secret = if let Some(auth_ref) = credential.auth_ref.as_deref() {
         crate::secrets::resolve(auth_ref)?
     } else if let Some(access) = credential.oauth_access_token.as_deref() {
@@ -2263,6 +2325,156 @@ async fn refresh_credential_balance(
 }
 
 // ---------------------------------------------------------------------------
+// Vendor auto-detection
+// ---------------------------------------------------------------------------
+
+/// `POST /_vp/providers/:id/detect-vendor`
+/// Probe the provider's base URL and detect whether it runs NewAPI or Sub2API.
+/// Automatically writes the result to all unset credentials of this provider.
+async fn detect_provider_vendor(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let provider = run_blocking(state.clone(), move |s| s.db.provider_get(&id))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+    let base_url = provider
+        .effective_protocols()
+        .into_iter()
+        .next()
+        .map(|p| p.base_url.clone())
+        .unwrap_or_else(|| provider.base_url.clone());
+
+    let timeout = std::time::Duration::from_secs(6);
+    let upstream_vendor = crate::intake::probe_upstream_vendor(&state.http, &base_url, timeout).await;
+
+    let updated_count = if let Some(ref vendor) = upstream_vendor {
+        let pid = provider.id.clone();
+        let vendor_str = vendor.clone();
+        run_blocking(state.clone(), move |s| {
+            s.db.credentials_set_vendor_for_provider(&pid, &vendor_str)
+        })
+        .await?
+    } else {
+        0
+    };
+
+    publish_providers_overview_soon(state);
+    Ok(Json(serde_json::json!({
+        "upstream_vendor": upstream_vendor,
+        "updated_credentials": updated_count,
+        "base_url": base_url,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Upstream login / groups
+// ---------------------------------------------------------------------------
+
+/// `POST /_vp/credentials/:id/login`
+/// Trigger upstream password-based login for NewAPI or Sub2API credentials,
+/// storing the resulting session token in the database.
+async fn credential_upstream_login(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<vibe_protocol::CredentialLoginRequest>,
+) -> Result<Json<vibe_protocol::CredentialLoginResponse>, AppError> {
+    let credential = run_blocking(state.clone(), move |s| s.db.credential_get(&id))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("credential not found"))?;
+    let provider = run_blocking(state.clone(), {
+        let pid = credential.provider_id.clone();
+        move |s| s.db.provider_get(&pid)
+    })
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+    let base_url = provider
+        .effective_protocols()
+        .into_iter()
+        .next()
+        .map(|p| p.base_url.clone())
+        .unwrap_or_else(|| provider.base_url.clone());
+
+    use vibe_protocol::CredentialVendor;
+    match credential.upstream_vendor.as_ref() {
+        Some(CredentialVendor::NewApi) => {
+            let token = crate::providers::newapi::login(
+                &state.http, &base_url, &body.username, &body.password,
+            )
+            .await
+            .map_err(|e| AppError(e))?;
+            let cred_id = credential.id.clone();
+            run_blocking(state.clone(), move |s| {
+                s.db.credential_update_session(&cred_id, &token, None)
+            })
+            .await?;
+            publish_providers_overview_soon(state);
+            Ok(Json(vibe_protocol::CredentialLoginResponse { ok: true, note: None }))
+        }
+        Some(CredentialVendor::Sub2Api) => {
+            let (token, expires_at) = crate::providers::sub2api::login(
+                &state.http, &base_url, &body.username, &body.password,
+            )
+            .await
+            .map_err(|e| AppError(e))?;
+            let cred_id = credential.id.clone();
+            run_blocking(state.clone(), move |s| {
+                s.db.credential_update_session(&cred_id, &token, expires_at)
+            })
+            .await?;
+            publish_providers_overview_soon(state);
+            Ok(Json(vibe_protocol::CredentialLoginResponse { ok: true, note: None }))
+        }
+        _ => Err(anyhow::anyhow!(
+            "login not supported for this credential vendor"
+        )
+        .into()),
+    }
+}
+
+/// `GET /_vp/credentials/:id/groups`
+/// Fetch available upstream groups for NewAPI or Sub2API credentials.
+async fn credential_upstream_groups(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<vibe_protocol::UpstreamGroupInfo>>, AppError> {
+    let credential = run_blocking(state.clone(), move |s| s.db.credential_get(&id))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("credential not found"))?;
+    let provider = run_blocking(state.clone(), {
+        let pid = credential.provider_id.clone();
+        move |s| s.db.provider_get(&pid)
+    })
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+    let base_url = provider
+        .effective_protocols()
+        .into_iter()
+        .next()
+        .map(|p| p.base_url.clone())
+        .unwrap_or_else(|| provider.base_url.clone());
+    let cred_id_g = credential.id.clone();
+    let session_g = run_blocking(state.clone(), move |s| s.db.credential_get_session(&cred_id_g)).await?;
+    let token = session_g
+        .as_deref()
+        .or(credential.auth_ref.as_deref())
+        .map(resolve_secret)
+        .unwrap_or_default();
+
+    use vibe_protocol::CredentialVendor;
+    let groups = match credential.upstream_vendor.as_ref() {
+        Some(CredentialVendor::NewApi) => {
+            crate::providers::newapi::fetch_groups(&state.http, &base_url, &token).await
+        }
+        Some(CredentialVendor::Sub2Api) => {
+            crate::providers::sub2api::fetch_groups(&state.http, &base_url, &token).await
+        }
+        _ => vec![],
+    };
+    Ok(Json(groups))
+}
+
+// ---------------------------------------------------------------------------
 // Local import (scan installed tools → ready-to-use ProviderInput)
 // ---------------------------------------------------------------------------
 
@@ -2271,6 +2483,14 @@ async fn refresh_credential_balance(
 /// No database writes; filesystem reads only.
 async fn scan_local_providers() -> Json<Vec<local_import::LocalCandidate>> {
     Json(local_import::scan())
+}
+
+fn resolve_secret(s: &str) -> String {
+    if s.starts_with("literal:") {
+        s["literal:".len()..].to_string()
+    } else {
+        crate::secrets::resolve(s).unwrap_or_else(|_| s.to_string())
+    }
 }
 
 fn provider_to_input(p: &Provider) -> ProviderInput {
@@ -2324,6 +2544,16 @@ fn merge_codex_credential_on_reimport(
         oauth_cached_plan_slug: incoming
             .oauth_cached_plan_slug
             .or(existing.oauth_chatgpt_plan_slug.clone()),
+        upstream_vendor: incoming.upstream_vendor.or(existing.upstream_vendor.clone()),
+        upstream_username: incoming.upstream_username.or(existing.upstream_username.clone()),
+        upstream_session: incoming.upstream_session,
+        upstream_session_expires_at: incoming.upstream_session_expires_at,
+        upstream_group: incoming.upstream_group.or(existing.upstream_group.clone()),
+        price_multiplier: if incoming.price_multiplier != 1.0 {
+            incoming.price_multiplier
+        } else {
+            existing.price_multiplier
+        },
     }
 }
 

@@ -9,6 +9,7 @@ import type {
 } from "../api/client.ts";
 import VpIcon from "./vp-icon.vue";
 import ProviderLogo from "./provider-logo.vue";
+import UsageRing from "./UsageRing.vue";
 import {
   credentialPlanTierHint,
   credentialPrimaryAccountLabel,
@@ -61,6 +62,7 @@ const props = defineProps<{
   activeCredentialCounts: Record<string, number>;
   activeRequestCount?: number;
   tokensPerSec?: number | null;
+  detectVendorBusy?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -78,6 +80,7 @@ const emit = defineEmits<{
   "edit-cred": [credential: Credential];
   "delete-cred": [credential: Credential];
   "view-logs": [providerId: string];
+  "detect-vendor": [providerId: string];
 }>();
 
 const MAX_VISIBLE_CREDS = 8;
@@ -159,6 +162,24 @@ function credentialBalanceLabel(credential: Credential): string {
   const amount = snap.remaining ?? snap.balance;
   if (!amount) return "";
   return `${snap.currency} ${amount}`;
+}
+
+function balancePct(credential: Credential): number | null {
+  const snap = credential.balance;
+  if (!snap?.remaining || !snap?.total) return null;
+  const rem = parseFloat(snap.remaining);
+  const total = parseFloat(snap.total);
+  if (!total || isNaN(rem) || isNaN(total)) return null;
+  return Math.round(((total - rem) / total) * 100);
+}
+
+function balanceCenterText(credential: Credential): string | undefined {
+  const snap = credential.balance;
+  if (!snap?.remaining) return undefined;
+  const v = parseFloat(snap.remaining);
+  if (isNaN(v)) return snap.remaining;
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+  return v.toFixed(v < 10 ? 2 : 0);
 }
 
 function statusDotClass(tone: "ok" | "warn" | "bad"): string {
@@ -541,6 +562,16 @@ onUnmounted(() => {
           </button>
           <button
             type="button"
+            class="inline-flex size-7 items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-40"
+            title="自动识别供应商类型"
+            aria-label="detect vendor"
+            :disabled="detectVendorBusy"
+            @click="emit('detect-vendor', card.provider.id)"
+          >
+            <VpIcon name="scan-search" size-class="size-3.5" :spin="detectVendorBusy" />
+          </button>
+          <button
+            type="button"
             class="inline-flex size-7 items-center justify-center rounded-md border border-vp-border/80 text-slate-600 hover:bg-slate-50"
             title="edit"
             aria-label="edit"
@@ -692,7 +723,56 @@ onUnmounted(() => {
               <span v-if="credentialBalanceLabel(credential)" class="text-emerald-700">
                 {{ credentialBalanceLabel(credential) }}
               </span>
+              <span
+                v-if="credential.upstream_vendor"
+                class="rounded px-1 py-0.5 font-medium"
+                :class="{
+                  'bg-blue-50 text-blue-700': credential.upstream_vendor === 'new-api',
+                  'bg-purple-50 text-purple-700': credential.upstream_vendor === 'sub2-api',
+                  'bg-orange-50 text-orange-700': credential.upstream_vendor === 'anthropic-payg',
+                  'bg-teal-50 text-teal-700': credential.upstream_vendor === 'anthropic-plan',
+                  'bg-slate-100 text-slate-600': ![
+                    'new-api',
+                    'sub2-api',
+                    'anthropic-payg',
+                    'anthropic-plan',
+                  ].includes(credential.upstream_vendor),
+                }"
+              >
+                {{
+                  {
+                    "new-api": "NewAPI",
+                    "sub2-api": "Sub2API",
+                    "anthropic-payg": "PAYG",
+                    "anthropic-plan": "Plan",
+                  }[credential.upstream_vendor] ?? credential.upstream_vendor
+                }}
+              </span>
             </p>
+            <!-- Usage rings: window-based (Sub2API) or balance (NewAPI/generic) -->
+            <div v-if="credential.windows?.length" class="mt-1.5 flex items-end gap-3 flex-wrap">
+              <UsageRing
+                v-for="w in credential.windows"
+                :key="w.label"
+                :pct="w.used_pct"
+                :label="w.label"
+                :size="46"
+                :stroke-width="4"
+              />
+            </div>
+            <!-- Single balance ring when no windows but balance known -->
+            <div
+              v-else-if="credential.balance?.remaining && credential.balance?.total"
+              class="mt-1.5"
+            >
+              <UsageRing
+                :pct="balancePct(credential)"
+                :label="credential.balance.currency"
+                :center-text="balanceCenterText(credential)"
+                :size="46"
+                :stroke-width="4"
+              />
+            </div>
           </div>
 
           <div

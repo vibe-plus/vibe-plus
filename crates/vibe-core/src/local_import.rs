@@ -34,6 +34,10 @@ pub struct LocalCandidate {
     #[serde(default)]
     pub auth_ref: Option<String>,
     pub token_ok: bool,
+    /// True when the gateway has already taken over this client
+    /// (e.g. ANTHROPIC_AUTH_TOKEN = "PROXY_MANAGED" in Claude settings).
+    #[serde(default)]
+    pub proxy_managed: bool,
     pub source_path: String,
     pub default_aliases: Vec<ModelAlias>,
     pub extra_credentials: Vec<ExtraCredential>,
@@ -58,6 +62,17 @@ pub fn scan() -> Vec<LocalCandidate> {
     // Profile files come second for backwards compat with older CCS installs.
     out.extend(scan_ccs_db());
     out.extend(scan_ccs_profiles());
+
+    // Deduplicate by (kind, normalized base_url). First occurrence wins
+    // (DB entries appear before profile files, so the richer data is kept).
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|c| {
+        let key = (
+            format!("{:?}", c.kind),
+            c.base_url.trim().trim_end_matches('/').to_lowercase(),
+        );
+        seen.insert(key)
+    });
     out
 }
 
@@ -274,6 +289,17 @@ fn scan_claude() -> Option<LocalCandidate> {
     }
 
     let merged_env = collect_claude_env(&home, &config_dir);
+
+    // Detect if vibe has already taken over this Claude install.
+    let proxy_managed = merged_env
+        .get("ANTHROPIC_AUTH_TOKEN")
+        .map(|v| v.trim() == "PROXY_MANAGED")
+        .unwrap_or(false)
+        || merged_env
+            .get("ANTHROPIC_API_KEY")
+            .map(|v| v.trim() == "PROXY_MANAGED")
+            .unwrap_or(false);
+
     let mut auth_ref = auth_ref_from_claude_env_map(&merged_env);
 
     let cred_path = config_dir.join("credentials.json");
@@ -298,6 +324,7 @@ fn scan_claude() -> Option<LocalCandidate> {
         base_url: "https://api.anthropic.com".into(),
         auth_ref,
         token_ok,
+        proxy_managed,
         source_path,
         default_aliases: vec![],
         extra_credentials: vec![],
@@ -369,6 +396,7 @@ fn scan_codex() -> Option<LocalCandidate> {
         base_url,
         auth_ref: None,
         token_ok: primary_ok,
+        proxy_managed: false,
         source_path: first.display().to_string(),
         default_aliases: vec![],
         extra_credentials,
@@ -564,6 +592,7 @@ fn ccs_profile_to_candidate(profile: &CcsProfileCandidate) -> Option<LocalCandid
         token_ok,
         source_path: profile.source_path.display().to_string(),
         default_aliases,
+        proxy_managed: false,
         extra_credentials: vec![],
     })
 }
@@ -746,6 +775,7 @@ fn ccs_db_claude(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<Lo
         token_ok,
         source_path: db_path.display().to_string(),
         default_aliases,
+        proxy_managed: false,
         extra_credentials: vec![],
     })
 }
@@ -796,6 +826,7 @@ fn ccs_db_codex(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<Loc
         token_ok,
         source_path: db_path.display().to_string(),
         default_aliases,
+        proxy_managed: false,
         extra_credentials: vec![],
     })
 }
@@ -828,6 +859,7 @@ fn ccs_db_gemini(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<Lo
         token_ok,
         source_path: db_path.display().to_string(),
         default_aliases,
+        proxy_managed: false,
         extra_credentials: vec![],
     })
 }
@@ -865,6 +897,7 @@ fn ccs_db_opencode(id: &str, name: &str, cfg: &Value, db_path: &Path) -> Option<
         token_ok,
         source_path: db_path.display().to_string(),
         default_aliases: vec![],
+        proxy_managed: false,
         extra_credentials: vec![],
     })
 }

@@ -1723,7 +1723,22 @@ impl Db {
          last_used_at, last_error, consecutive_failures, created_at, updated_at,
          oauth_access_token, oauth_refresh_token, oauth_expires_at, auth_fingerprint,
          oauth_cached_email, oauth_cached_subject, oauth_cached_plan_slug,
-         remote_models_json, remote_models_fetched_at, balance_json, usage_json, balance_fetched_at";
+         remote_models_json, remote_models_fetched_at, balance_json, usage_json, balance_fetched_at,
+         upstream_vendor, upstream_username, upstream_session, upstream_session_expires_at,
+         upstream_group, price_multiplier, windows_json";
+    // Col indices (0-based):
+    // 0  id, 1  provider_id, 2  label, 3  auth_ref, 4  plan_type, 5  notes,
+    // 6  enabled, 7  priority,
+    // 8  rl_requests_limit, 9  rl_requests_remaining, 10 rl_requests_reset_at,
+    // 11 rl_tokens_limit, 12 rl_tokens_remaining, 13 rl_tokens_reset_at,
+    // 14 last_used_at, 15 last_error, 16 consecutive_failures,
+    // 17 created_at, 18 updated_at,
+    // 19 oauth_access_token, 20 oauth_refresh_token, 21 oauth_expires_at, 22 auth_fingerprint,
+    // 23 oauth_cached_email, 24 oauth_cached_subject, 25 oauth_cached_plan_slug,
+    // 26 remote_models_json, 27 remote_models_fetched_at,
+    // 28 balance_json, 29 usage_json, 30 balance_fetched_at,
+    // 31 upstream_vendor, 32 upstream_username, 33 upstream_session,
+    // 34 upstream_session_expires_at, 35 upstream_group, 36 price_multiplier, 37 windows_json
 
     const LOG_COLS_LIST: &'static str =
         "id, started_at, app, provider_id, requested_model, upstream_model,
@@ -1834,6 +1849,7 @@ impl Db {
     ) -> Result<vibe_protocol::Credential> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
+        let vendor_str = input.upstream_vendor.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default().trim_matches('"').to_string());
         self.with(|c| {
             c.execute(
                 "INSERT INTO credentials
@@ -1841,8 +1857,11 @@ impl Db {
                      oauth_access_token, oauth_refresh_token, oauth_expires_at,
                      auth_fingerprint,
                      oauth_cached_email, oauth_cached_subject, oauth_cached_plan_slug,
+                     upstream_vendor, upstream_username, upstream_session,
+                     upstream_session_expires_at, upstream_group, price_multiplier,
                      created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                         ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     id,
                     provider_id,
@@ -1859,6 +1878,12 @@ impl Db {
                     input.oauth_cached_email,
                     input.oauth_cached_subject,
                     input.oauth_cached_plan_slug,
+                    vendor_str,
+                    input.upstream_username,
+                    input.upstream_session,
+                    input.upstream_session_expires_at,
+                    input.upstream_group,
+                    input.price_multiplier,
                     now,
                     now,
                 ],
@@ -1877,6 +1902,7 @@ impl Db {
     ) -> Result<vibe_protocol::Credential> {
         let now = now_secs();
         // oauth_refresh_token is write-only: only update it when the caller provides a value.
+        let vendor_str = input.upstream_vendor.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default().trim_matches('"').to_string());
         let n = self.with(|c| {
             Ok(c.execute(
                 "UPDATE credentials
@@ -1889,6 +1915,12 @@ impl Db {
                      oauth_cached_email=COALESCE(?12, oauth_cached_email),
                      oauth_cached_subject=COALESCE(?13, oauth_cached_subject),
                      oauth_cached_plan_slug=COALESCE(?14, oauth_cached_plan_slug),
+                     upstream_vendor=COALESCE(?16, upstream_vendor),
+                     upstream_username=COALESCE(?17, upstream_username),
+                     upstream_session=COALESCE(?18, upstream_session),
+                     upstream_session_expires_at=COALESCE(?19, upstream_session_expires_at),
+                     upstream_group=COALESCE(?20, upstream_group),
+                     price_multiplier=?21,
                      updated_at=?15
                  WHERE id=?1",
                 params![
@@ -1907,6 +1939,12 @@ impl Db {
                     input.oauth_cached_subject,
                     input.oauth_cached_plan_slug,
                     now,
+                    vendor_str,
+                    input.upstream_username,
+                    input.upstream_session,
+                    input.upstream_session_expires_at,
+                    input.upstream_group,
+                    input.price_multiplier,
                 ],
             )?)
         })?;
@@ -1915,6 +1953,20 @@ impl Db {
         }
         self.credential_get(id)?
             .context("updated credential missing on read-back")
+    }
+
+    /// Read the upstream_session token (write-sensitive, not included in Credential).
+    pub fn credential_get_session(&self, id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            let v = c
+                .query_row(
+                    "SELECT upstream_session FROM credentials WHERE id = ?1",
+                    params![id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            Ok(v.flatten())
+        })
     }
 
     /// Fetch only the refresh_token for a credential (write-only field, not in Credential).
@@ -1949,6 +2001,57 @@ impl Db {
         })?;
         self.credential_get(id)?
             .context("credential missing after remote_models update")
+    }
+
+    /// Set upstream_vendor on all credentials belonging to a provider (auto-detect result).
+    pub fn credentials_set_vendor_for_provider(
+        &self,
+        provider_id: &str,
+        vendor: &str,
+    ) -> Result<usize> {
+        let now = now_secs();
+        self.with(|c| {
+            Ok(c.execute(
+                "UPDATE credentials SET upstream_vendor = ?1, updated_at = ?2 WHERE provider_id = ?3 AND (upstream_vendor IS NULL OR upstream_vendor = '')",
+                params![vendor, now, provider_id],
+            )?)
+        })
+    }
+
+    /// Store a new upstream session token (login result).
+    pub fn credential_update_session(
+        &self,
+        id: &str,
+        session: &str,
+        expires_at: Option<i64>,
+    ) -> Result<vibe_protocol::Credential> {
+        let now = now_secs();
+        self.with(|c| {
+            c.execute(
+                "UPDATE credentials SET upstream_session=?2, upstream_session_expires_at=?3, updated_at=?4 WHERE id=?1",
+                params![id, session, expires_at, now],
+            )?;
+            Ok(())
+        })?;
+        self.credential_get(id)?.context("credential missing after session update")
+    }
+
+    /// Store rolling-window usage snapshots fetched from the upstream platform.
+    pub fn credential_update_windows(
+        &self,
+        id: &str,
+        windows: &[vibe_protocol::UsageWindow],
+    ) -> Result<vibe_protocol::Credential> {
+        let windows_json = serde_json::to_string(windows)?;
+        let now = now_secs();
+        self.with(|c| {
+            c.execute(
+                "UPDATE credentials SET windows_json=?2, balance_fetched_at=?3, updated_at=?3 WHERE id=?1",
+                params![id, windows_json, now],
+            )?;
+            Ok(())
+        })?;
+        self.credential_get(id)?.context("credential missing after windows update")
     }
 
     pub fn credential_update_financials(
@@ -2187,24 +2290,27 @@ fn row_to_health(r: &rusqlite::Row) -> rusqlite::Result<DbHealth> {
 fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Credential> {
     // Columns (0-based), matching CRED_COLS order:
     // 0  id, 1  provider_id, 2  label, 3  auth_ref, 4  plan_type, 5  notes,
-    // 6  enabled, 7  priority,
-    // 8  rl_requests_limit, 9  rl_requests_remaining, 10 rl_requests_reset_at,
-    // 11 rl_tokens_limit, 12 rl_tokens_remaining, 13 rl_tokens_reset_at,
-    // 14 last_used_at, 15 last_error, 16 consecutive_failures,
-    // 17 created_at, 18 updated_at,
-    // 19 oauth_access_token, 20 oauth_refresh_token, 21 oauth_expires_at,
-    // 22 auth_fingerprint
-    // 23 oauth_cached_email, 24 oauth_cached_subject, 25 oauth_cached_plan_slug
-    // 26 remote_models_json, 27 remote_models_fetched_at, 28 balance_json, 29 usage_json, 30 balance_fetched_at
     let oauth_has_refresh: bool = r.get::<_, Option<String>>(20)?.is_some();
-    let remote_models_json: String = r.get(26)?;
-    let remote_models: Vec<String> = serde_json::from_str(&remote_models_json).unwrap_or_default();
+    let remote_models: Vec<String> = r
+        .get::<_, String>(26)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     let balance: Option<ProviderBalanceSnapshot> = r
         .get::<_, Option<String>>(28)?
         .and_then(|s| serde_json::from_str(&s).ok());
     let usage: Option<ProviderBalanceSnapshot> = r
         .get::<_, Option<String>>(29)?
         .and_then(|s| serde_json::from_str(&s).ok());
+    let upstream_vendor: Option<vibe_protocol::CredentialVendor> = r
+        .get::<_, Option<String>>(31)?
+        .and_then(|s| serde_json::from_str(&format!(r#""{s}""#)).ok());
+    let upstream_has_session: bool = r.get::<_, Option<String>>(33)?.is_some();
+    let windows: Vec<vibe_protocol::UsageWindow> = r
+        .get::<_, String>(37)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     Ok(vibe_protocol::Credential {
         id: r.get(0)?,
         provider_id: r.get(1)?,
@@ -2237,6 +2343,13 @@ fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Crede
         balance,
         usage,
         balance_fetched_at: r.get(30)?,
+        upstream_vendor,
+        upstream_username: r.get(32)?,
+        upstream_has_session,
+        upstream_session_expires_at: r.get(34)?,
+        upstream_group: r.get(35)?,
+        price_multiplier: r.get::<_, Option<f64>>(36)?.unwrap_or(1.0),
+        windows,
     })
 }
 

@@ -50,6 +50,65 @@ pub fn provider_kind_slug(kind: ProviderKind) -> &'static str {
     }
 }
 
+/// Which upstream management platform this credential belongs to.
+/// Controls login flow, balance API, group listing, and UI hints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/CredentialVendor.ts")]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialVendor {
+    /// Generic relay — bearer-token key, standard OpenAI billing endpoints.
+    Generic,
+    /// NewAPI / one-api fork.  Supports password login + LinuxDO OAuth.
+    NewApi,
+    /// Sub2API.  Supports password login, group selection, window-based usage.
+    Sub2Api,
+    /// Official Anthropic API key (pay-as-you-go).
+    AnthropicPayg,
+    /// Official Anthropic subscription plan (Pro / Max / custom).
+    AnthropicPlan,
+}
+
+/// One rolling-window usage snapshot (5 h / 1 d / 7 d).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/UsageWindow.ts")]
+pub struct UsageWindow {
+    /// Human-readable label shown in the UI, e.g. "5h", "1d", "7d".
+    pub label: String,
+    pub used_usd: f64,
+    pub limit_usd: Option<f64>,
+    /// 0.0–100.0 or None when limit unknown.
+    pub used_pct: Option<f64>,
+    /// Unix timestamp when the window resets.
+    pub reset_at: Option<i64>,
+}
+
+/// Group/channel info returned by `GET /_vp/credentials/:id/groups`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/UpstreamGroupInfo.ts")]
+pub struct UpstreamGroupInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub platform: Option<String>,
+    pub rate_multiplier: f64,
+}
+
+/// Body for `POST /_vp/credentials/:id/login`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/CredentialLoginRequest.ts")]
+pub struct CredentialLoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Response from `POST /_vp/credentials/:id/login`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/CredentialLoginResponse.ts")]
+pub struct CredentialLoginResponse {
+    pub ok: bool,
+    pub note: Option<String>,
+}
+
 /// Map API hostnames to a short brand label for display and icon matching.
 pub fn host_to_brand_label(host: &str) -> Option<&'static str> {
     let h = host.trim().trim_start_matches("www.").to_ascii_lowercase();
@@ -1223,13 +1282,39 @@ pub struct Credential {
     pub usage: Option<ProviderBalanceSnapshot>,
     #[serde(default)]
     pub balance_fetched_at: Option<i64>,
+    // ── Upstream vendor / login / group ──────────────────────────────────────
+    /// Which management platform this credential belongs to.
+    #[serde(default)]
+    pub upstream_vendor: Option<CredentialVendor>,
+    /// Username for password-based login (NewAPI / Sub2API).
+    #[serde(default)]
+    pub upstream_username: Option<String>,
+    /// Whether a session token is cached (token itself not returned by API).
+    #[serde(default)]
+    pub upstream_has_session: bool,
+    /// Unix timestamp when the cached session expires.
+    #[serde(default)]
+    pub upstream_session_expires_at: Option<i64>,
+    /// Sub2API group name/ID this credential is pinned to.
+    #[serde(default)]
+    pub upstream_group: Option<String>,
+    /// Cost multiplier relative to official pricing (default 1.0).
+    #[serde(default = "default_price_multiplier")]
+    pub price_multiplier: f64,
+    /// Rolling-window usage snapshots fetched from the upstream platform.
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+}
+
+fn default_price_multiplier() -> f64 {
+    1.0
 }
 
 /// Body for `POST /_vp/providers/:id/credentials` and `PUT /_vp/credentials/:id`.
 ///
 /// Set either `auth_ref` (points to a secret) **or** `oauth_access_token` +
 /// `oauth_refresh_token` (stored directly in SQLite).  Do not set both.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/CredentialInput.ts")]
 pub struct CredentialInput {
     pub label: String,
@@ -1250,6 +1335,21 @@ pub struct CredentialInput {
     pub oauth_cached_subject: Option<String>,
     #[serde(default)]
     pub oauth_cached_plan_slug: Option<String>,
+    // ── Upstream vendor / login / group ──────────────────────────────────────
+    #[serde(default)]
+    pub upstream_vendor: Option<CredentialVendor>,
+    #[serde(default)]
+    pub upstream_username: Option<String>,
+    /// Set to Some to store a new session token; leave None to preserve existing.
+    #[serde(default)]
+    pub upstream_session: Option<String>,
+    #[serde(default)]
+    pub upstream_session_expires_at: Option<i64>,
+    #[serde(default)]
+    pub upstream_group: Option<String>,
+    /// Cost multiplier relative to official pricing (default 1.0 = 1:1).
+    #[serde(default = "default_price_multiplier")]
+    pub price_multiplier: f64,
 }
 
 pub fn ts_out_dir() -> &'static str {

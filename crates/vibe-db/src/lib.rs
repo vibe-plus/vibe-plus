@@ -68,6 +68,9 @@ impl Db {
             M::up(include_str!(
                 "../migrations/016_credential_models_and_balance.sql"
             )),
+            M::up(include_str!(
+                "../migrations/017_upstream_provider_support.sql"
+            )),
         ])
     }
 

@@ -50,7 +50,8 @@ export type vp_icon_name =
   | "square"
   | "globe"
   | "radar"
-  | "clock";
+  | "clock"
+  | "scan-search";
 
 const props = defineProps<{
   name: vp_icon_name;
@@ -110,6 +111,7 @@ const iconClassByName: Record<vp_icon_name, string> = {
   globe: "i-lucide-globe",
   radar: "i-lucide-radar",
   clock: "i-lucide-clock-3",
+  "scan-search": "i-lucide-scan-search",
 };
 
 const iconClass = computed(() => iconClassByName[props.name]);

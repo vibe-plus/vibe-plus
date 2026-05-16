@@ -431,6 +431,13 @@ mod tests {
             balance: None,
             usage: None,
             balance_fetched_at: None,
+            upstream_vendor: None,
+            upstream_username: None,
+            upstream_has_session: false,
+            upstream_session_expires_at: None,
+            upstream_group: None,
+            price_multiplier: 1.0,
+            windows: Vec::new(),
         }
     }
 

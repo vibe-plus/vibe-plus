@@ -70,21 +70,14 @@ fn stop_pid_unix(pid: u32) {
     }
 }
 
+#[cfg(windows)]
 fn stop_pid_windows(pid: u32) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F", "/T"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = pid;
-        eprintln!("vibe stop: taskkill is only available in Windows builds");
-    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F", "/T"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
 }
 
 fn stop_listener_on_port(port: u16) {
@@ -113,22 +106,16 @@ fn stop_listener_on_port_unix(port: u16) {
     }
 }
 
+#[cfg(windows)]
 fn stop_listener_on_port_windows(port: u16) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let script = format!(
-            "$c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue; \
-             if ($c) {{ $c | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }} }}"
-        );
-        let _ = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = port;
-    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = format!(
+        "$c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue; \
+         if ($c) {{ $c | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }} }}"
+    );
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
 }
