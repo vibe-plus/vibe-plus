@@ -1,5 +1,5 @@
 import { readonly, ref, onMounted, onUnmounted } from "vue";
-import { PORT, type Status } from "../api/client.ts";
+import { api, type Status, wsUrl } from "../api/client.ts";
 
 type WsListener = (event: unknown) => void;
 type StatusChangedEvent = { type: "status-changed" } & Status;
@@ -17,8 +17,14 @@ const listeners = new Set<WsListener>();
 const outboundQueue: string[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let statusPollTimer: ReturnType<typeof setTimeout> | null = null;
+let refreshInFlight: Promise<void> | null = null;
 let reconnectRequested = false;
 let subscriberCount = 0;
+
+function isWsUnavailable(): boolean {
+  return !ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED;
+}
 
 function clearReconnectTimer() {
   if (!reconnectTimer) return;
@@ -35,6 +41,41 @@ function scheduleReconnect() {
   }, 2000);
 }
 
+function clearStatusPollTimer() {
+  if (!statusPollTimer) return;
+  clearTimeout(statusPollTimer);
+  statusPollTimer = null;
+}
+
+function scheduleStatusPoll(delayMs = online.value ? 10_000 : 2_000) {
+  clearStatusPollTimer();
+  if (subscriberCount <= 0) return;
+  statusPollTimer = setTimeout(() => {
+    statusPollTimer = null;
+    void refreshStatus();
+  }, delayMs);
+}
+
+async function refreshStatus() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = api
+    .status()
+    .then((next) => {
+      status.value = next;
+      online.value = true;
+      scheduleStatusPoll();
+      if (reconnectRequested && isWsUnavailable()) scheduleReconnect();
+    })
+    .catch(() => {
+      online.value = false;
+      scheduleStatusPoll(2_000);
+    })
+    .finally(() => {
+      refreshInFlight = null;
+    });
+  return refreshInFlight;
+}
+
 function connectSharedWs() {
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
     return;
@@ -42,9 +83,8 @@ function connectSharedWs() {
   if (subscriberCount <= 0) return;
 
   reconnectRequested = true;
-  ws = new WebSocket(`ws://127.0.0.1:${PORT}/_vp/ws`);
+  ws = new WebSocket(wsUrl("/_vp/ws"));
   ws.onopen = () => {
-    online.value = true;
     flushOutboundQueue();
   };
   ws.onmessage = (e) => {
@@ -62,11 +102,11 @@ function connectSharedWs() {
     }
   };
   ws.onerror = () => {
-    online.value = false;
+    void refreshStatus();
   };
   ws.onclose = () => {
     ws = null;
-    online.value = false;
+    void refreshStatus();
     if (reconnectRequested) scheduleReconnect();
   };
 }
@@ -111,6 +151,7 @@ export function requestWsSnapshot(
 function retainSharedWs() {
   subscriberCount += 1;
   reconnectRequested = true;
+  scheduleStatusPoll(0);
   connectSharedWs();
 }
 
@@ -119,6 +160,7 @@ function releaseSharedWs() {
   if (subscriberCount > 0) return;
   reconnectRequested = false;
   clearReconnectTimer();
+  clearStatusPollTimer();
   const current = ws;
   ws = null;
   current?.close();
@@ -130,6 +172,7 @@ if (import.meta.hot) {
     subscriberCount = 0;
     listeners.clear();
     clearReconnectTimer();
+    clearStatusPollTimer();
     const current = ws;
     ws = null;
     current?.close();
@@ -138,6 +181,7 @@ if (import.meta.hot) {
 
 export function useProxyStatus() {
   function refresh() {
+    void refreshStatus();
     requestWsSnapshot("status");
   }
 

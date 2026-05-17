@@ -91,10 +91,6 @@ pub(crate) fn emit_circuit_event(
 
 const CODEX_STICKY_ROUTE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// Carried on streaming [`Response`] extensions (not HTTP headers) so Codex WS can patch `client_response_body` after translating Chat SSE → Responses events.
-#[derive(Clone, Debug)]
-pub struct VibeLogId(pub String);
-
 /// Carried on streaming/non-streaming [`Response`] extensions so the Codex
 /// route wrapper can emit client-visible route/quota status without affecting
 /// plain OpenAI-compatible routes.
@@ -232,7 +228,9 @@ fn push_routing_attempt(
     cred_id: &Option<String>,
     outcome: impl std::fmt::Display,
 ) {
-    trace.push(format_routing_attempt(provider, credential, cred_id, outcome));
+    trace.push(format_routing_attempt(
+        provider, credential, cred_id, outcome,
+    ));
 }
 
 pub(crate) fn compose_routing_error_message(summary: &str, trace: &[String]) -> String {
@@ -300,9 +298,7 @@ pub(crate) fn request_log_from_parts(
     )
 }
 
-pub(crate) fn persist_request_log(state: &AppState, log: RequestLog) {
-    persist_log(state, log);
-}
+pub(crate) fn persist_request_log(_state: &AppState, _log: RequestLog) {}
 
 pub(crate) fn publish_request_started(
     _state: &AppState,
@@ -316,76 +312,14 @@ pub(crate) fn publish_request_started(
 }
 
 pub(crate) fn persist_request_log_placeholder(
-    state: &AppState,
-    id: &str,
-    started_at: i64,
-    app: &Option<String>,
-    log_ctx: &LogCtx,
-    provider_id: Option<&str>,
-    requested_model: &str,
+    _state: &AppState,
+    _id: &str,
+    _started_at: i64,
+    _app: &Option<String>,
+    _log_ctx: &LogCtx,
+    _provider_id: Option<&str>,
+    _requested_model: &str,
 ) {
-    let log = RequestLog {
-        id: id.to_string(),
-        started_at,
-        app: app.clone(),
-        provider_id: provider_id.map(str::to_string),
-        requested_model: if requested_model.is_empty() {
-            None
-        } else {
-            Some(requested_model.to_string())
-        },
-        upstream_model: None,
-        status_code: None,
-        error: None,
-        latency_ms: None,
-        first_token_ms: None,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_creation_tokens: 0,
-        estimated_cost_usd: "0".to_string(),
-        wire: Some(wire_as_str(log_ctx.wire).to_string()),
-        route_prefix: log_ctx.route_prefix.clone(),
-        credential_id: log_ctx.credential_id.clone(),
-        cb_key: log_ctx.cb_key.clone(),
-        upstream_http_status: None,
-        upstream_error_preview: None,
-        dedupe_key: log_ctx.dedupe_key.clone(),
-        client_transport: log_ctx.client_transport.clone(),
-        request_headers: log_ctx.request_headers.clone(),
-        request_body: None,
-        response_body: None,
-        client_response_body: None,
-        stream_kind: None,
-        stream_terminal_seen: None,
-        stream_end_reason: None,
-        stream_error_detail: None,
-        upstream_first_byte_ms: None,
-        client_first_write_ms: None,
-        last_upstream_event_ms: None,
-        last_client_write_ms: None,
-        upstream_chunk_count: 0,
-        upstream_bytes: 0,
-        client_chunk_count: 0,
-        client_bytes: 0,
-        sse_event_count: 0,
-        sse_data_count: 0,
-        sse_comment_count: 0,
-        sse_keepalive_count: 0,
-        sse_done_count: 0,
-        parse_error_count: 0,
-        first_keepalive_ms: None,
-        last_keepalive_ms: None,
-        max_gap_between_upstream_events_ms: None,
-        max_gap_between_data_events_ms: None,
-        keepalive_after_last_data_count: 0,
-        last_data_event_ms: None,
-        bridge_mode: None,
-        status_injected: false,
-        terminal_injected: false,
-        upstream_terminal_type: None,
-    };
-    persist_log(state, log);
 }
 
 #[derive(Clone, Debug)]
@@ -520,9 +454,7 @@ pub(crate) fn attempt_log_from_parts(
     }
 }
 
-pub(crate) fn persist_upstream_attempt_log(state: &AppState, attempt: UpstreamAttemptLog) {
-    state.upstream_attempt_logs.push(attempt);
-}
+pub(crate) fn persist_upstream_attempt_log(_state: &AppState, _attempt: UpstreamAttemptLog) {}
 
 pub(crate) fn mark_provider_health(
     state: &AppState,
@@ -939,7 +871,10 @@ fn dedupe_key_from_headers(headers: &HeaderMap, route_prefix: Option<&str>) -> O
     Some(format!("{}|{}", route_prefix.unwrap_or(""), rid))
 }
 
-pub(crate) fn sanitized_headers_json(headers: &HeaderMap, redact_sensitive: bool) -> Option<String> {
+pub(crate) fn sanitized_headers_json(
+    headers: &HeaderMap,
+    redact_sensitive: bool,
+) -> Option<String> {
     if headers.is_empty() {
         return None;
     }
@@ -1160,7 +1095,11 @@ pub(crate) fn fire_credential_success(state: &AppState, credential_id: String, r
     });
 }
 
-pub(crate) fn fire_credential_failure(state: &AppState, credential_id: String, error: Option<String>) {
+pub(crate) fn fire_credential_failure(
+    state: &AppState,
+    credential_id: String,
+    error: Option<String>,
+) {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let _ = db.credential_record_failure(&credential_id, error.as_deref());
@@ -1172,7 +1111,11 @@ pub(crate) fn fire_credential_failure(state: &AppState, credential_id: String, e
 /// When the upstream sends 429 but no standard rate-limit headers (common for non-OpenAI
 /// providers), we apply a 60-second default cooldown so the credential is skipped on
 /// the next request instead of being retried immediately.
-pub(crate) fn fire_credential_rate_limit_only(state: &AppState, credential_id: String, rl: RlHeaders) {
+pub(crate) fn fire_credential_rate_limit_only(
+    state: &AppState,
+    credential_id: String,
+    rl: RlHeaders,
+) {
     let (req_remaining, req_reset_at) = if rl.requests_remaining.is_some() {
         (rl.requests_remaining, rl.requests_reset_at)
     } else {
@@ -1440,7 +1383,6 @@ pub async fn forward(
         attempt_index += n;
     }
 
-
     // All candidates exhausted
     let log_ctx = LogCtx {
         wire,
@@ -1518,7 +1460,6 @@ pub(crate) fn stream_response(
 ) -> Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     let state_for_task = state.clone();
-    let log_id_clone = log_id.clone();
     let codex_client_kind = log_ctx.codex_client_kind;
     let claude_summary_request_id = log_ctx.dedupe_key.clone().or_else(|| Some(log_id.clone()));
 
@@ -1763,7 +1704,6 @@ pub(crate) fn stream_response(
     let mut res = Response::new(body);
     *res.status_mut() = status;
     *res.headers_mut() = resp_headers;
-    res.extensions_mut().insert(VibeLogId(log_id_clone));
     res.extensions_mut().insert(VibeCodexVisual(visual));
     res.extensions_mut()
         .insert(VibeCodexClientKind(codex_client_kind));
@@ -2014,14 +1954,9 @@ pub(crate) fn build_log(
     log
 }
 
-pub(crate) fn persist_log(state: &AppState, log: RequestLog) {
-    state.request_logs.push(log);
-}
+pub(crate) fn persist_log(_state: &AppState, _log: RequestLog) {}
 
-/// Insert the streaming request log; awaited before dropping the channel so callers can PATCH `client_response_body`.
-async fn finalize_stream_request_log(state: AppState, log: RequestLog) {
-    state.request_logs.push(log);
-}
+async fn finalize_stream_request_log(_state: AppState, _log: RequestLog) {}
 
 pub(crate) fn fire_health(
     state: &AppState,

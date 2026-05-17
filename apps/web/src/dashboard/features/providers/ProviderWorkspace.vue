@@ -10,7 +10,6 @@ import {
   type Credential,
   type CredentialInput,
   type ProvidersOverview,
-  type RequestRuntimeStats,
   type UpstreamGroupInfo,
   isProviderHealthSummary,
 } from "../../api/client.ts";
@@ -20,7 +19,7 @@ import {
   type ClientToolId,
   type ClientToolInfo,
 } from "../../utils/client-tools.ts";
-import type { LiveRequestMetric, ProviderSectionView, ProviderTabOption } from "./types.ts";
+import type { ProviderSectionView, ProviderTabOption } from "./types.ts";
 import { useRoute, useRouter } from "vue-router";
 import { resolvePageAccent } from "../../utils/page-accent.ts";
 import { displayProviderName } from "../../utils/providers-display.ts";
@@ -50,16 +49,11 @@ const router = useRouter();
 const pageAccent = computed(() => resolvePageAccent(route.name));
 const workspaceView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
 const codexRouteTool = computed(() => getCodexClientTool());
-/** Hours for `GET /_vp/providers/:id/health?hours=` — gateway `request_logs` rollup only (not Codex plan windows). */
+/** Hours for provider health and quota snapshots (not request body logging). */
 const GATEWAY_ROLLING_STAT_HOURS = 24;
 const loading = ref(true);
 const error = ref("");
 
-const activeRequestProviderIds = ref<Record<string, string>>({});
-const activeAttemptCredentials = ref<Record<string, { providerId: string; credentialId: string }>>(
-  {},
-);
-const liveRequestMetrics = ref<Record<string, LiveRequestMetric>>({});
 const highlightedProviderId = ref<string | null>(null);
 /** Inline enable/disable debounce state (PUT /_vp/providers/:id). */
 const toggleBusy = ref<Record<string, boolean>>({});
@@ -665,9 +659,6 @@ const providerSections = computed<ProviderSectionView[]>(() =>
     selectedTool: activeToolTab.value,
     healthMap: healthMap.value,
     poolByProviderId: poolByProviderId.value,
-    activeRequestCountsByProvider: activeRequestCountsByProvider.value,
-    liveTokensPerSecByProvider: liveTokensPerSecByProvider.value,
-    liveRequestMetrics: liveRequestMetrics.value,
   }),
 );
 const providerRollingStatById = computed(() => {
@@ -677,31 +668,7 @@ const providerRollingStatById = computed(() => {
   }
   return map;
 });
-const activeRequestCountsByProvider = computed(() => {
-  const counts = new Map<string, number>();
-  for (const providerId of Object.values(activeRequestProviderIds.value)) {
-    counts.set(providerId, (counts.get(providerId) ?? 0) + 1);
-  }
-  return counts;
-});
-const activeCredentialCountsByProvider = computed(() => {
-  const byProvider: Record<string, Record<string, number>> = {};
-  for (const attempt of Object.values(activeAttemptCredentials.value)) {
-    const current = byProvider[attempt.providerId] ?? {};
-    current[attempt.credentialId] = (current[attempt.credentialId] ?? 0) + 1;
-    byProvider[attempt.providerId] = current;
-  }
-  return byProvider;
-});
-const liveTokensPerSecByProvider = computed(() => {
-  const totals = new Map<string, number>();
-  for (const metric of Object.values(liveRequestMetrics.value)) {
-    const tps = metric.active_request_tokens_per_sec;
-    if (!Number.isFinite(tps ?? NaN) || !metric.provider_id) continue;
-    totals.set(metric.provider_id, (totals.get(metric.provider_id) ?? 0) + (tps ?? 0));
-  }
-  return totals;
-});
+const activeCredentialCountsByProvider = computed(() => ({}));
 
 function targetProviderIdFromRoute(): string | null {
   const raw = route.query.provider;
@@ -836,10 +803,6 @@ async function remove(id: string) {
   } catch (e) {
     error.value = String(e);
   }
-}
-
-function viewProviderLogs(providerId: string) {
-  void router.push({ path: "/ui/overview", query: route.query });
 }
 
 // Credential actions
@@ -1027,23 +990,17 @@ watch(
 );
 
 useWs((ev: unknown) => {
-  const e = ev as
-    | {
-        type?: string;
-        request_id?: string;
-        rolling_hours?: number;
-        attempt_id?: string;
-        provider_id?: string | null;
-        credential_id?: string | null;
-        request_id?: string;
-        id?: string;
-        providers?: Provider[];
-        health?: ProviderHealthSummary[];
-        pools?: ProviderAuthPoolSummary[];
-        credentials?: Record<string, Credential[]>;
-        codex_plans?: Record<string, ProviderCodexPlanItem[]>;
-      }
-    | ({ type?: string } & RequestRuntimeStats);
+  const e = ev as {
+    type?: string;
+    request_id?: string;
+    rolling_hours?: number;
+    provider_id?: string | null;
+    providers?: Provider[];
+    health?: ProviderHealthSummary[];
+    pools?: ProviderAuthPoolSummary[];
+    credentials?: Record<string, Credential[]>;
+    codex_plans?: Record<string, ProviderCodexPlanItem[]>;
+  };
   if (e.rolling_hours != null && e.rolling_hours !== GATEWAY_ROLLING_STAT_HOURS) return;
   if (
     e.type?.startsWith("providers-overview-") &&
@@ -1109,45 +1066,6 @@ useWs((ev: unknown) => {
     error.value = "";
     applyProvidersOverview(overview);
     return;
-  }
-  if (e.type === "upstream-attempt-started" && e.attempt_id && e.provider_id) {
-    if (e.credential_id) {
-      activeAttemptCredentials.value = {
-        ...activeAttemptCredentials.value,
-        [e.attempt_id]: { providerId: e.provider_id, credentialId: e.credential_id },
-      };
-    }
-    return;
-  }
-  if (e.type === "request-updated" && e.request_id && e.provider_id) {
-    activeRequestProviderIds.value = {
-      ...activeRequestProviderIds.value,
-      [e.request_id]: e.provider_id,
-    };
-    liveRequestMetrics.value = {
-      ...liveRequestMetrics.value,
-      [e.request_id]: {
-        request_id: e.request_id,
-        provider_id: e.provider_id,
-        upstream_first_byte_ms: e.upstream_first_byte_ms,
-        active_request_tokens_per_sec: e.active_request_tokens_per_sec,
-        active_upstream_decode_tps: e.active_upstream_decode_tps,
-        active_downstream_emit_tps: e.active_downstream_emit_tps,
-        updated_at: e.updated_at,
-      },
-    };
-    return;
-  }
-  if (e.type === "upstream-attempt-finished" && e.attempt_id) {
-    const { [e.attempt_id]: _, ...rest } = activeAttemptCredentials.value;
-    activeAttemptCredentials.value = rest;
-    return;
-  }
-  if (e.type === "log-appended" && e.id) {
-    const { [e.id]: _, ...reqRest } = activeRequestProviderIds.value;
-    activeRequestProviderIds.value = reqRest;
-    const { [e.id]: __, ...metricRest } = liveRequestMetrics.value;
-    liveRequestMetrics.value = metricRest;
   }
 });
 </script>
@@ -1224,8 +1142,6 @@ useWs((ev: unknown) => {
       :pool-by-provider-id="poolByProviderId"
       :plan-snap-by-cred="planSnapByCred"
       :active-credential-counts-by-provider="activeCredentialCountsByProvider"
-      :active-request-counts-by-provider="activeRequestCountsByProvider"
-      :live-tokens-per-sec-by-provider="liveTokensPerSecByProvider"
       :provider-rolling-stat-by-id="providerRollingStatById"
       :detect-vendor-busy="detectVendorBusy"
       :highlighted-provider-id="highlightedProviderId"
@@ -1245,7 +1161,6 @@ useWs((ev: unknown) => {
       @toggle-cred="toggleCredentialEnabled"
       @edit-cred="startEditCred"
       @delete-cred="removeCred"
-      @view-logs="viewProviderLogs"
     />
 
     <ProviderSmartModal

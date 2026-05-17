@@ -6,7 +6,6 @@ import type {
   Provider,
   ProviderAuthPoolSummary,
   ProviderHealthSummary,
-  RequestRuntimeStats,
 } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderCard from "./provider-card.vue";
@@ -30,8 +29,6 @@ const props = defineProps<{
   poolByProviderId: Record<string, ProviderAuthPoolSummary>;
   planSnapByCred: Record<string, CredentialPlanSnapshot | null>;
   activeCredentialCountsByProvider: Record<string, Record<string, number>>;
-  activeRequestCountsByProvider: Map<string, number>;
-  liveTokensPerSecByProvider: Map<string, number>;
   providerRollingStatById: Map<string, NonNullable<ProviderHealthSummary["rolling"]>>;
   detectVendorBusy: Record<string, boolean>;
   highlightedProviderId: string | null;
@@ -54,7 +51,6 @@ const emit = defineEmits<{
   toggleCred: [credential: Credential];
   editCred: [credential: Credential];
   deleteCred: [credential: Credential];
-  viewLogs: [providerId: string];
 }>();
 
 function providerIdsFromSection(section: ProviderSectionView): string[] {
@@ -75,7 +71,6 @@ function poolRows(providerId: string): CredentialPoolStatus[] {
 
 function tokensPerSec(providerId: string): number | null | undefined {
   return (
-    props.liveTokensPerSecByProvider.get(providerId) ||
     props.providerRollingStatById.get(providerId)?.decode_output_tokens_per_sec ||
     props.providerRollingStatById.get(providerId)?.output_tokens_per_sec
   );
@@ -104,9 +99,6 @@ function tokensPerSec(providerId: string): number | null | undefined {
             <div class="flex flex-wrap gap-2 text-xs">
               <UiBadge variant="secondary">
                 {{ section.summary.enabledEndpoints }}/{{ section.summary.totalEndpoints }} active
-              </UiBadge>
-              <UiBadge v-if="section.summary.activeRequests" variant="default">
-                live {{ section.summary.activeRequests }}
               </UiBadge>
               <UiBadge v-if="section.summary.blockedCredentials" variant="outline">
                 {{ section.summary.blockedCredentials }} blocked creds
@@ -175,7 +167,6 @@ function tokensPerSec(providerId: string): number | null | undefined {
           :pool-rows="poolRows(card.provider.id)"
           :plan-snap-by-cred="planSnapByCred"
           :active-credential-counts="activeCredentialCountsByProvider[card.provider.id] ?? {}"
-          :active-request-count="activeRequestCountsByProvider.get(card.provider.id) ?? 0"
           :tokens-per-sec="tokensPerSec(card.provider.id)"
           :detect-vendor-busy="!!detectVendorBusy[card.provider.id]"
           :class="[
@@ -197,7 +188,6 @@ function tokensPerSec(providerId: string): number | null | undefined {
           @toggle-cred="emit('toggleCred', $event)"
           @edit-cred="emit('editCred', $event)"
           @delete-cred="emit('deleteCred', $event)"
-          @view-logs="emit('viewLogs', $event)"
         />
       </div>
     </UiCard>

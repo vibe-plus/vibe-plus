@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed } from "vue";
 import { RouterView, RouterLink, useRoute, useRouter } from "vue-router";
 import { useProxyStatus } from "./composables/useProxy.ts";
 import { useBrandLogo } from "./composables/use-brand-logo.ts";
 import VpIcon from "./components/vp-icon.vue";
 import type { vp_icon_name } from "./components/vp-icon.vue";
-import { useLiveWorkspaceActivity } from "./composables/use-live-workspace-activity.ts";
 import { workspaceViewFromQuery, type WorkspaceView } from "./utils/workspace-view.ts";
 import { useWebCompatibility } from "./composables/use-web-compatibility.ts";
 
@@ -39,15 +38,6 @@ const views: SidebarView[] = [
   },
 ];
 
-const activityBadgeClass: Record<WorkspaceView, string> = {
-  overview:
-    "border-[color-mix(in_srgb,var(--vp-primary)_22%,var(--vp-border))] bg-[color-mix(in_srgb,var(--vp-primary)_8%,var(--vp-surface))] text-[color-mix(in_srgb,var(--vp-primary)_55%,var(--vp-text))]",
-  codex:
-    "border-[color-mix(in_srgb,#111827_18%,var(--vp-border))] bg-[color-mix(in_srgb,#111827_6%,var(--vp-surface))] text-[color-mix(in_srgb,#111827_72%,var(--vp-text))]",
-  claude:
-    "border-[color-mix(in_srgb,#d97757_28%,var(--vp-border))] bg-[color-mix(in_srgb,#d97757_10%,var(--vp-surface))] text-[color-mix(in_srgb,#c15f3f_70%,var(--vp-text))]",
-};
-
 const topTabs: { to: string; label: string; icon: vp_icon_name; scoped?: boolean }[] = [
   { to: "/ui/overview", label: "Overview", icon: "layout-dashboard", scoped: true },
   { to: "/ui/providers", label: "Providers", icon: "server", scoped: true },
@@ -56,10 +46,6 @@ const topTabs: { to: string; label: string; icon: vp_icon_name; scoped?: boolean
 ];
 
 const currentView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
-const { activeCounts } = useLiveWorkspaceActivity();
-const trafficPhase = ref(0);
-let trafficTimer: number | null = null;
-
 const viewPrefix = computed(() => {
   if (currentView.value === "codex") return "Codex";
   if (currentView.value === "claude") return "Claude";
@@ -68,30 +54,9 @@ const viewPrefix = computed(() => {
 
 const webCompatibility = useWebCompatibility(online, status);
 
-const hasAnyScopedActivity = computed(
-  () => activeCounts.value.codex > 0 || activeCounts.value.claude > 0,
-);
-
-const mobileViewBadge = computed(() => {
-  if (currentView.value === "codex") return activeCounts.value.codex;
-  if (currentView.value === "claude") return activeCounts.value.claude;
-  return hasAnyScopedActivity.value ? activeCounts.value.codex + activeCounts.value.claude : 0;
-});
-const allBusy = computed(() => activeCounts.value.overview > 0);
-const codexBusy = computed(() => activeCounts.value.codex > 0);
-const claudeBusy = computed(() => activeCounts.value.claude > 0);
-
-function animateBusyLabel(label: string) {
-  if (!label) return label;
-  const chars = Array.from(label.toLowerCase());
-  const activeIndex = trafficPhase.value % chars.length;
-  chars[activeIndex] = chars[activeIndex].toUpperCase();
-  return chars.join("");
-}
-
-const allLabel = computed(() => (allBusy.value ? animateBusyLabel("Alling") : "All"));
-const codexLabel = computed(() => (codexBusy.value ? animateBusyLabel("Codexing") : "Codex"));
-const claudeLabel = computed(() => (claudeBusy.value ? animateBusyLabel("Clauding") : "Claude"));
+const allLabel = computed(() => "All");
+const codexLabel = computed(() => "Codex");
+const claudeLabel = computed(() => "Claude");
 const viewLabel = computed<Record<WorkspaceView, string>>(() => ({
   overview: allLabel.value,
   codex: codexLabel.value,
@@ -102,19 +67,6 @@ const viewTitle = computed<Record<WorkspaceView, string>>(() => ({
   codex: viewLabel.value.codex,
   claude: `${viewLabel.value.claude} · Experimental`,
 }));
-
-onMounted(() => {
-  trafficTimer = window.setInterval(() => {
-    trafficPhase.value += 1;
-  }, 180);
-});
-
-onBeforeUnmount(() => {
-  if (trafficTimer !== null) {
-    window.clearInterval(trafficTimer);
-    trafficTimer = null;
-  }
-});
 
 function isActive(to: string): boolean {
   return route.path === to || route.path.startsWith(to + "/");
@@ -281,22 +233,7 @@ function tabLabel(label: string) {
           >
             {{ item.badge }}
           </span>
-          <span
-            v-if="activeCounts[item.id] > 0"
-            class="absolute right-1.5 top-1.5 inline-flex h-4 min-w-[1.125rem] max-w-[2rem] items-center justify-center rounded-full border px-1 text-[10px] font-semibold leading-none shadow-[0_1px_2px_color-mix(in_srgb,var(--vp-text)_8%,transparent)] sm:right-1 sm:top-1 lg:static lg:ml-auto"
-            :class="activityBadgeClass[item.id]"
-            :title="`${activeCounts[item.id]} active`"
-          >
-            {{ activeCounts[item.id] > 99 ? "99+" : activeCounts[item.id] }}
-          </span>
         </button>
-        <span
-          v-if="mobileViewBadge > 0"
-          class="pointer-events-none absolute right-2 top-2 inline-flex h-4 min-w-[1.125rem] items-center justify-center rounded-full border border-white/70 bg-[color-mix(in_srgb,var(--vp-primary)_18%,white)] px-1 text-[10px] font-semibold leading-none text-[color-mix(in_srgb,var(--vp-primary)_62%,var(--vp-text))] shadow-[0_2px_8px_color-mix(in_srgb,var(--vp-primary)_22%,transparent)] sm:hidden"
-          :title="`${mobileViewBadge} active`"
-        >
-          {{ mobileViewBadge > 99 ? "99+" : mobileViewBadge }}
-        </span>
       </nav>
     </aside>
 

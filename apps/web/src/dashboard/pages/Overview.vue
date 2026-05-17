@@ -4,7 +4,6 @@ import { RouterLink, useRoute } from "vue-router";
 import { useProxyStatus, useWs } from "../composables/useProxy.ts";
 import {
   api,
-  type RequestLog,
   type DashboardStats,
   type HealthSummary,
   type ProviderHealth,
@@ -12,15 +11,11 @@ import {
   type ProviderAuthPoolSummary,
   type ProviderCodexPlanItem,
   type ProvidersOverview,
-  type RequestRuntimeStats,
 } from "../api/client.ts";
 import ClientTakeoverCard from "../components/ClientTakeoverCard.vue";
+import LogsPanel from "../components/logs-panel.vue";
 import VpIcon from "../components/vp-icon.vue";
 import ProviderLogo from "../components/provider-logo.vue";
-import LiveTrafficPanel, {
-  type LiveTrafficRequest,
-} from "../components/dashboard/LiveTrafficPanel.vue";
-import MetricTicker from "../components/dashboard/MetricTicker.vue";
 import { CLIENT_TOOLS, toolProxyExample } from "../utils/client-tools.ts";
 import {
   isUnknownProviderName,
@@ -28,17 +23,10 @@ import {
   UNKNOWN_PROVIDER_LABEL,
 } from "../utils/provider-display.ts";
 import {
-  logMatchesWorkspaceView,
   providerMatchesWorkspaceView,
   workspaceViewFromQuery,
   type WorkspaceView,
 } from "../utils/workspace-view.ts";
-import {
-  estimateLogCostUsd,
-  loadModelPrices,
-  priceForModel,
-  type ModelPrice,
-} from "../utils/model-pricing.ts";
 
 const route = useRoute();
 const view = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
@@ -53,30 +41,6 @@ const health = ref<HealthSummary | null>(null);
 const providers = ref<Provider[]>([]);
 const pools = ref<ProviderAuthPoolSummary[]>([]);
 const codexPlans = ref<Record<string, ProviderCodexPlanItem[]>>({});
-const recentLogs = ref<RequestLog[]>([]);
-const modelPrices = ref<Map<string, ModelPrice>>(new Map());
-type LiveRequestMetric = {
-  request_id: string;
-  provider_id: string;
-  active_request_tokens_per_sec: number | null;
-  active_upstream_decode_tps: number | null;
-  active_downstream_emit_tps: number | null;
-  active_output_tokens_per_sec: number | null;
-  active_upstream_bytes_per_sec: number;
-  active_downstream_bytes_per_sec: number;
-  active_flow_bytes_per_sec: number;
-  output_tokens_so_far: number;
-  upstream_bytes_so_far: number;
-  client_bytes_so_far: number;
-  upstream_first_byte_ms: number | null;
-  client_first_write_ms: number | null;
-  updated_at: number;
-};
-
-const activeAttemptProviderIds = ref<Record<string, string>>({});
-const activeRequestProviderIds = ref<Record<string, string>>({});
-const activeRequestModels = ref<Record<string, string>>({});
-const liveRequestMetrics = ref<Record<string, LiveRequestMetric>>({});
 const loading = ref(true);
 const takeoverStatus = ref<Record<"claude" | "codex", boolean | null>>({
   claude: null,
@@ -86,22 +50,15 @@ const takeoverStatus = ref<Record<"claude" | "codex", boolean | null>>({
 async function load() {
   loading.value = true;
   try {
-    const since = Math.floor(Date.now() / 1000) - 3600;
-    const [s, providerOverview, logs] = await Promise.all([
-      api.stats(1),
-      api.providers.overview(1),
-      api.logs.list({ limit: 40, since }),
-    ]);
+    const [s, providerOverview] = await Promise.all([api.stats(1), api.providers.overview(1)]);
     stats.value = s;
     applyProvidersOverview(providerOverview);
-    recentLogs.value = logs.items;
   } catch {
     stats.value = null;
     health.value = null;
     providers.value = [];
     pools.value = [];
     codexPlans.value = {};
-    recentLogs.value = [];
   } finally {
     loading.value = false;
   }
@@ -136,9 +93,7 @@ const poolByProviderId = computed(
   () => new Map(pools.value.map((pool) => [pool.provider_id, pool])),
 );
 
-// Compute success rate from per-credential upstream-attempt rolling stats.
-// This is more accurate than request_logs.success_rate because it counts each
-// upstream attempt per provider, not just the final resolved outcome.
+// Compute success rate from provider/credential health counters.
 function poolSuccessRate(providerId: string): number | null {
   const pool = poolByProviderId.value.get(providerId);
   if (!pool?.credentials?.length) return null;
@@ -265,9 +220,6 @@ const activeProviderCards = computed(() =>
       return hasTraffic || needsAttention || hasReadyCapacity;
     })
     .sort((a, b) => {
-      const aLive = activeRequestCountsByProvider.value.get(a.provider_id) ?? 0;
-      const bLive = activeRequestCountsByProvider.value.get(b.provider_id) ?? 0;
-      if (aLive !== bLive) return bLive - aLive;
       const aRisk = (poolSuccessRate(a.provider_id) ?? a.success_rate) < 0.9 ? 1 : 0;
       const bRisk = (poolSuccessRate(b.provider_id) ?? b.success_rate) < 0.9 ? 1 : 0;
       if (aRisk !== bRisk) return bRisk - aRisk;
@@ -276,160 +228,6 @@ const activeProviderCards = computed(() =>
     .slice(0, 6),
 );
 
-const providerTimelineByProvider = computed(() => {
-  const out = new Map<string, RequestLog[]>();
-  for (const log of visibleRecentLogs.value) {
-    const providerId = log.provider_id ?? "__unknown__";
-    const list = out.get(providerId) ?? [];
-    if (list.length < 16) list.push(log);
-    out.set(providerId, list);
-  }
-  return out;
-});
-
-const activeRequestCountsByProvider = computed(() => {
-  const counts = new Map<string, number>();
-  for (const providerId of Object.values(activeRequestProviderIds.value)) {
-    counts.set(providerId, (counts.get(providerId) ?? 0) + 1);
-  }
-  return counts;
-});
-const liveTokensPerSecByProvider = computed(() => {
-  const totals = new Map<string, number>();
-  for (const metric of Object.values(liveRequestMetrics.value)) {
-    const tps =
-      metric.active_request_tokens_per_sec ??
-      metric.active_output_tokens_per_sec ??
-      metric.active_flow_bytes_per_sec / 1200;
-    if (!Number.isFinite(tps) || !metric.provider_id) continue;
-    totals.set(metric.provider_id, (totals.get(metric.provider_id) ?? 0) + tps);
-  }
-  return totals;
-});
-const liveActivityLabelByProvider = computed(() => {
-  const tokens = new Map<string, number>();
-  const bytes = new Map<string, number>();
-  for (const metric of Object.values(liveRequestMetrics.value)) {
-    const providerId = metric.provider_id;
-    const tps = metric.active_request_tokens_per_sec ?? metric.active_output_tokens_per_sec ?? 0;
-    const bps = Math.max(metric.active_flow_bytes_per_sec, 0);
-    tokens.set(providerId, (tokens.get(providerId) ?? 0) + Math.max(0, tps));
-    bytes.set(providerId, (bytes.get(providerId) ?? 0) + bps);
-  }
-  const labels = new Map<string, string>();
-  for (const providerId of new Set([...tokens.keys(), ...bytes.keys()])) {
-    const tps = tokens.get(providerId) ?? 0;
-    labels.set(
-      providerId,
-      tps > 0 ? `${tps.toFixed(1)} tok/s` : `${compactBytes(bytes.get(providerId) ?? 0)}/s`,
-    );
-  }
-  return labels;
-});
-const scopedLiveMetrics = computed(() =>
-  Object.values(liveRequestMetrics.value).filter((metric) => {
-    const provider = providerById.value.get(metric.provider_id);
-    if (!provider) return view.value === "overview";
-    return providerMatchesWorkspaceView(provider, view.value);
-  }),
-);
-const scopedLiveRequestCount = computed(() => scopedLiveMetrics.value.length);
-const scopedLiveTokensPerSec = computed(() =>
-  scopedLiveMetrics.value.reduce(
-    (sum, metric) =>
-      sum +
-      Math.max(0, metric.active_request_tokens_per_sec ?? metric.active_output_tokens_per_sec ?? 0),
-    0,
-  ),
-);
-const scopedLiveBytesPerSec = computed(() =>
-  scopedLiveMetrics.value.reduce(
-    (sum, metric) => sum + Math.max(metric.active_flow_bytes_per_sec, 0),
-    0,
-  ),
-);
-const scopedLiveOutputTokens = computed(() =>
-  scopedLiveMetrics.value.reduce(
-    (sum, metric) => sum + Math.max(0, metric.output_tokens_so_far),
-    0,
-  ),
-);
-const scopedLiveUpstreamBytes = computed(() =>
-  scopedLiveMetrics.value.reduce(
-    (sum, metric) => sum + Math.max(0, metric.upstream_bytes_so_far),
-    0,
-  ),
-);
-const scopedLiveClientBytes = computed(() =>
-  scopedLiveMetrics.value.reduce((sum, metric) => sum + Math.max(0, metric.client_bytes_so_far), 0),
-);
-function estimateLiveMetricCost(metric: LiveRequestMetric): { usd: number; usdPerMin: number } {
-  const model = activeRequestModels.value[metric.request_id];
-  const price = priceForModel(modelPrices.value, model);
-  const outputTokens = Math.max(0, metric.output_tokens_so_far);
-  const outputTps = Math.max(
-    0,
-    metric.active_request_tokens_per_sec ??
-      metric.active_output_tokens_per_sec ??
-      metric.active_flow_bytes_per_sec / 1200,
-  );
-  const outputUsdPerToken = price?.output
-    ? price.output / 1_000_000
-    : recentOutputUsdPerToken.value;
-  if (!outputUsdPerToken) return { usd: 0, usdPerMin: 0 };
-  return {
-    usd: outputTokens * outputUsdPerToken,
-    usdPerMin: outputTps * 60 * outputUsdPerToken,
-  };
-}
-const scopedLiveCostUsd = computed(() =>
-  scopedLiveMetrics.value.reduce((sum, metric) => sum + estimateLiveMetricCost(metric).usd, 0),
-);
-const scopedLiveCostUsdPerMin = computed(() =>
-  scopedLiveMetrics.value.reduce(
-    (sum, metric) => sum + estimateLiveMetricCost(metric).usdPerMin,
-    0,
-  ),
-);
-const liveTrafficRequests = computed<LiveTrafficRequest[]>(() =>
-  scopedLiveMetrics.value
-    .map((metric) => {
-      const provider = providerById.value.get(metric.provider_id);
-      const cost = estimateLiveMetricCost(metric);
-      return {
-        id: metric.request_id,
-        providerName: resolveProviderLabel(
-          metric.provider_id,
-          provider?.name ?? null,
-          providerNamesById.value,
-        ),
-        providerKind: provider?.kind,
-        model: activeRequestModels.value[metric.request_id] ?? "streaming",
-        tokensPerSec: Math.max(
-          0,
-          metric.active_request_tokens_per_sec ?? metric.active_output_tokens_per_sec ?? 0,
-        ),
-        decodeTokensPerSec: metric.active_upstream_decode_tps,
-        emitTokensPerSec: metric.active_downstream_emit_tps,
-        outputTokens: metric.output_tokens_so_far,
-        upstreamBytes: metric.upstream_bytes_so_far,
-        clientBytes: metric.client_bytes_so_far,
-        upstreamBytesPerSec: metric.active_upstream_bytes_per_sec,
-        clientBytesPerSec: metric.active_downstream_bytes_per_sec,
-        estimatedCostUsd: cost.usd,
-        estimatedCostUsdPerMin: cost.usdPerMin,
-        firstByteMs: metric.upstream_first_byte_ms,
-        firstWriteMs: metric.client_first_write_ms,
-        updatedAt: metric.updated_at,
-      };
-    })
-    .sort(
-      (a, b) =>
-        b.tokensPerSec - a.tokensPerSec ||
-        Math.max(b.clientBytesPerSec, b.upstreamBytesPerSec) -
-          Math.max(a.clientBytesPerSec, a.upstreamBytesPerSec),
-    ),
-);
 const visibleRequestCount = computed(() =>
   view.value === "overview"
     ? (stats.value?.requests_in_window ?? stats.value?.requests_last_24h ?? 0)
@@ -445,65 +243,17 @@ const visibleOutputTokens = computed(() => {
     return stats.value?.output_tokens_in_window ?? stats.value?.output_tokens_last_24h ?? 0;
   return scopedProviderRows.value.reduce((sum, row) => sum + row.output_tokens, 0);
 });
-const visibleTotalTokens = computed(
-  () => visibleInputTokens.value + visibleOutputTokens.value + scopedLiveOutputTokens.value,
-);
-const dashboardOutputMetric = computed(() => {
-  if (scopedLiveTokensPerSec.value > 0) {
-    return {
-      value: scopedLiveTokensPerSec.value,
-      suffix: "tok/s",
-      precision: 1,
-      tone: "good" as const,
-    };
-  }
-  if (scopedLiveBytesPerSec.value > 0) {
-    return {
-      value: `${compactBytes(scopedLiveBytesPerSec.value)}/s`,
-      suffix: "",
-      precision: 0,
-      tone: "good" as const,
-    };
-  }
-  return {
-    value: scopedOutputTps.value ?? 0,
-    suffix: "tok/s",
-    precision: 1,
-    tone: "default" as const,
-  };
-});
+const visibleTotalTokens = computed(() => visibleInputTokens.value + visibleOutputTokens.value);
+const dashboardOutputMetric = computed(() => ({
+  value: scopedOutputTps.value ?? 0,
+  suffix: "tok/s",
+  precision: 1,
+  tone: "default" as const,
+}));
 
-const liveHeatLevel = computed(() =>
-  Math.min(
-    100,
-    Math.round(
-      scopedLiveRequestCount.value * 18 +
-        scopedLiveTokensPerSec.value * 3.8 +
-        scopedLiveBytesPerSec.value / 820,
-    ),
-  ),
-);
-const trafficHeatState = computed<TrafficHeatState>(() => {
-  if (!online.value) return "offline";
-  if (scopedLiveRequestCount.value <= 0) return "quiet";
-  return liveHeatLevel.value >= 58 || scopedLiveRequestCount.value >= 3 ? "hot" : "warm";
-});
+const liveHeatLevel = computed(() => 0);
+const trafficHeatState = computed<TrafficHeatState>(() => (online.value ? "quiet" : "offline"));
 
-const visibleRecentLogs = computed(() =>
-  recentLogs.value.filter((log) => logMatchesWorkspaceView(log, view.value, providerById.value)),
-);
-const currentLog = computed(() => visibleRecentLogs.value[0] ?? null);
-const recentCostUsd = computed(() =>
-  visibleRecentLogs.value.reduce((sum, log) => sum + estimateLogCostUsd(log, modelPrices.value), 0),
-);
-const recentOutputUsdPerToken = computed(() => {
-  const outputTokens = visibleRecentLogs.value.reduce(
-    (sum, log) => sum + Math.max(0, log.output_tokens),
-    0,
-  );
-  if (outputTokens <= 0 || recentCostUsd.value <= 0) return 0;
-  return recentCostUsd.value / outputTokens;
-});
 const activeCredentialTotal = computed(() =>
   scopedPools.value.reduce((sum, pool) => sum + pool.available_credentials, 0),
 );
@@ -604,12 +354,12 @@ const slowProviderCount = computed(
 const fuelCards = computed<FuelCard[]>(() => {
   const cards: FuelCard[] = [];
   cards.push({
-    key: "burn",
-    label: "Burn",
-    value: formatUsd(recentCostUsd.value),
-    detail: modelPrices.value.size ? "last hour · models.dev priced" : "last hour · local logs",
-    tone: recentCostUsd.value > 5 ? "warn" : "muted",
-    to: "/ui/statistics",
+    key: "recording",
+    label: "Recording",
+    value: "off",
+    detail: "request network logging removed",
+    tone: "muted",
+    to: "/ui/providers",
   });
 
   const codex = codexQuotaSummary.value;
@@ -694,31 +444,6 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
     return items;
   }
 
-  if (scopedLiveRequestCount.value > 0) {
-    items.push({
-      key: "streaming",
-      icon: "zap",
-      title: `${scopedLiveRequestCount.value} active stream${scopedLiveRequestCount.value > 1 ? "s" : ""}`,
-      detail:
-        scopedLiveTokensPerSec.value > 0
-          ? `${fmtTps(scopedLiveTokensPerSec.value)} flowing right now.`
-          : `${compactBytes(scopedLiveBytesPerSec.value)}/s flowing right now.`,
-      to: "/ui/overview",
-      tone: "live",
-    });
-  } else {
-    items.push({
-      key: "quiet",
-      icon: hasProviderAttention.value ? "alert-triangle" : "moon",
-      title: hasProviderAttention.value ? "No active Codex traffic" : "Quiet, ready",
-      detail: hasProviderAttention.value
-        ? "Idle right now; provider capacity has separate attention items below."
-        : `${activeCredentialTotal.value} ready credential${activeCredentialTotal.value === 1 ? "" : "s"} standing by.`,
-      to: hasProviderAttention.value ? "/ui/providers" : "/ui/overview",
-      tone: hasProviderAttention.value ? "warn" : "muted",
-    });
-  }
-
   if (blockedCredentialTotal.value > 0) {
     items.push({
       key: "blocked-credentials",
@@ -790,7 +515,6 @@ function insightToneClass(tone: OverviewInsight["tone"]) {
 function providerStatusLabel(row: DashboardStats["per_provider"][number]) {
   const pool = poolByProviderId.value.get(row.provider_id);
   const circuit = providerCircuitState(row);
-  if (activeRequestCountsByProvider.value.get(row.provider_id)) return "live";
   if (circuit === "open") return "circuit";
   if (circuit === "half-open") return "recovering";
   if (pool?.rate_limited_credentials) return "limited";
@@ -807,27 +531,6 @@ function providerStatusClass(row: DashboardStats["per_provider"][number]) {
   return "bg-red-50 text-red-700 ring-1 ring-red-200";
 }
 
-function timelineBarClass(log: RequestLog | undefined) {
-  if (!log) return "h-[18%] bg-vp-border";
-  const code = log.status_code ?? 0;
-  if (code >= 200 && code < 300) return "h-full bg-emerald-500";
-  if (code === 429 || code === 503) return "h-[64%] bg-amber-500";
-  if (code >= 500) return "h-[38%] bg-red-500";
-  return "h-[52%] bg-amber-400";
-}
-
-function timelineTitle(log: RequestLog | undefined) {
-  if (!log) return "empty";
-  return `${log.status_code ?? "?"} · ${fmt(log.latency_ms)} · ${log.requested_model ?? "unknown"}`;
-}
-
-function providerTimeline(providerId: string) {
-  const logs = providerTimelineByProvider.value.get(providerId) ?? [];
-  const bars: Array<RequestLog | undefined> = [...logs].slice(0, 16).reverse();
-  while (bars.length < 16) bars.unshift(undefined);
-  return bars;
-}
-
 const liveStateLabel = computed(() => {
   if (!online.value) return "offline";
   if (trafficHeatState.value === "hot") return "hot";
@@ -836,15 +539,6 @@ const liveStateLabel = computed(() => {
 });
 const liveStateDetail = computed(() => {
   if (!online.value) return "gateway offline";
-  if (scopedLiveRequestCount.value > 0) {
-    const flow =
-      scopedLiveTokensPerSec.value > 0
-        ? fmtTps(scopedLiveTokensPerSec.value)
-        : `${compactBytes(scopedLiveBytesPerSec.value)}/s`;
-    const burn =
-      scopedLiveCostUsdPerMin.value > 0 ? ` · ${formatUsd(scopedLiveCostUsdPerMin.value)}/min` : "";
-    return `${scopedLiveRequestCount.value} active · ${flow}${burn}`;
-  }
   if (hasProviderAttention.value) {
     return activeCredentialTotal.value > 0
       ? `${activeCredentialTotal.value} ready · provider attention`
@@ -868,7 +562,6 @@ const liveStateTextClass = computed(() => {
 });
 const liveTrafficReadinessLabel = computed(() => {
   if (!online.value) return "Gateway is offline.";
-  if (scopedLiveRequestCount.value > 0) return "Requests are flowing through Codex right now.";
   if (hasProviderAttention.value) return "No Codex traffic now, but capacity needs attention.";
   return "No Codex traffic now; providers are standing by.";
 });
@@ -888,22 +581,10 @@ watch(view, () => {
 });
 onMounted(() => {
   void load();
-  void loadModelPrices().then((prices) => {
-    modelPrices.value = prices;
-  });
 });
 
 useWs((ev: unknown) => {
-  const e = ev as
-    | ({
-        type: string;
-        attempt_id?: string;
-        provider_id?: string | null;
-        request_id?: string;
-      } & RequestLog)
-    | ({ type: string } & RequestRuntimeStats)
-    | ({ type: string } & DashboardStats)
-    | ({ type: string } & ProvidersOverview);
+  const e = ev as ({ type: string } & DashboardStats) | ({ type: string } & ProvidersOverview);
   if (e.type === "dashboard-stats-changed") {
     const nextStats = e as DashboardStats & { type: string };
     if (nextStats.window_hours === 1) stats.value = nextStats;
@@ -912,72 +593,6 @@ useWs((ev: unknown) => {
   if (e.type === "providers-overview-changed") {
     const overview = e as ProvidersOverview & { type: string };
     if (overview.rolling_hours === 1) applyProvidersOverview(overview);
-    return;
-  }
-  if (e.type === "request-started" && e.id) {
-    const providerId = e.provider_id ?? null;
-    if (providerId) {
-      activeRequestProviderIds.value = { ...activeRequestProviderIds.value, [e.id]: providerId };
-    }
-    if (e.requested_model) {
-      activeRequestModels.value = { ...activeRequestModels.value, [e.id]: e.requested_model };
-    }
-    return;
-  }
-  if (e.type === "upstream-attempt-started" && e.attempt_id && e.provider_id) {
-    activeAttemptProviderIds.value = {
-      ...activeAttemptProviderIds.value,
-      [e.attempt_id]: e.provider_id,
-    };
-    return;
-  }
-  if (e.type === "request-updated" && e.request_id && e.provider_id) {
-    activeRequestProviderIds.value = {
-      ...activeRequestProviderIds.value,
-      [e.request_id]: e.provider_id,
-    };
-    liveRequestMetrics.value = {
-      ...liveRequestMetrics.value,
-      [e.request_id]: {
-        request_id: e.request_id,
-        provider_id: e.provider_id,
-        active_request_tokens_per_sec: e.active_request_tokens_per_sec,
-        active_upstream_decode_tps: e.active_upstream_decode_tps,
-        active_downstream_emit_tps: e.active_downstream_emit_tps,
-        active_output_tokens_per_sec: e.active_output_tokens_per_sec ?? null,
-        active_upstream_bytes_per_sec: e.active_upstream_bytes_per_sec ?? 0,
-        active_downstream_bytes_per_sec: e.active_downstream_bytes_per_sec ?? 0,
-        active_flow_bytes_per_sec: e.active_flow_bytes_per_sec ?? 0,
-        output_tokens_so_far: e.output_tokens_so_far,
-        upstream_bytes_so_far: e.upstream_bytes_so_far,
-        client_bytes_so_far: e.client_bytes_so_far,
-        upstream_first_byte_ms: e.upstream_first_byte_ms,
-        client_first_write_ms: e.client_first_write_ms,
-        updated_at: e.updated_at,
-      },
-    };
-    return;
-  }
-  if (e.type === "upstream-attempt-finished" && e.attempt_id) {
-    const { [e.attempt_id]: _, ...rest } = activeAttemptProviderIds.value;
-    activeAttemptProviderIds.value = rest;
-    return;
-  }
-  if (e.type !== "log-appended") return;
-  if (e.id) {
-    const nextLog = e as RequestLog;
-    const existingIndex = recentLogs.value.findIndex((log) => log.id === e.id);
-    if (existingIndex !== -1) {
-      recentLogs.value.splice(existingIndex, 1);
-    }
-    recentLogs.value.unshift(nextLog);
-    if (recentLogs.value.length > 40) recentLogs.value.pop();
-    const { [e.id]: __, ...reqRest } = activeRequestProviderIds.value;
-    activeRequestProviderIds.value = reqRest;
-    const { [e.id]: ___, ...metricRest } = liveRequestMetrics.value;
-    liveRequestMetrics.value = metricRest;
-    const { [e.id]: ____, ...modelRest } = activeRequestModels.value;
-    activeRequestModels.value = modelRest;
   }
 });
 
@@ -987,10 +602,7 @@ function pct(n: number) {
 function fmt(ms: number | null) {
   return ms != null ? `${ms}ms` : "—";
 }
-function fmtTps(n: number | null | undefined) {
-  if (n === undefined || n === null || !Number.isFinite(n)) return "—";
-  return `${n.toFixed(1)} tok/s`;
-}
+
 function statusColor(code: number | null) {
   if (!code) return "text-slate-500";
   if (code < 300) return "text-emerald-600";
@@ -1024,13 +636,6 @@ function localeInt(n: unknown): string {
   const x = typeof n === "bigint" ? Number(n) : Number(n);
   if (Number.isNaN(x)) return "—";
   return x.toLocaleString();
-}
-
-function compactBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0B";
-  if (bytes < 1024) return `${Math.round(bytes)}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
 function formatUsd(n: number): string {
@@ -1144,12 +749,6 @@ const codexTransportItems = computed(() => [
                 <div class="stat-label">Req</div>
                 <div class="stat-value mt-1 flex items-baseline gap-2">
                   <MetricTicker :value="visibleRequestCount" size="lg" />
-                  <span
-                    v-if="scopedLiveRequestCount"
-                    class="rounded-md bg-emerald-50 px-1.5 py-0.5 font-mono text-[11px] text-emerald-700"
-                  >
-                    +{{ scopedLiveRequestCount }}
-                  </span>
                 </div>
                 <div class="mt-1 text-xs text-vp-muted">
                   {{ localeInt(stats?.requests_last_hour ?? 0) }}/h
@@ -1181,15 +780,7 @@ const codexTransportItems = computed(() => [
                     size="lg"
                   />
                 </div>
-                <div class="mt-1 text-xs text-vp-muted">
-                  {{
-                    scopedLiveTokensPerSec > 0
-                      ? "streaming now"
-                      : scopedLiveBytesPerSec > 0
-                        ? `${compactBytes(scopedLiveBytesPerSec)}/s stream`
-                        : "last hour"
-                  }}
-                </div>
+                <div class="mt-1 text-xs text-vp-muted">last hour</div>
               </div>
             </div>
 
@@ -1238,11 +829,7 @@ const codexTransportItems = computed(() => [
                 </div>
                 <div class="rounded-lg border border-vp-border bg-vp-surface px-3 py-2">
                   <div class="stat-label">Generated</div>
-                  <MetricTicker
-                    :value="visibleOutputTokens + scopedLiveOutputTokens"
-                    size="md"
-                    tone="good"
-                  />
+                  <MetricTicker :value="visibleOutputTokens" size="md" tone="good" />
                 </div>
               </div>
             </div>
@@ -1252,23 +839,6 @@ const codexTransportItems = computed(() => [
         <section
           class="grid gap-3 md:order-1 md:col-span-2 md:grid-cols-[minmax(0,1.08fr)_minmax(17rem,0.72fr)]"
         >
-          <LiveTrafficPanel
-            class="md:order-1"
-            :active-count="scopedLiveRequestCount"
-            :heat-level="liveHeatLevel"
-            :traffic-state="trafficHeatState"
-            :provider-issue-count="providerIssueCount + blockedCredentialTotal"
-            :readiness-label="liveTrafficReadinessLabel"
-            :total-tokens-per-sec="scopedLiveTokensPerSec"
-            :total-bytes-per-sec="scopedLiveBytesPerSec"
-            :total-cost-usd="scopedLiveCostUsd"
-            :total-cost-usd-per-min="scopedLiveCostUsdPerMin"
-            :output-tokens-so-far="scopedLiveOutputTokens"
-            :upstream-bytes-so-far="scopedLiveUpstreamBytes"
-            :client-bytes-so-far="scopedLiveClientBytes"
-            :requests="liveTrafficRequests"
-          />
-
           <div class="card-base overflow-hidden md:order-3">
             <div class="flex items-center justify-between border-b border-vp-border px-4 py-3">
               <div class="flex items-center gap-2">
@@ -1329,12 +899,7 @@ const codexTransportItems = computed(() => [
                   "
                   :enabled="providerById.get(p.provider_id)?.enabled ?? true"
                   :circuit-state="providerCircuitState(p)"
-                  :active-request-count="activeRequestCountsByProvider.get(p.provider_id) ?? 0"
-                  :tokens-per-sec="
-                    liveTokensPerSecByProvider.get(p.provider_id) ??
-                    (p.decode_output_tokens_per_sec || p.output_tokens_per_sec)
-                  "
-                  :activity-label="liveActivityLabelByProvider.get(p.provider_id)"
+                  :tokens-per-sec="p.decode_output_tokens_per_sec || p.output_tokens_per_sec"
                 />
                 <span class="min-w-0 flex-1">
                   <span class="flex min-w-0 items-center gap-2">
@@ -1351,15 +916,6 @@ const codexTransportItems = computed(() => [
                   <span class="mt-1 block truncate font-mono text-[11px] text-vp-muted">
                     {{ p.requests }} req · {{ fmt(p.avg_latency_ms) }} avg ·
                     {{ credentialPulse(p) }}
-                  </span>
-                  <span class="mt-2 flex h-5 items-end gap-[2px]" aria-hidden="true">
-                    <span
-                      v-for="(log, idx) in providerTimeline(p.provider_id)"
-                      :key="idx"
-                      class="min-w-[3px] flex-1 rounded-sm"
-                      :class="timelineBarClass(log)"
-                      :title="timelineTitle(log)"
-                    />
                   </span>
                 </span>
                 <span
@@ -1384,37 +940,17 @@ const codexTransportItems = computed(() => [
             </div>
           </div>
 
-          <div class="card-base overflow-hidden md:order-4">
+          <div class="card-base overflow-hidden md:order-6 xl:col-span-2">
             <div class="flex items-center justify-between border-b border-vp-border px-4 py-3">
               <div class="flex items-center gap-2">
-                <VpIcon name="zap" size-class="size-4 text-sky-600" />
-                <span class="text-sm font-semibold text-vp-text">Recent</span>
+                <VpIcon name="activity" size-class="size-4 text-vp-muted" />
+                <span class="text-sm font-semibold text-vp-text">Runtime logs</span>
               </div>
-              <span class="font-mono text-xs text-vp-muted">{{ visibleRecentLogs.length }}</span>
+              <span class="font-mono text-xs text-vp-muted">memory only</span>
             </div>
-            <RouterLink
-              :to="{ path: '/ui/overview', query: route.query }"
-              class="block px-4 py-3 hover:bg-vp-bg-hover"
-            >
-              <div v-if="currentLog" class="flex min-w-0 items-center gap-2">
-                <span
-                  :class="statusColor(currentLog.status_code)"
-                  class="w-10 shrink-0 font-mono text-sm font-bold"
-                >
-                  {{ currentLog.status_code ?? "?" }}
-                </span>
-                <span class="min-w-0 flex-1">
-                  <span class="block truncate font-mono text-sm text-vp-text">
-                    {{ currentLog.requested_model ?? "—" }}
-                  </span>
-                  <span class="block truncate font-mono text-xs text-vp-muted">
-                    {{ fmt(currentLog.latency_ms) }} · {{ currentLog.input_tokens }}↑
-                    {{ currentLog.output_tokens }}↓
-                  </span>
-                </span>
-              </div>
-              <div v-else class="py-3 text-center text-sm text-vp-muted">idle</div>
-            </RouterLink>
+            <div class="max-h-[18rem] overflow-auto p-3">
+              <LogsPanel compact />
+            </div>
           </div>
 
           <div v-if="view !== 'claude'" class="card-base overflow-hidden md:order-5">

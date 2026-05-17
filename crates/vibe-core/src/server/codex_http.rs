@@ -1,3 +1,4 @@
+use crate::stream_trace::StreamTraceStats;
 use super::*;
 
 pub(super) async fn codex_responses_handler(
@@ -278,7 +279,7 @@ pub(super) fn classify_codex_upstream_sse_frame(block: &str) -> Option<bool> {
     }
 }
 
-/// Codex **`/codex/v1/responses` HTTP**: if upstream is Chat SSE, convert **SSE -> Responses SSE** here and write `request_logs.client_response_body`.
+/// Codex **`/codex/v1/responses` HTTP**: if upstream is Chat SSE, convert **SSE -> Responses SSE**.
 pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
     state: AppState,
     upstream: Response,
@@ -288,10 +289,7 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
     summary_thread_id: Option<String>,
 ) -> Response {
     let (parts, body) = upstream.into_parts();
-    let log_row_id = parts
-        .extensions
-        .get::<forward::VibeLogId>()
-        .map(|x| x.0.clone());
+    let log_row_id: Option<String> = None;
     let visual = parts
         .extensions
         .get::<VibeCodexVisual>()
@@ -633,103 +631,11 @@ pub(super) fn append_codex_ws_client_trace(acc: &mut String, json_line: &str) {
 }
 
 pub(super) async fn persist_codex_client_response_body(
-    state: &AppState,
-    row_id: Option<String>,
-    trace: String,
-    stats: Option<StreamTraceStats>,
+    _state: &AppState,
+    _row_id: Option<String>,
+    _trace: String,
+    _stats: Option<StreamTraceStats>,
 ) {
-    let Some(id) = row_id else {
-        return;
-    };
-    if trace.is_empty() && stats.is_none() {
-        return;
-    }
-    let db = state.db.clone();
-    let id_for_warn = id.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        if let Some(stats) = stats {
-            let mut log = empty_patch_log(&id);
-            log.client_response_body = (!trace.is_empty()).then_some(trace);
-            stats.apply_to_log(&mut log);
-            db.log_update_client_trace_and_stream_fields(&log)
-        } else {
-            db.log_set_client_response_body(&id, Some(&trace))
-        }
-    })
-    .await;
-    match res {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!(
-            log_id = %id_for_warn,
-            ?e,
-            "failed to PATCH client_response_body"
-        ),
-        Err(j) => {
-            tracing::warn!(log_id = %id_for_warn, %j, "join error patching client_response_body")
-        }
-    }
-}
-
-pub(super) fn empty_patch_log(id: &str) -> vibe_protocol::RequestLog {
-    let mut log = vibe_protocol::RequestLog {
-        id: id.to_string(),
-        started_at: 0,
-        app: None,
-        provider_id: None,
-        requested_model: None,
-        upstream_model: None,
-        status_code: None,
-        error: None,
-        latency_ms: None,
-        first_token_ms: None,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_creation_tokens: 0,
-        estimated_cost_usd: "0".into(),
-        wire: None,
-        route_prefix: None,
-        credential_id: None,
-        cb_key: None,
-        upstream_http_status: None,
-        upstream_error_preview: None,
-        dedupe_key: None,
-        client_transport: None,
-        request_headers: None,
-        request_body: None,
-        response_body: None,
-        client_response_body: None,
-        stream_kind: None,
-        stream_terminal_seen: None,
-        stream_end_reason: None,
-        stream_error_detail: None,
-        upstream_first_byte_ms: None,
-        client_first_write_ms: None,
-        last_upstream_event_ms: None,
-        last_client_write_ms: None,
-        upstream_chunk_count: 0,
-        upstream_bytes: 0,
-        client_chunk_count: 0,
-        client_bytes: 0,
-        sse_event_count: 0,
-        sse_data_count: 0,
-        sse_comment_count: 0,
-        sse_keepalive_count: 0,
-        sse_done_count: 0,
-        parse_error_count: 0,
-        first_keepalive_ms: None,
-        last_keepalive_ms: None,
-        max_gap_between_upstream_events_ms: None,
-        max_gap_between_data_events_ms: None,
-        keepalive_after_last_data_count: 0,
-        last_data_event_ms: None,
-        bridge_mode: None,
-        status_injected: false,
-        terminal_injected: false,
-        upstream_terminal_type: None,
-    };
-    empty_stream_fields(&mut log);
-    log
 }
 
 pub(super) fn codex_sse_block_to_ws_frames(

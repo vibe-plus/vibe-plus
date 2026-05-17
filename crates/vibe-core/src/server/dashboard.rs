@@ -820,177 +820,6 @@ pub(super) async fn list_app_logs(
 }
 
 // ---------------------------------------------------------------------------
-// Logs
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub(super) struct LogQuery {
-    limit: Option<i64>,
-    offset: Option<i64>,
-    since: Option<i64>,
-    provider_id: Option<String>,
-    /// "ok" | "error"
-    status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct AttemptQuery {
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
-
-pub(super) async fn get_request_log(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, AppError> {
-    let log = state.request_logs.get(&id);
-    Ok(match log {
-        Some(log) => Json(log).into_response(),
-        None => (StatusCode::NOT_FOUND, "log not found").into_response(),
-    })
-}
-
-pub(super) async fn get_upstream_attempt(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, AppError> {
-    let attempt = state.upstream_attempt_logs.get(&id);
-    Ok(match attempt {
-        Some(attempt) => Json(attempt).into_response(),
-        None => (StatusCode::NOT_FOUND, "attempt not found").into_response(),
-    })
-}
-
-pub(super) async fn list_request_attempts(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Vec<UpstreamAttemptLog>>, AppError> {
-    Ok(Json(state.upstream_attempt_logs.for_request(&id)))
-}
-
-pub(super) async fn list_upstream_attempts(
-    State(state): State<AppState>,
-    Query(q): Query<AttemptQuery>,
-) -> Result<Json<Vec<UpstreamAttemptLog>>, AppError> {
-    let limit = q.limit.unwrap_or(100).clamp(1, 500);
-    let offset = q.offset.unwrap_or(0).max(0);
-    Ok(Json(state.upstream_attempt_logs.list(limit, offset)))
-}
-
-#[derive(Debug, serde::Serialize)]
-pub(super) struct LogStreamTraceResponse {
-    id: String,
-    stream_kind: Option<String>,
-    stream_terminal_seen: Option<bool>,
-    stream_end_reason: Option<String>,
-    stream_error_detail: Option<String>,
-    upstream_first_byte_ms: Option<i64>,
-    client_first_write_ms: Option<i64>,
-    last_upstream_event_ms: Option<i64>,
-    last_client_write_ms: Option<i64>,
-    upstream_chunk_count: i64,
-    upstream_bytes: i64,
-    client_chunk_count: i64,
-    client_bytes: i64,
-    sse_event_count: i64,
-    sse_data_count: i64,
-    sse_comment_count: i64,
-    sse_keepalive_count: i64,
-    sse_done_count: i64,
-    parse_error_count: i64,
-    first_keepalive_ms: Option<i64>,
-    last_keepalive_ms: Option<i64>,
-    max_gap_between_upstream_events_ms: Option<i64>,
-    max_gap_between_data_events_ms: Option<i64>,
-    keepalive_after_last_data_count: i64,
-    last_data_event_ms: Option<i64>,
-    bridge_mode: Option<String>,
-    status_injected: bool,
-    terminal_injected: bool,
-    upstream_terminal_type: Option<String>,
-    verdict: String,
-}
-
-pub(super) async fn get_log_stream_trace(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, AppError> {
-    let log = state.request_logs.get(&id);
-    let Some(log) = log else {
-        return Ok((StatusCode::NOT_FOUND, "log not found").into_response());
-    };
-    let verdict = if log.stream_kind.as_deref() == Some("none") || log.stream_kind.is_none() {
-        "not_streaming"
-    } else if log.stream_terminal_seen == Some(true) {
-        "completed"
-    } else if matches!(
-        log.stream_end_reason.as_deref(),
-        Some("downstream_closed") | Some("downstream_write_error")
-    ) {
-        "client_or_downstream_closed"
-    } else if matches!(
-        log.stream_end_reason.as_deref(),
-        Some("upstream_read_error") | Some("upstream_eof") | Some("truncated")
-    ) {
-        "upstream_or_proxy_truncated"
-    } else if log.sse_keepalive_count > 0 && log.sse_data_count == 0 {
-        "keepalive_only"
-    } else {
-        "unknown"
-    };
-    Ok(Json(LogStreamTraceResponse {
-        id: log.id,
-        stream_kind: log.stream_kind,
-        stream_terminal_seen: log.stream_terminal_seen,
-        stream_end_reason: log.stream_end_reason,
-        stream_error_detail: log.stream_error_detail,
-        upstream_first_byte_ms: log.upstream_first_byte_ms,
-        client_first_write_ms: log.client_first_write_ms,
-        last_upstream_event_ms: log.last_upstream_event_ms,
-        last_client_write_ms: log.last_client_write_ms,
-        upstream_chunk_count: log.upstream_chunk_count,
-        upstream_bytes: log.upstream_bytes,
-        client_chunk_count: log.client_chunk_count,
-        client_bytes: log.client_bytes,
-        sse_event_count: log.sse_event_count,
-        sse_data_count: log.sse_data_count,
-        sse_comment_count: log.sse_comment_count,
-        sse_keepalive_count: log.sse_keepalive_count,
-        sse_done_count: log.sse_done_count,
-        parse_error_count: log.parse_error_count,
-        first_keepalive_ms: log.first_keepalive_ms,
-        last_keepalive_ms: log.last_keepalive_ms,
-        max_gap_between_upstream_events_ms: log.max_gap_between_upstream_events_ms,
-        max_gap_between_data_events_ms: log.max_gap_between_data_events_ms,
-        keepalive_after_last_data_count: log.keepalive_after_last_data_count,
-        last_data_event_ms: log.last_data_event_ms,
-        bridge_mode: log.bridge_mode,
-        status_injected: log.status_injected,
-        terminal_injected: log.terminal_injected,
-        upstream_terminal_type: log.upstream_terminal_type,
-        verdict: verdict.into(),
-    })
-    .into_response())
-}
-
-pub(super) async fn list_logs(
-    State(state): State<AppState>,
-    Query(q): Query<LogQuery>,
-) -> Result<Json<LogPage>, AppError> {
-    let limit = q.limit.unwrap_or(100).clamp(1, 500);
-    let offset = q.offset.unwrap_or(0).max(0);
-    let status_ok: Option<bool> = match q.status.as_deref() {
-        Some("ok") => Some(true),
-        Some("error") => Some(false),
-        _ => None,
-    };
-    let p = state
-        .request_logs
-        .list(limit, offset, q.since, q.provider_id.as_deref(), status_ok);
-    Ok(Json(p))
-}
-
-// ---------------------------------------------------------------------------
 // Usage / stats
 // ---------------------------------------------------------------------------
 
@@ -1000,12 +829,19 @@ pub(super) struct UsageQuery {
 }
 
 pub(super) async fn usage_summary(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Query(q): Query<UsageQuery>,
 ) -> Result<Json<UsageSummary>, AppError> {
     let hours = q.hours.unwrap_or(24).clamp(1, 24 * 30);
-    let s = run_blocking(state, move |s| s.db.usage_summary_last_hours(hours)).await?;
-    Ok(Json(s))
+    Ok(Json(UsageSummary {
+        range: format!("last_{hours}h"),
+        requests: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        estimated_cost_usd: "0".into(),
+    }))
 }
 
 pub(super) async fn dashboard_stats(
@@ -1020,72 +856,42 @@ pub(super) async fn build_dashboard_stats(
     state: AppState,
     hours: i64,
 ) -> anyhow::Result<DashboardStats> {
-    let now = chrono::Utc::now().timestamp();
-    let since_1h = now - 3600;
-    let recent_1h = state.request_logs.list(500, 0, Some(since_1h), None, None);
-    let requests_last_hour = recent_1h.items.len() as i64;
-    let success_rate_last_hour = if requests_last_hour == 0 {
-        1.0
-    } else {
-        recent_1h
-            .items
+    let requests_last_24h = run_blocking(state, |s| {
+        Ok(s.db
+            .health_list()?
             .iter()
-            .filter(|row| row.status_code.is_some_and(|code| (200..300).contains(&code)))
-            .count() as f64
-            / requests_last_hour as f64
-    };
-
-    let stats = run_blocking(state, move |s| {
-        let requests_last_24h = s.db.health_list()?.iter().map(|h| h.total_requests).sum::<i64>();
-        let success_rate_in_window = success_rate_last_hour;
-
-        let p50 = 0;
-        let p95 = 0;
-        let top_models = Vec::new();
-        let per_provider = s.db.per_provider_stats(hours)?;
-        let output_tokens_per_sec_in_window = 0.0;
-        let decode_output_tokens_per_sec_in_window = 0.0;
-        let summary_window = UsageSummary {
-            range: format!("last_{hours}h"),
-            requests: requests_last_hour,
-            input_tokens: recent_1h.items.iter().map(|row| row.input_tokens).sum(),
-            output_tokens: recent_1h.items.iter().map(|row| row.output_tokens).sum(),
-            cache_read_tokens: recent_1h.items.iter().map(|row| row.cache_read_tokens).sum(),
-            cache_creation_tokens: recent_1h.items.iter().map(|row| row.cache_creation_tokens).sum(),
-            estimated_cost_usd: "0".into(),
-        };
-        let summary_24h = summary_window.clone();
-
-        let window_label = match hours {
-            1 => "Last 1 hour".to_string(),
-            5 => "Last 5 hours".to_string(),
-            24 => "Last 24 hours".to_string(),
-            168 => "Last 7 days".to_string(),
-            720 => "Last 30 days".to_string(),
-            h if h % 24 == 0 && h > 24 => format!("Last {} days", h / 24),
-            h => format!("Last {h} hours"),
-        };
-
-        Ok(vibe_protocol::DashboardStats {
-            window_hours: hours,
-            window_label,
-            requests_in_window: summary_window.requests,
-            success_rate_in_window,
-            input_tokens_in_window: summary_window.input_tokens,
-            output_tokens_in_window: summary_window.output_tokens,
-            output_tokens_per_sec_in_window,
-            decode_output_tokens_per_sec_in_window,
-            requests_last_hour,
-            requests_last_24h,
-            success_rate_last_hour,
-            avg_latency_ms: p50,
-            p95_latency_ms: p95,
-            input_tokens_last_24h: summary_24h.input_tokens,
-            output_tokens_last_24h: summary_24h.output_tokens,
-            top_models,
-            per_provider,
-        })
+            .map(|h| h.total_requests)
+            .sum::<i64>())
     })
     .await?;
-    Ok(stats)
+
+    let window_label = match hours {
+        1 => "Last 1 hour".to_string(),
+        5 => "Last 5 hours".to_string(),
+        24 => "Last 24 hours".to_string(),
+        168 => "Last 7 days".to_string(),
+        720 => "Last 30 days".to_string(),
+        h if h % 24 == 0 && h > 24 => format!("Last {} days", h / 24),
+        h => format!("Last {h} hours"),
+    };
+
+    Ok(DashboardStats {
+        window_hours: hours,
+        window_label,
+        requests_in_window: 0,
+        success_rate_in_window: 1.0,
+        input_tokens_in_window: 0,
+        output_tokens_in_window: 0,
+        output_tokens_per_sec_in_window: 0.0,
+        decode_output_tokens_per_sec_in_window: 0.0,
+        requests_last_hour: 0,
+        requests_last_24h,
+        success_rate_last_hour: 1.0,
+        avg_latency_ms: 0,
+        p95_latency_ms: 0,
+        input_tokens_last_24h: 0,
+        output_tokens_last_24h: 0,
+        top_models: Vec::new(),
+        per_provider: Vec::new(),
+    })
 }

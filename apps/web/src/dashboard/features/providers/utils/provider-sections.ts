@@ -10,7 +10,6 @@ import {
 } from "../../../utils/client-tools.ts";
 import { displayProviderName } from "../../../utils/providers-display.ts";
 import type {
-  LiveRequestMetric,
   ProviderCardProtocolBadge,
   ProviderCardView,
   ProviderGroupKey,
@@ -23,9 +22,6 @@ export type BuildProviderSectionsInput = {
   selectedTool: ClientToolInfo | null;
   healthMap: Record<string, ProviderHealthSummary>;
   poolByProviderId: Record<string, ProviderAuthPoolSummary>;
-  activeRequestCountsByProvider: Map<string, number>;
-  liveTokensPerSecByProvider: Map<string, number>;
-  liveRequestMetrics: Record<string, LiveRequestMetric>;
 };
 
 export function providerGroupName(provider: Provider): string {
@@ -84,7 +80,6 @@ function latencyCandidatesForProvider(
 ): number[] {
   const health = input.healthMap[provider.id];
   const values = [
-    providerLiveFirstByteMs(provider.id, input.liveRequestMetrics),
     provider.last_speedtest?.latency_ms ?? null,
     health?.rolling?.avg_latency_ms ?? null,
     health?.cumulative.avg_latency_ms ?? null,
@@ -104,7 +99,6 @@ function summarizeProviderSection(
   let availableCredentials = 0;
   let enabledCredentials = 0;
   let blockedCredentials = 0;
-  let activeRequests = 0;
   let remoteModels = 0;
   let testedEndpoints = 0;
   let directEndpoints = 0;
@@ -125,7 +119,6 @@ function summarizeProviderSection(
       directEndpoints += 1;
     }
     remoteModels += provider.remote_models?.length ?? 0;
-    activeRequests += input.activeRequestCountsByProvider.get(provider.id) ?? 0;
     availableCredentials += pool?.available_credentials ?? 0;
     enabledCredentials += pool?.enabled_credentials ?? 0;
     blockedCredentials +=
@@ -141,7 +134,6 @@ function summarizeProviderSection(
     availableCredentials,
     enabledCredentials,
     blockedCredentials,
-    activeRequests,
     fastestLatencyMs: latencies.length ? Math.min(...latencies) : null,
     remoteModels,
     testedEndpoints,
@@ -180,18 +172,6 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-function providerLiveFirstByteMs(
-  providerId: string,
-  liveRequestMetrics: Record<string, LiveRequestMetric>,
-): number | null {
-  const values = Object.values(liveRequestMetrics)
-    .filter((metric) => metric.provider_id === providerId)
-    .map((metric) => metric.upstream_first_byte_ms)
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (!values.length) return null;
-  return Math.min(...values);
-}
-
 function providerCompositeScore(
   provider: Provider,
   input: BuildProviderSectionsInput,
@@ -199,16 +179,13 @@ function providerCompositeScore(
   const health = input.healthMap[provider.id];
   const rolling = health?.rolling ?? null;
   const pool = input.poolByProviderId[provider.id];
-  const activeRequests = input.activeRequestCountsByProvider.get(provider.id) ?? 0;
-  const liveTps = input.liveTokensPerSecByProvider.get(provider.id) ?? 0;
   const rollingTps = rolling?.decode_output_tokens_per_sec || rolling?.output_tokens_per_sec || 0;
-  const tps = liveTps || rollingTps;
+  const tps = rollingTps;
   const successRate =
     rolling && rolling.requests > 0
       ? rolling.success_rate
       : (health?.cumulative.success_rate ?? (provider.enabled ? 1 : 0));
   const latencyMs =
-    providerLiveFirstByteMs(provider.id, input.liveRequestMetrics) ??
     provider.last_speedtest?.latency_ms ??
     rolling?.avg_latency_ms ??
     health?.cumulative.avg_latency_ms ??
@@ -222,7 +199,6 @@ function providerCompositeScore(
   const latencyScore = latencyMs == null ? 120 : 260 * (1 - clamp01(latencyMs / 5000));
   const speedScore = Math.min(360, tps * 10);
   const score =
-    activeRequests * 5000 +
     (provider.enabled ? 650 : -1600) +
     (circuitOpen ? -1200 : 250) +
     availableCreds * 180 +
@@ -234,7 +210,6 @@ function providerCompositeScore(
     speedScore +
     priorityScore;
   const reasonParts = [
-    activeRequests ? `live x${activeRequests}` : "",
     `${Math.round(successRate * 100)}% ok`,
     latencyMs == null ? "" : `${Math.round(latencyMs)}ms first`,
     tps ? `${tps.toFixed(1)} tok/s` : "",

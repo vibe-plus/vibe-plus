@@ -5,9 +5,10 @@ function resolvePort(): number {
     const n = parseInt(envRaw, 10);
     if (Number.isInteger(n) && n > 0 && n < 65536) return n;
   }
-  const params = new URLSearchParams(window.location.search);
+  const location = globalThis.window?.location;
+  const params = new URLSearchParams(location?.search ?? "");
   const raw =
-    params.get("port") ?? new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("port");
+    params.get("port") ?? new URLSearchParams(location?.hash.split("?")[1] ?? "").get("port");
   const n = raw ? parseInt(raw, 10) : NaN;
   return Number.isInteger(n) && n > 0 && n < 65536 ? n : 15917;
 }
@@ -15,8 +16,18 @@ function resolvePort(): number {
 export const PORT = resolvePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 
+export function apiUrl(path: string, base = BASE): string {
+  return base + path;
+}
+
+export function wsUrl(path: string, base = BASE): string {
+  const url = new URL(apiUrl(path, base));
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
+
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + path, {
+  const res = await fetch(apiUrl(path), {
     headers: { "content-type": "application/json" },
     ...options,
   });
@@ -123,73 +134,6 @@ export interface ProvidersOverview {
   credentials: Record<string, Credential[]>;
   codex_plans: Record<string, ProviderCodexPlanItem[]>;
 }
-export interface RequestLog {
-  id: string;
-  started_at: number;
-  app: string | null;
-  provider_id: string | null;
-  requested_model: string | null;
-  upstream_model: string | null;
-  status_code: number | null;
-  error: string | null;
-  latency_ms: number | null;
-  first_token_ms: number | null;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_creation_tokens: number;
-  estimated_cost_usd: string;
-  wire?: string | null;
-  route_prefix?: string | null;
-  credential_id?: string | null;
-  cb_key?: string | null;
-  upstream_http_status?: number | null;
-  upstream_error_preview?: string | null;
-  dedupe_key?: string | null;
-  client_transport?: string | null;
-  request_headers?: string | null;
-  /** Present on `GET /_vp/logs/:id`; omitted from list endpoint to save bandwidth. */
-  request_body?: string | null;
-  response_body?: string | null;
-  /** Codex WS and similar: frames actually sent to the client after the gateway converts upstream Chat into Responses (multi-line JSON). */
-  client_response_body?: string | null;
-  stream_kind?: string | null;
-  stream_terminal_seen?: boolean | null;
-  stream_end_reason?: string | null;
-  stream_error_detail?: string | null;
-  upstream_first_byte_ms?: number | null;
-  client_first_write_ms?: number | null;
-  last_upstream_event_ms?: number | null;
-  last_client_write_ms?: number | null;
-  upstream_chunk_count?: number;
-  upstream_bytes?: number;
-  client_chunk_count?: number;
-  client_bytes?: number;
-  sse_event_count?: number;
-  sse_data_count?: number;
-  sse_comment_count?: number;
-  sse_keepalive_count?: number;
-  sse_done_count?: number;
-  parse_error_count?: number;
-  first_keepalive_ms?: number | null;
-  last_keepalive_ms?: number | null;
-  max_gap_between_upstream_events_ms?: number | null;
-  max_gap_between_data_events_ms?: number | null;
-  keepalive_after_last_data_count?: number;
-  last_data_event_ms?: number | null;
-  bridge_mode?: string | null;
-  status_injected?: boolean;
-  terminal_injected?: boolean;
-  upstream_terminal_type?: string | null;
-}
-export interface LogPage {
-  items: RequestLog[];
-  total: number;
-  limit: number;
-  offset: number;
-  has_more: boolean;
-}
-
 export type AppLogLevel = "debug" | "info" | "warn" | "error";
 
 export interface AppLogEvent {
@@ -198,109 +142,6 @@ export interface AppLogEvent {
   category: string;
   message: string;
   detail: string | null;
-}
-export type UpstreamAttemptPhase =
-  | "connecting"
-  | "streaming"
-  | "completed"
-  | "failed"
-  | "abandoned";
-export type UpstreamAttemptOutcome =
-  | "success"
-  | "retryable-error"
-  | "client-error"
-  | "rate-limit"
-  | "transport-error"
-  | "fallback-abandon"
-  | "circuit-skip";
-
-export interface RequestRuntimeStats {
-  request_id: string;
-  attempt_id: string | null;
-  provider_id: string | null;
-  active_request_tokens_per_sec: number | null;
-  active_upstream_decode_tps: number | null;
-  active_downstream_emit_tps: number | null;
-  active_output_tokens_per_sec?: number | null;
-  active_upstream_bytes_per_sec?: number;
-  active_downstream_bytes_per_sec?: number;
-  active_flow_bytes_per_sec?: number;
-  output_tokens_so_far: number;
-  upstream_bytes_so_far: number;
-  client_bytes_so_far: number;
-  upstream_first_byte_ms: number | null;
-  client_first_write_ms: number | null;
-  attempt_scoped: boolean;
-  updated_at: number;
-}
-
-export interface UpstreamAttemptActivity {
-  attempt_id: string;
-  request_id: string;
-  attempt_index: number;
-  started_at: number;
-  phase: UpstreamAttemptPhase;
-  provider_id: string | null;
-  credential_id: string | null;
-  wire: string | null;
-  route_prefix: string | null;
-  requested_model: string | null;
-  upstream_model: string | null;
-}
-
-export interface UpstreamAttemptLog {
-  attempt_id: string;
-  request_id: string;
-  attempt_index: number;
-  started_at: number;
-  ended_at: number | null;
-  provider_id: string | null;
-  credential_id: string | null;
-  wire: string | null;
-  route_prefix: string | null;
-  requested_model: string | null;
-  upstream_model: string | null;
-  phase: UpstreamAttemptPhase;
-  outcome: UpstreamAttemptOutcome;
-  status_code: number | null;
-  upstream_http_status: number | null;
-  error_summary: string | null;
-  latency_ms: number | null;
-  first_token_ms: number | null;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_creation_tokens: number;
-  upstream_first_byte_ms: number | null;
-  client_first_write_ms: number | null;
-  last_upstream_event_ms: number | null;
-  last_client_write_ms: number | null;
-  upstream_chunk_count: number;
-  upstream_bytes: number;
-  client_chunk_count: number;
-  client_bytes: number;
-  sse_event_count: number;
-  sse_data_count: number;
-  sse_comment_count: number;
-  sse_keepalive_count: number;
-  sse_done_count: number;
-  parse_error_count: number;
-  first_keepalive_ms: number | null;
-  last_keepalive_ms: number | null;
-  max_gap_between_upstream_events_ms: number | null;
-  max_gap_between_data_events_ms: number | null;
-  keepalive_after_last_data_count: number;
-  last_data_event_ms: number | null;
-  bridge_mode: string | null;
-  status_injected: boolean;
-  terminal_injected: boolean;
-  upstream_terminal_type: string | null;
-  active_upstream_decode_tps_peak: number | null;
-  active_downstream_emit_tps_peak: number | null;
-  request_headers?: string | null;
-  request_body?: string | null;
-  response_headers?: string | null;
-  response_body?: string | null;
 }
 export interface WebCompatibility {
   api: number;
@@ -499,7 +340,7 @@ export interface ProviderHealth {
   updated_at: number;
 }
 
-/** `GET /_vp/providers/:id/health` — cumulative DB health + optional rolling window from `request_logs`. */
+/** `GET /_vp/providers/:id/health` — cumulative DB health and credential/provider counters. */
 export interface ProviderHealthSummary {
   cumulative: ProviderHealth;
   rolling_hours: number;
@@ -809,14 +650,6 @@ export interface CcSwitchDeeplinkImport {
   url: string;
 }
 
-export interface LogFilters {
-  limit?: number;
-  offset?: number;
-  since?: number;
-  provider_id?: string;
-  status?: "ok" | "error";
-}
-
 export type ToolConfigId = "codex" | "claude";
 
 export interface ToolConfigRaw {
@@ -1018,25 +851,6 @@ export const api = {
         body: JSON.stringify(body),
       }),
     groups: (id: string) => req<UpstreamGroupInfo[]>(`/_vp/credentials/${id}/groups`),
-  },
-  logs: {
-    list: (f: LogFilters = {}) => {
-      const p = new URLSearchParams();
-      if (f.limit) p.set("limit", String(f.limit));
-      if (f.offset) p.set("offset", String(f.offset));
-      if (f.since) p.set("since", String(f.since));
-      if (f.provider_id) p.set("provider_id", f.provider_id);
-      if (f.status) p.set("status", f.status);
-      return req<LogPage>(`/_vp/logs?${p}`);
-    },
-    get: (id: string) => req<RequestLog>(`/_vp/logs/${encodeURIComponent(id)}`),
-    attempts: (id: string) =>
-      req<UpstreamAttemptLog[]>(`/_vp/logs/${encodeURIComponent(id)}/attempts`),
-  },
-  attempts: {
-    list: (limit = 100, offset = 0) =>
-      req<UpstreamAttemptLog[]>(`/_vp/attempts?limit=${limit}&offset=${offset}`),
-    get: (id: string) => req<UpstreamAttemptLog>(`/_vp/attempts/${encodeURIComponent(id)}`),
   },
   appLogs: {
     list: (limit = 200, since?: number) =>

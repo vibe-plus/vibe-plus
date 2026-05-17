@@ -1,3 +1,4 @@
+use crate::stream_trace::StreamTraceStats;
 use super::*;
 
 pub(super) struct CodexWsActiveGuard {
@@ -118,10 +119,7 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
         .await;
 
         let (parts, body) = response.into_parts();
-        let stream_log_row_id = parts
-            .extensions
-            .get::<forward::VibeLogId>()
-            .map(|x| x.0.clone());
+        let stream_log_row_id: Option<String> = None;
         let visual = parts
             .extensions
             .get::<VibeCodexVisual>()

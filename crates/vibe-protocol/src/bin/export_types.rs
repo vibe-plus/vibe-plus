@@ -15,7 +15,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ProviderSpeedtestResult::export_all()?;
     ModelAlias::export_all()?;
     ProviderKind::export_all()?;
-    RequestLog::export_all()?;
     ModelPricing::export_all()?;
     Meta::export_all()?;
     WebCompatibility::export_all()?;
@@ -23,10 +22,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     UsageSummary::export_all()?;
     ClientStatus::export_all()?;
     ClientTakeoverResult::export_all()?;
-    UpstreamAttemptPhase::export_all()?;
-    UpstreamAttemptOutcome::export_all()?;
-    UpstreamAttemptLog::export_all()?;
-    LogPage::export_all()?;
     Health::export_all()?;
     ProviderInput::export_all()?;
     ProvidersOverview::export_all()?;

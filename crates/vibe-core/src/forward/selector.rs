@@ -193,10 +193,7 @@ pub const WAVE_SIZE_CLOSED: usize = 1;
 /// Within a single bucket the relative ordering of `picks` is preserved, so
 /// the caller's prior `shuffle_candidates` randomization (or sticky route
 /// pinning) still applies inside each wave.
-pub fn build_waves(
-    picks: Vec<ExpandedPick>,
-    cb: &CircuitBreakers,
-) -> Vec<Vec<ExpandedPick>> {
+pub fn build_waves(picks: Vec<ExpandedPick>, cb: &CircuitBreakers) -> Vec<Vec<ExpandedPick>> {
     use crate::circuit_breaker::State;
 
     let mut open = Vec::new();
@@ -217,11 +214,7 @@ pub fn build_waves(
     waves
 }
 
-fn push_chunks(
-    out: &mut Vec<Vec<ExpandedPick>>,
-    src: Vec<ExpandedPick>,
-    size: usize,
-) {
+fn push_chunks(out: &mut Vec<Vec<ExpandedPick>>, src: Vec<ExpandedPick>, size: usize) {
     let size = size.max(1);
     let mut iter = src.into_iter();
     loop {

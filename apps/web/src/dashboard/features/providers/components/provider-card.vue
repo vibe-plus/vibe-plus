@@ -63,7 +63,6 @@ const props = defineProps<{
   poolRows: CredentialPoolStatus[];
   planSnapByCred: Record<string, CredentialPlanSnapshot | null>;
   activeCredentialCounts: Record<string, number>;
-  activeRequestCount?: number;
   tokensPerSec?: number | null;
   detectVendorBusy?: boolean;
 }>();
@@ -82,7 +81,6 @@ const emit = defineEmits<{
   "toggle-cred": [credential: Credential];
   "edit-cred": [credential: Credential];
   "delete-cred": [credential: Credential];
-  "view-logs": [providerId: string];
   "detect-vendor": [providerId: string];
 }>();
 
@@ -279,7 +277,6 @@ const providerPool = computed(() => ({
 const providerStateClass = computed(() => {
   if (!providerEnabled.value) return "bg-slate-100 text-slate-600";
   if (providerCircuitState.value !== "closed") return "bg-amber-100 text-amber-800";
-  if ((props.activeRequestCount ?? 0) > 0) return "bg-emerald-100 text-emerald-800";
   return "bg-sky-100 text-sky-700";
 });
 
@@ -288,8 +285,6 @@ const providerStateBadge = computed(() => {
   if (providerCircuitState.value !== "closed") {
     return { icon: "clock", label: circuitCooldownText(providerPool.value.cooldownMax) };
   }
-  if ((props.activeRequestCount ?? 0) > 0)
-    return { icon: "activity", label: `${props.activeRequestCount}` };
   return { icon: "circle", label: "idle" };
 });
 const providerStateText = computed(() => providerStateBadge.value.label);
@@ -470,10 +465,7 @@ onUnmounted(() => {
 <template>
   <div
     class="group overflow-hidden rounded-xl border border-border bg-card/95 shadow-sm transition-all duration-200"
-    :class="[
-      !card.provider.enabled ? 'opacity-60 grayscale-[0.1]' : '',
-      (activeRequestCount ?? 0) > 0 ? 'ring-1 ring-primary/25' : '',
-    ]"
+    :class="[!card.provider.enabled ? 'opacity-60 grayscale-[0.1]' : '']"
   >
     <div class="relative overflow-hidden">
       <div
@@ -505,7 +497,6 @@ onUnmounted(() => {
                   :brand-hint="providerBrandHint"
                   :enabled="providerEnabled"
                   :circuit-state="providerCircuitState"
-                  :active-request-count="activeRequestCount ?? 0"
                   :tokens-per-sec="tokensPerSec"
                   size-class="size-10"
                   icon-size-class="size-6"
@@ -523,9 +514,6 @@ onUnmounted(() => {
                   >
                     {{ providerStateText }}
                   </span>
-                  <UiBadge v-if="activeRequestCount" variant="default">
-                    live {{ activeRequestCount }}
-                  </UiBadge>
                   <UiBadge v-if="tokensPerSec" variant="secondary">
                     {{ tokensPerSec.toFixed(1) }} tok/s
                   </UiBadge>
@@ -605,9 +593,6 @@ onUnmounted(() => {
                   @click="emit('edit-provider', card.provider)"
                 >
                   <VpIcon name="pencil" size-class="size-4" /> Edit
-                </button>
-                <button class="menu-row" type="button" @click="emit('view-logs', card.provider.id)">
-                  <VpIcon name="file-text" size-class="size-4" /> Logs
                 </button>
                 <button
                   class="menu-row menu-row--danger"

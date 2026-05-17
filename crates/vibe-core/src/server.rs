@@ -8,7 +8,6 @@ use crate::forward;
 use crate::forward::{VibeCodexClientKind, VibeCodexVisual};
 use crate::providers::Wire;
 use crate::state::AppState;
-use crate::stream_trace::{empty_stream_fields, StreamTraceStats};
 use crate::transforms;
 use crate::VERSION;
 use axum::body::{Body, Bytes};
@@ -33,9 +32,8 @@ use tower_http::trace::TraceLayer;
 use vibe_protocol::{
     AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexPlanRefreshResult,
     Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats,
-    Health, HealthSummary, LogPage, Meta, Provider, ProviderAuthPoolSummary,
-    ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary, ProviderInput,
-    ProvidersOverview, Status, UpstreamAttemptLog, UsageSummary,
+    Health, HealthSummary, Meta, Provider, ProviderAuthPoolSummary, ProviderCodexPlanItem,
+    ProviderHealth, ProviderHealthSummary, ProviderInput, ProvidersOverview, Status, UsageSummary,
 };
 
 mod clients;
@@ -166,13 +164,7 @@ pub fn router(state: AppState) -> Router {
         )
         // health overview
         .route("/_vp/health/providers", get(health_all_providers))
-        // logs + usage + stats
-        .route("/_vp/logs/:id", get(get_request_log))
-        .route("/_vp/logs/:id/attempts", get(list_request_attempts))
-        .route("/_vp/logs/:id/stream-trace", get(get_log_stream_trace))
-        .route("/_vp/logs", get(list_logs))
-        .route("/_vp/attempts/:id", get(get_upstream_attempt))
-        .route("/_vp/attempts", get(list_upstream_attempts))
+        // usage + stats
         .route("/_vp/usage/summary", get(usage_summary))
         .route("/_vp/stats/dashboard", get(dashboard_stats))
         .route("/_vp/app-logs", get(list_app_logs))
@@ -239,8 +231,6 @@ async fn health() -> Json<Health> {
 
 async fn compute_status(state: AppState) -> Result<Status, AppError> {
     let providers = run_blocking(state.clone(), |s| s.db.provider_list()).await?;
-    let one_hour_ago = chrono::Utc::now().timestamp() - 3600;
-    let recent = state.request_logs.count_since(one_hour_ago);
     let codex_transport = state.codex_transport.snapshot();
     Ok(Status {
         version: VERSION.to_string(),
@@ -252,7 +242,7 @@ async fn compute_status(state: AppState) -> Result<Status, AppError> {
         port: state.port,
         providers_total: providers.len(),
         providers_enabled: providers.iter().filter(|p| p.enabled).count(),
-        requests_last_hour: recent,
+        requests_last_hour: 0,
         codex_ws_active: codex_transport.ws_active,
         codex_ws_total: codex_transport.ws_total,
         codex_ws_requests_total: codex_transport.ws_requests_total,

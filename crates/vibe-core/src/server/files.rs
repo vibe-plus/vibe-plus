@@ -64,9 +64,9 @@ fn scope_root(scope: &str) -> anyhow::Result<PathBuf> {
         "claude" => crate::paths::claude_config_dir(),
         "agents" | "agent" => Ok(crate::paths::real_home_dir()?.join(".agents")),
         "ccswitch" | "cc-switch" => Ok(crate::paths::real_home_dir()?.join(".cc-switch")),
-        _ => anyhow::bail!(
-            "unsupported scope: {scope}. Supported: codex, claude, agents, ccswitch"
-        ),
+        _ => {
+            anyhow::bail!("unsupported scope: {scope}. Supported: codex, claude, agents, ccswitch")
+        }
     }
 }
 
@@ -176,9 +176,7 @@ pub(super) async fn read_file(
     Query(q): Query<FilePathQuery>,
 ) -> Result<Json<FileResponse>, AppError> {
     let root = scope_root(&scope)?;
-    let rel = q
-        .path
-        .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+    let rel = q.path.ok_or_else(|| anyhow::anyhow!("missing path"))?;
     let path = resolve_within(&root, &rel)?;
     let out = tokio::task::spawn_blocking({
         let root = root.clone();
@@ -253,9 +251,7 @@ pub(super) async fn delete_file(
     Path(scope): Path<String>,
     Query(q): Query<FilePathQuery>,
 ) -> Result<StatusCode, AppError> {
-    let rel = q
-        .path
-        .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+    let rel = q.path.ok_or_else(|| anyhow::anyhow!("missing path"))?;
     if rel.trim().is_empty() || rel.trim() == "." {
         return Err(anyhow::anyhow!("refusing to delete scope root").into());
     }
@@ -332,7 +328,10 @@ pub(super) async fn move_file(
                 let meta = std::fs::metadata(&to)?;
                 (std::fs::read_to_string(&to)?, file_mtime_ms(&meta))
             } else {
-                (String::new(), std::fs::metadata(&to).ok().as_ref().and_then(file_mtime_ms))
+                (
+                    String::new(),
+                    std::fs::metadata(&to).ok().as_ref().and_then(file_mtime_ms),
+                )
             };
             Ok(FileResponse {
                 scope,

@@ -340,11 +340,17 @@ impl SummaryAccumulator {
             _ => (0, 0),
         };
         // Use AppState aggregates if available; fall back to local sums.
-        let cost_input = agg_input.max(self.turn_input_sum).max(self.usage.input_tokens);
-        let cost_output = agg_output.max(self.turn_output_sum).max(self.usage.output_tokens);
+        let cost_input = agg_input
+            .max(self.turn_input_sum)
+            .max(self.usage.input_tokens);
+        let cost_output = agg_output
+            .max(self.turn_output_sum)
+            .max(self.usage.output_tokens);
         // For display: `in` = context window size (MAX of input = last request's value),
         // `out` = total generation across tool-call loop (SUM = agg_output).
-        let display_output = agg_output.max(self.turn_output_sum).max(self.usage.output_tokens);
+        let display_output = agg_output
+            .max(self.turn_output_sum)
+            .max(self.usage.output_tokens);
         let cost_usage = Usage {
             input_tokens: cost_input,
             output_tokens: cost_output,

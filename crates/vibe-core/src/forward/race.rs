@@ -404,12 +404,7 @@ pub(crate) async fn try_one_pick(
                 bytes = body_bytes.len(),
                 "upstream 429; rotating credential without circuit breaker trip"
             );
-            maybe_record_codex_plan(
-                &state,
-                &headers,
-                &provider,
-                epick.credential_id.as_deref(),
-            );
+            maybe_record_codex_plan(&state, &headers, &provider, epick.credential_id.as_deref());
             let rl = extract_rl_headers(&headers);
             if let Some(cid) = &epick.credential_id {
                 fire_credential_rate_limit_only(&state, cid.clone(), rl);
@@ -439,8 +434,7 @@ pub(crate) async fn try_one_pick(
                 Usage::default(),
             );
             attempt_log.response_headers = retryable_resp_headers_snapshot.clone();
-            
-            
+
             persist_upstream_attempt_log(&state, attempt_log);
             return PickResult::Retry {
                 last_error: msg,
@@ -485,8 +479,7 @@ pub(crate) async fn try_one_pick(
             Usage::default(),
         );
         attempt_log.response_headers = retryable_resp_headers_snapshot;
-        
-        
+
         persist_upstream_attempt_log(&state, attempt_log);
         return PickResult::Retry {
             last_error: msg,
@@ -517,7 +510,7 @@ pub(crate) async fn try_one_pick(
             provider_id = %provider.id,
             status = %status,
             body_bytes = buf.len(),
-            "non-retryable upstream error (4xx); full body stored in request_logs.response_body"
+            "non-retryable upstream error (4xx); network recording disabled"
         );
         let sc = status.as_u16() as i32;
         let mut attempt_log = attempt_log_from_parts(
@@ -532,8 +525,7 @@ pub(crate) async fn try_one_pick(
             Usage::default(),
         );
         attempt_log.response_headers = resp_headers_snapshot;
-        
-        
+
         persist_upstream_attempt_log(&state, attempt_log);
         let log = build_log(
             &log_ctx,
@@ -637,7 +629,7 @@ pub(crate) async fn try_one_pick(
                 Usage::default(),
             );
             attempt_log.response_headers = resp_headers_snapshot.clone();
-            
+
             persist_upstream_attempt_log(&state, attempt_log);
             let log = build_log(
                 &log_ctx,
@@ -677,8 +669,7 @@ pub(crate) async fn try_one_pick(
         usage,
     );
     attempt_log.response_headers = resp_headers_snapshot;
-    
-    
+
     let do_c2r = needs_chat_to_responses_bridge(ctx.wire, provider.kind);
     if do_c2r {
         attempt_log.bridge_mode = Some("c2r".into());
@@ -748,10 +739,9 @@ pub(crate) async fn try_one_pick(
                 "response": response.clone(),
             })
             .to_string();
-            if let Some(appended) = summary_injection.maybe_append_to_frame(
-                &completed,
-                ctx.started_instant.elapsed().as_millis() as i64,
-            ) {
+            if let Some(appended) = summary_injection
+                .maybe_append_to_frame(&completed, ctx.started_instant.elapsed().as_millis() as i64)
+            {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&appended) {
                     if let Some(r) = v.get("response") {
                         *response = r.clone();
@@ -883,7 +873,12 @@ pub(crate) async fn run_wave(
                 )),
                 _ => None,
             };
-            let _ = tx_c.send(WaveEvent { result, cb_skip_note }).await;
+            let _ = tx_c
+                .send(WaveEvent {
+                    result,
+                    cb_skip_note,
+                })
+                .await;
         });
     }
     drop(tx);
@@ -1067,7 +1062,9 @@ mod tests {
     }
 
     fn anthropic_body() -> Bytes {
-        Bytes::from(r#"{"model":"claude-test","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"#)
+        Bytes::from(
+            r#"{"model":"claude-test","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"#,
+        )
     }
 
     // ── 1. 2xx success on OpenAI Chat upstream ─────────────────────────
@@ -1173,10 +1170,7 @@ mod tests {
 
         let result = try_one_pick(state.clone(), epick, 1, ctx).await;
         assert!(matches!(result, PickResult::Retry { .. }));
-        assert!(
-            !state.cb.allow(&cb_key),
-            "CB must be force-opened by 401"
-        );
+        assert!(!state.cb.allow(&cb_key), "CB must be force-opened by 401");
     }
 
     // ── 7. 403 forbidden — treated as auth error, retryable ─────────────
@@ -1299,8 +1293,7 @@ mod tests {
         let provider = make_provider("p-auth-fail", ProviderKind::OpenaiChat, base);
         // env:VIBE_RACE_TEST_DOES_NOT_EXIST_XYZ resolves to an unset env var,
         // which secrets::resolve treats as an error.
-        let epick =
-            make_epick_with_auth_ref(provider, "env:VIBE_RACE_TEST_DOES_NOT_EXIST_XYZ");
+        let epick = make_epick_with_auth_ref(provider, "env:VIBE_RACE_TEST_DOES_NOT_EXIST_XYZ");
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
         let result = try_one_pick(state, epick, 1, ctx).await;
@@ -1398,7 +1391,10 @@ mod tests {
                 assert_eq!(retry_count, 2);
                 assert!(cb_skip_provider_ids.is_empty());
                 assert_eq!(routing_notes.len(), 2);
-                assert!(last_error.is_some(), "last_error should be populated by 500s");
+                assert!(
+                    last_error.is_some(),
+                    "last_error should be populated by 500s"
+                );
             }
             WaveOutcome::Final(_) => panic!("expected AllNonTerminal, got Final"),
         }

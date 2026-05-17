@@ -71,15 +71,9 @@ impl Db {
             M::up(include_str!(
                 "../migrations/017_upstream_provider_support.sql"
             )),
-            M::up(include_str!(
-                "../migrations/018_route_forward_strategy.sql"
-            )),
-            M::up(include_str!(
-                "../migrations/019_drop_route_strategy.sql"
-            )),
-            M::up(include_str!(
-                "../migrations/020_drop_routes_table.sql"
-            )),
+            M::up(include_str!("../migrations/018_route_forward_strategy.sql")),
+            M::up(include_str!("../migrations/019_drop_route_strategy.sql")),
+            M::up(include_str!("../migrations/020_drop_routes_table.sql")),
         ])
     }
 
