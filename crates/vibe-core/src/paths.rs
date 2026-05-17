@@ -48,10 +48,6 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(vibe_dir()?.join("vibe.db"))
 }
 
-pub fn config_path() -> Result<PathBuf> {
-    Ok(vibe_dir()?.join("config.toml"))
-}
-
 pub fn pid_path() -> Result<PathBuf> {
     Ok(vibe_dir()?.join("vibe.pid"))
 }

@@ -10,7 +10,6 @@
 pub mod auth_fingerprint;
 pub mod cache;
 pub mod circuit_breaker;
-pub mod claude_control;
 pub mod claude_summary;
 pub mod codex_auth_json;
 pub mod codex_config;

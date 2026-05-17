@@ -16,7 +16,7 @@
     "gateway:restart": "bash scripts/rebuild-and-run-gateway.sh"
   },
   "devDependencies": {
-    "unplugin-caddy-localhost": "latest",
+    "unplugin-caddy-localhost": "^0.1.4",
     "unplugin-singleton": "latest",
     "vite-plus": "catalog:",
     "web": "workspace:*"

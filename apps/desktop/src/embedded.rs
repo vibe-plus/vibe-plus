@@ -10,10 +10,8 @@ use vibe_db::Db;
 /// This future runs forever (until the runtime is dropped).
 pub async fn start(port: u16) -> Result<()> {
     let db_path = paths::db_path()?;
-    let cfg_path = paths::config_path()?;
-    let mut cfg = Config::load_or_init(&cfg_path)?;
+    let mut cfg = Config::default();
     cfg.server.port = port;
-    cfg.save(&cfg_path)?;
     let db = Db::open(&db_path)?;
     let state = AppState::init(db, cfg, port)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;

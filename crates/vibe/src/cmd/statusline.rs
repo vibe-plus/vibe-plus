@@ -2,7 +2,6 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::io::Read;
 use vibe_core::config::{ClaudeStatusLineConfig, ClaudeStatusLineStyle, Config};
-use vibe_core::paths;
 
 #[derive(Debug, Deserialize, Default)]
 struct StatusLineInput {
@@ -37,7 +36,7 @@ struct StatusLineUsage {
 }
 
 pub fn run() -> Result<()> {
-    let cfg = Config::load_or_init(&paths::config_path()?)?;
+    let cfg = Config::default();
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let parsed = serde_json::from_str::<StatusLineInput>(&input).unwrap_or_default();

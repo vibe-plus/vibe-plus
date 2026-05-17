@@ -10,13 +10,14 @@
     "gateway",
     "openai"
   ],
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "author": "cheezone",
   "bin": {
     "vibe-app": "./bin/vibe-app.js"
   },
   "files": [
     "bin/",
+    "LICENSE",
     "README.md"
   ],
   "type": "module",

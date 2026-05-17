@@ -1234,12 +1234,6 @@ pub(super) async fn handle_ws_client_text(
                         let hours = hours.unwrap_or(default_rolling_hours()).clamp(1, 24 * 30);
                         stream_providers_overview(state.clone(), outbound, request_id, hours).await;
                     }
-                    "routes" => {
-                        if let Ok(routes) = run_blocking(state.clone(), |s| s.db.route_list()).await
-                        {
-                            let _ = outbound.send(WsEvent::RoutesChanged { routes }).await;
-                        }
-                    }
                     "codex-app-status" => {
                         if let Ok(Ok(status)) = tokio::task::spawn_blocking(codex_app_status).await
                         {

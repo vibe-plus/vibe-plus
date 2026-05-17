@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.0.4"
 edition = "2021"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 authors = ["cheezone <cheezone@163.com>"]
 rust-version = "1.82"
 

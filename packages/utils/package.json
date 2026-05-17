@@ -2,7 +2,7 @@
   "name": "utils",
   "version": "0.0.2",
   "description": "Shared utilities for vibe-plus.",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "author": "cheezone <cheezone@163.com>",
   "files": [
     "dist"

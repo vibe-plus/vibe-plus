@@ -150,44 +150,6 @@ fn provider_kind_from_str(s: &str) -> Result<ProviderKind> {
     })
 }
 
-fn route_tier_to_str(t: RouteTier) -> &'static str {
-    match t {
-        RouteTier::High => "high",
-        RouteTier::Low => "low",
-        RouteTier::Default => "default",
-    }
-}
-
-fn _route_tier_from_str(s: &str) -> Result<RouteTier> {
-    Ok(match s {
-        "high" => RouteTier::High,
-        "low" => RouteTier::Low,
-        "default" => RouteTier::Default,
-        other => anyhow::bail!("unknown route tier: {other}"),
-    })
-}
-
-fn forward_strategy_to_str(s: vibe_protocol::ForwardStrategy) -> &'static str {
-    match s {
-        vibe_protocol::ForwardStrategy::Rotate => "rotate",
-        vibe_protocol::ForwardStrategy::Race => "race",
-        vibe_protocol::ForwardStrategy::Fallback => "fallback",
-    }
-}
-
-fn forward_strategy_from_str(s: &str) -> Result<vibe_protocol::ForwardStrategy> {
-    Ok(match s {
-        "rotate" => vibe_protocol::ForwardStrategy::Rotate,
-        "race" => vibe_protocol::ForwardStrategy::Race,
-        "fallback" => vibe_protocol::ForwardStrategy::Fallback,
-        other => anyhow::bail!("unknown forward strategy: {other}"),
-    })
-}
-
-fn clamp_fanout_n(n: u8) -> u8 {
-    n.clamp(1, vibe_protocol::ROUTE_FANOUT_N_MAX)
-}
-
 fn upstream_attempt_phase_to_str(p: UpstreamAttemptPhase) -> &'static str {
     match p {
         UpstreamAttemptPhase::Connecting => "connecting",
@@ -530,109 +492,6 @@ impl Db {
         })?;
         self.provider_get(id)?
             .context("updated provider missing on read-back")
-    }
-
-    // --- routes -------------------------------------------------------------
-
-    pub fn route_list(&self) -> Result<Vec<Route>> {
-        self.with(|c| {
-            let mut stmt = c.prepare(
-                "SELECT id, name, match_model, target_provider_id, target_model, tier, priority, strategy, fanout_n
-                 FROM routes ORDER BY priority ASC",
-            )?;
-            let rows = stmt.query_map([], row_to_route)?;
-            let mut out = Vec::new();
-            for r in rows {
-                out.push(r?);
-            }
-            Ok(out)
-        })
-    }
-
-    pub fn route_upsert(&self, route: Route) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO routes (id, name, match_model, target_provider_id, target_model, tier, priority, strategy, fanout_n)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(id) DO UPDATE SET
-                   name = excluded.name,
-                   match_model = excluded.match_model,
-                   target_provider_id = excluded.target_provider_id,
-                   target_model = excluded.target_model,
-                   tier = excluded.tier,
-                   priority = excluded.priority,
-                   strategy = excluded.strategy,
-                   fanout_n = excluded.fanout_n",
-                params![
-                    route.id,
-                    route.name,
-                    route.match_model,
-                    route.target_provider_id,
-                    route.target_model,
-                    route_tier_to_str(route.tier),
-                    route.priority,
-                    forward_strategy_to_str(route.strategy),
-                    clamp_fanout_n(route.fanout_n) as i64,
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    pub fn route_get(&self, id: &str) -> Result<Option<Route>> {
-        self.with(|c| {
-            let mut stmt = c.prepare(
-                "SELECT id, name, match_model, target_provider_id, target_model, tier, priority, strategy, fanout_n
-                 FROM routes WHERE id = ?1",
-            )?;
-            let r = stmt.query_row(params![id], row_to_route).optional()?;
-            Ok(r)
-        })
-    }
-
-    pub fn route_insert(&self, input: RouteInput) -> Result<Route> {
-        let route = Route {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: input.name,
-            match_model: input.match_model,
-            target_provider_id: input.target_provider_id,
-            target_model: input.target_model,
-            tier: input.tier,
-            priority: input.priority,
-            strategy: input.strategy,
-            fanout_n: clamp_fanout_n(input.fanout_n),
-        };
-        self.route_upsert(route.clone())?;
-        Ok(route)
-    }
-
-    pub fn route_update(&self, id: &str, input: RouteInput) -> Result<Route> {
-        if self.route_get(id)?.is_none() {
-            anyhow::bail!("route {id} not found");
-        }
-        let route = Route {
-            id: id.to_string(),
-            name: input.name,
-            match_model: input.match_model,
-            target_provider_id: input.target_provider_id,
-            target_model: input.target_model,
-            tier: input.tier,
-            priority: input.priority,
-            strategy: input.strategy,
-            fanout_n: clamp_fanout_n(input.fanout_n),
-        };
-        self.route_upsert(route.clone())?;
-        Ok(route)
-    }
-
-    pub fn route_delete(&self, id: &str) -> Result<()> {
-        self.with(|c| {
-            let n = c.execute("DELETE FROM routes WHERE id = ?1", params![id])?;
-            if n == 0 {
-                anyhow::bail!("route {id} not found");
-            }
-            Ok(())
-        })
     }
 
     // --- request logs -------------------------------------------------------
@@ -2287,27 +2146,6 @@ fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
     })
 }
 
-fn row_to_route(r: &rusqlite::Row) -> rusqlite::Result<Route> {
-    let tier_s: String = r.get(5)?;
-    let strategy_s: String = r.get(7)?;
-    let fanout_n: i64 = r.get(8)?;
-    Ok(Route {
-        id: r.get(0)?,
-        name: r.get(1)?,
-        match_model: r.get(2)?,
-        target_provider_id: r.get(3)?,
-        target_model: r.get(4)?,
-        tier: _route_tier_from_str(&tier_s).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, e.into())
-        })?,
-        priority: r.get(6)?,
-        strategy: forward_strategy_from_str(&strategy_s).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, e.into())
-        })?,
-        fanout_n: clamp_fanout_n(fanout_n.clamp(0, u8::MAX as i64) as u8),
-    })
-}
-
 fn row_to_health(r: &rusqlite::Row) -> rusqlite::Result<DbHealth> {
     Ok(DbHealth {
         provider_id: r.get(0)?,
@@ -2620,17 +2458,6 @@ mod tests {
         }
     }
 
-    fn sample_route_input() -> RouteInput {
-        RouteInput {
-            name: "high route".into(),
-            match_model: "high".into(),
-            target_provider_id: None,
-            target_model: Some("claude-sonnet-4-6".into()),
-            tier: RouteTier::High,
-            priority: 10,
-        }
-    }
-
     fn sample_credential_input(label: &str) -> CredentialInput {
         CredentialInput {
             label: label.into(),
@@ -2792,49 +2619,6 @@ mod tests {
             db.credential_get(&cred.id).unwrap().unwrap().provider_id,
             keep.id
         );
-    }
-
-    #[test]
-    fn route_crud_orders_by_priority_and_reports_missing_rows() {
-        let db = Db::memory().unwrap();
-        let provider = db.provider_insert(sample_input()).unwrap();
-
-        let mut low = sample_route_input();
-        low.name = "low route".into();
-        low.match_model = "low".into();
-        low.tier = RouteTier::Low;
-        low.priority = 50;
-        let low = db.route_insert(low).unwrap();
-
-        let mut high = sample_route_input();
-        high.target_provider_id = Some(provider.id.clone());
-        high.priority = 5;
-        let high = db.route_insert(high).unwrap();
-
-        let listed = db.route_list().unwrap();
-        assert_eq!(
-            listed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            vec![high.id.as_str(), low.id.as_str()]
-        );
-
-        let mut update = sample_route_input();
-        update.name = "updated high".into();
-        update.match_model = "sonnet".into();
-        update.target_provider_id = Some(provider.id);
-        update.target_model = Some("claude-3-7-sonnet-latest".into());
-        update.tier = RouteTier::Default;
-        update.priority = 1;
-        let updated = db.route_update(&high.id, update).unwrap();
-        assert_eq!(updated.name, "updated high");
-        assert_eq!(
-            db.route_get(&high.id).unwrap().unwrap().match_model,
-            "sonnet"
-        );
-
-        db.route_delete(&low.id).unwrap();
-        assert!(db.route_get(&low.id).unwrap().is_none());
-        assert!(db.route_update("missing", sample_route_input()).is_err());
-        assert!(db.route_delete("missing").is_err());
     }
 
     #[test]

@@ -8,8 +8,6 @@ import ClaudeControlPanel from "../components/claude/ClaudeControlPanel.vue";
 import ClaudeSettingsJsonPanel from "../components/claude/claude-settings-json-panel.vue";
 import CodexAppControlPanel from "../components/codex/CodexAppControlPanel.vue";
 import CodexClientSlotsPanel from "../components/codex/codex-client-slots-panel.vue";
-import CodexTomlSettingsPanel from "../components/codex/codex-toml-settings-panel.vue";
-import RouteEditorPanel from "../components/route-editor-panel.vue";
 import VpIcon from "../components/vp-icon.vue";
 import { useBrandLogo, type BrandLogoId } from "../composables/use-brand-logo.ts";
 import { useProxyStatus } from "../composables/useProxy.ts";
@@ -293,9 +291,6 @@ onBeforeUnmount(() => {
           <div id="codex-app-control">
             <CodexAppControlPanel />
           </div>
-          <div id="codex-config-toml" class="scroll-mt-20">
-            <CodexTomlSettingsPanel />
-          </div>
           <div id="codex-bs-es" class="scroll-mt-20">
             <CodexClientSlotsPanel
               v-model="draft.codex.summary"
@@ -474,8 +469,6 @@ onBeforeUnmount(() => {
             </label>
           </div>
         </section>
-
-        <RouteEditorPanel v-if="view === 'overview'" id="routes" />
 
         <section id="cli" class="card-base p-4 sm:p-5 scroll-mt-20">
           <div class="mb-3 sm:mb-4 flex items-center gap-2">

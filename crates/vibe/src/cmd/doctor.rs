@@ -54,16 +54,6 @@ pub async fn run() -> Result<()> {
         println!("db not created yet (start vibe first)");
     }
 
-    // 4. config
-    let cfg_path = paths::config_path()?;
-    if cfg_path.exists() {
-        print!("[ok]  ");
-        println!("config at {}", cfg_path.display());
-    } else {
-        print!("[--]  ");
-        println!("no config (defaults will be used)");
-    }
-
     println!();
     if running {
         println!("Providers: open the dashboard with `vibe ui` to view/edit configured providers.");

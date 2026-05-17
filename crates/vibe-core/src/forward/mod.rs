@@ -24,9 +24,8 @@ pub mod race;
 pub mod selector;
 
 use crate::cache;
-use crate::claude_control::ClaudeRouteScenario;
 use crate::claude_summary::ClaudeClientKind;
-use crate::codex_summary::{self, CodexClientKind};
+use crate::codex_summary::CodexClientKind;
 use crate::codex_visual::{self, CodexVisualContext};
 use crate::providers::{self, Adapter, Wire};
 use crate::state::{AppState, CodexStickyRoute};
@@ -41,6 +40,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -54,7 +54,7 @@ use vibe_protocol::{
 pub use selector::{CredOAuth, ExpandedPick};
 
 /// Emit a `WsEvent::AppLog` for a circuit-breaker state change.
-fn emit_circuit_event(
+pub(crate) fn emit_circuit_event(
     state: &AppState,
     cb_key: &str,
     change: crate::circuit_breaker::CircuitStateChange,
@@ -216,6 +216,20 @@ fn format_cb_skipped_provider_preview(
         .join(", ")
 }
 
+pub(crate) fn format_routing_attempt(
+    provider: &vibe_protocol::Provider,
+    credential: Option<&Credential>,
+    cred_id: &Option<String>,
+    outcome: impl std::fmt::Display,
+) -> String {
+    format!(
+        "{} · {} · {}",
+        routing_provider_line(provider),
+        routing_credential_line(credential, cred_id),
+        outcome
+    )
+}
+
 fn push_routing_attempt(
     trace: &mut Vec<String>,
     provider: &vibe_protocol::Provider,
@@ -223,12 +237,7 @@ fn push_routing_attempt(
     cred_id: &Option<String>,
     outcome: impl std::fmt::Display,
 ) {
-    trace.push(format!(
-        "{} · {} · {}",
-        routing_provider_line(provider),
-        routing_credential_line(credential, cred_id),
-        outcome
-    ));
+    trace.push(format_routing_attempt(provider, credential, cred_id, outcome));
 }
 
 pub(crate) fn compose_routing_error_message(summary: &str, trace: &[String]) -> String {
@@ -239,7 +248,7 @@ pub(crate) fn compose_routing_error_message(summary: &str, trace: &[String]) -> 
     }
 }
 
-fn needs_chat_to_responses_bridge(wire: Wire, provider_kind: ProviderKind) -> bool {
+pub(crate) fn needs_chat_to_responses_bridge(wire: Wire, provider_kind: ProviderKind) -> bool {
     wire == Wire::OpenaiResponses && provider_kind == ProviderKind::OpenaiChat
 }
 
@@ -652,7 +661,7 @@ pub(crate) async fn prepare_forward_once(
     route_prefix: Option<String>,
     preserve_ws_envelope: bool,
 ) -> Result<PreparedForward, PreparedForwardError> {
-    let mut body = if wire == Wire::OpenaiResponses && !preserve_ws_envelope {
+    let body = if wire == Wire::OpenaiResponses && !preserve_ws_envelope {
         let stripped = transforms::strip_ws_envelope(&body);
         if route_prefix.as_deref() == Some("codex-v1") {
             transforms::strip_vibe_codex_status_messages(&stripped)
@@ -680,22 +689,6 @@ pub(crate) async fn prepare_forward_once(
     let claude_client_kind =
         crate::claude_summary::detect_client(req_headers, route_prefix.as_deref());
     let requested_model = request_model_for_body(wire, upstream_path, &body);
-    let mut claude_selection_model = requested_model.clone();
-    let mut claude_route_model: Option<String> = None;
-    let mut claude_scenario = ClaudeRouteScenario::Default;
-    if wire == Wire::Anthropic {
-        let claude_cfg = state.claude_config();
-        let prepared = crate::claude_control::prepare_request(
-            body,
-            requested_model.clone(),
-            &claude_cfg.routing,
-            &claude_cfg.request,
-        );
-        body = prepared.body;
-        claude_selection_model = prepared.requested_model;
-        claude_route_model = prepared.route_model;
-        claude_scenario = prepared.scenario;
-    }
 
     let request_snapshot = lossy_optional_body(&body);
 
@@ -703,7 +696,6 @@ pub(crate) async fn prepare_forward_once(
         .db
         .provider_list()
         .map_err(|e| PreparedForwardError::Db(format!("db error: {e}")))?;
-    let routes = state.db.route_list().unwrap_or_default();
 
     let creds_by_provider: HashMap<String, Vec<Credential>> = {
         let creds = state.db.credential_list_all().unwrap_or_default();
@@ -717,32 +709,7 @@ pub(crate) async fn prepare_forward_once(
     };
 
     let counter = state.lb_counter.fetch_add(1, Ordering::Relaxed);
-    let (matched_route, routed_candidates) = if wire == Wire::Anthropic {
-        let claude_cfg = state.claude_config();
-        crate::claude_control::candidates_for_request(
-            &providers_list,
-            &routes,
-            wire,
-            &claude_selection_model,
-            claude_route_model.as_deref(),
-            claude_scenario,
-            &claude_cfg.fallback,
-        )
-    } else {
-        router::candidates_with_routes(&providers_list, &routes, wire, &requested_model)
-    };
-    // Phase 3a: see the matching block in `forward()`. Race execution lands in 3b.
-    if let Some(route) = matched_route.as_ref() {
-        if route.strategy == vibe_protocol::ForwardStrategy::Race {
-            tracing::info!(
-                route_id = %route.id,
-                route_name = %route.name,
-                fanout_n = route.fanout_n,
-                "race strategy requested — falling back to sequential; race harness is scaffolded in forward::race but try_one_pick is pending Phase 3c"
-            );
-        }
-    }
-    let _ = matched_route;
+    let routed_candidates = router::candidates(&providers_list, wire, &requested_model);
     let candidates = selector::shuffle_candidates(routed_candidates, &state.cb);
     let empty_log_ctx = LogCtx {
         wire,
@@ -1037,7 +1004,7 @@ fn dedupe_key_from_headers(headers: &HeaderMap, route_prefix: Option<&str>) -> O
     Some(format!("{}|{}", route_prefix.unwrap_or(""), rid))
 }
 
-fn sanitized_headers_json(headers: &HeaderMap, redact_sensitive: bool) -> Option<String> {
+pub(crate) fn sanitized_headers_json(headers: &HeaderMap, redact_sensitive: bool) -> Option<String> {
     if headers.is_empty() {
         return None;
     }
@@ -1071,7 +1038,7 @@ fn is_sensitive_header(name: &str) -> bool {
         || name.contains("secret")
 }
 
-fn maybe_record_codex_plan(
+pub(crate) fn maybe_record_codex_plan(
     state: &AppState,
     headers: &http::HeaderMap,
     provider: &vibe_protocol::Provider,
@@ -1115,7 +1082,7 @@ fn maybe_record_codex_plan(
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct RlHeaders {
+pub(crate) struct RlHeaders {
     requests_limit: Option<i64>,
     requests_remaining: Option<i64>,
     requests_reset_at: Option<i64>,
@@ -1133,7 +1100,7 @@ impl RlHeaders {
     }
 }
 
-fn extract_rl_headers(headers: &reqwest::header::HeaderMap) -> RlHeaders {
+pub(crate) fn extract_rl_headers(headers: &reqwest::header::HeaderMap) -> RlHeaders {
     fn hi(h: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
         h.get(name)?.to_str().ok()?.parse().ok()
     }
@@ -1240,7 +1207,7 @@ fn parse_duration_secs(s: &str) -> Option<i64> {
     None
 }
 
-fn fire_credential_success(state: &AppState, credential_id: String, rl: RlHeaders) {
+pub(crate) fn fire_credential_success(state: &AppState, credential_id: String, rl: RlHeaders) {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let _ = db.credential_record_success(&credential_id);
@@ -1258,7 +1225,7 @@ fn fire_credential_success(state: &AppState, credential_id: String, rl: RlHeader
     });
 }
 
-fn fire_credential_failure(state: &AppState, credential_id: String, error: Option<String>) {
+pub(crate) fn fire_credential_failure(state: &AppState, credential_id: String, error: Option<String>) {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let _ = db.credential_record_failure(&credential_id, error.as_deref());
@@ -1270,7 +1237,7 @@ fn fire_credential_failure(state: &AppState, credential_id: String, error: Optio
 /// When the upstream sends 429 but no standard rate-limit headers (common for non-OpenAI
 /// providers), we apply a 60-second default cooldown so the credential is skipped on
 /// the next request instead of being retried immediately.
-fn fire_credential_rate_limit_only(state: &AppState, credential_id: String, rl: RlHeaders) {
+pub(crate) fn fire_credential_rate_limit_only(state: &AppState, credential_id: String, rl: RlHeaders) {
     let (req_remaining, req_reset_at) = if rl.requests_remaining.is_some() {
         (rl.requests_remaining, rl.requests_reset_at)
     } else {
@@ -1342,23 +1309,6 @@ pub async fn forward(
     } else {
         extract_model(&body).unwrap_or_default()
     };
-    let mut body = body;
-    let mut claude_selection_model = requested_model.clone();
-    let mut claude_route_model: Option<String> = None;
-    let mut claude_scenario = ClaudeRouteScenario::Default;
-    if wire == Wire::Anthropic {
-        let claude_cfg = state.claude_config();
-        let prepared = crate::claude_control::prepare_request(
-            body,
-            requested_model.clone(),
-            &claude_cfg.routing,
-            &claude_cfg.request,
-        );
-        body = prepared.body;
-        claude_selection_model = prepared.requested_model;
-        claude_route_model = prepared.route_model;
-        claude_scenario = prepared.scenario;
-    }
 
     let request_snapshot = lossy_optional_body(&body);
 
@@ -1366,7 +1316,6 @@ pub async fn forward(
         Ok(v) => v,
         Err(e) => return internal_error(format!("db error: {e}")),
     };
-    let routes = state.db.route_list().unwrap_or_default();
 
     // Load credentials grouped by provider_id for key-pool rotation.
     let creds_by_provider: HashMap<String, Vec<Credential>> = {
@@ -1381,33 +1330,7 @@ pub async fn forward(
     };
 
     let counter = state.lb_counter.fetch_add(1, Ordering::Relaxed);
-    let (matched_route, routed_candidates) = if wire == Wire::Anthropic {
-        let claude_cfg = state.claude_config();
-        crate::claude_control::candidates_for_request(
-            &providers_list,
-            &routes,
-            wire,
-            &claude_selection_model,
-            claude_route_model.as_deref(),
-            claude_scenario,
-            &claude_cfg.fallback,
-        )
-    } else {
-        router::candidates_with_routes(&providers_list, &routes, wire, &requested_model)
-    };
-    // Phase 3a: read route-level forwarding strategy. The harness in 3b will
-    // dispatch fanout-race here; for now we log and fall through to sequential.
-    if let Some(route) = matched_route.as_ref() {
-        if route.strategy == vibe_protocol::ForwardStrategy::Race {
-            tracing::info!(
-                route_id = %route.id,
-                route_name = %route.name,
-                fanout_n = route.fanout_n,
-                "race strategy requested — falling back to sequential; race harness is scaffolded in forward::race but try_one_pick is pending Phase 3c"
-            );
-        }
-    }
-    let _ = matched_route;
+    let routed_candidates = router::candidates(&providers_list, wire, &requested_model);
     let candidates = selector::shuffle_candidates(routed_candidates, &state.cb);
     if candidates.is_empty() {
         let log_ctx = LogCtx {
@@ -1529,728 +1452,59 @@ pub async fn forward(
     let mut attempted_after_cb: usize = 0;
     let mut attempt_index: i32 = 0;
 
-    for mut epick in expanded_picks {
-        let provider = epick.provider;
-        let upstream_model = epick.upstream_model;
-        let cb_key = epick.cb_key.clone();
-        let log_ctx = LogCtx {
-            wire,
-            route_prefix: route_prefix.clone(),
-            credential_id: epick.credential_id.clone(),
-            cb_key: Some(cb_key.clone()),
-            dedupe_key: dedupe_key.clone(),
-            client_transport: client_transport.clone(),
-            request_headers: request_headers.clone(),
-            codex_client_kind,
-            claude_client_kind,
-        };
-        attempt_index += 1;
-        let attempt = new_attempt_ctx(
-            &log_id,
-            attempt_index,
-            chrono::Utc::now().timestamp(),
-            Some(&provider.id),
-            epick.credential_id.as_deref(),
-            &requested_model,
-            &upstream_model,
-        );
+    let pick_ctx = Arc::new(race::PickCtx {
+        wire,
+        route_prefix: route_prefix.clone(),
+        log_id: log_id.clone(),
+        started_at,
+        started_instant,
+        app: app.clone(),
+        requested_model: requested_model.clone(),
+        upstream_path: upstream_path.clone(),
+        dedupe_key: dedupe_key.clone(),
+        client_transport: client_transport.clone(),
+        request_headers_json: request_headers.clone(),
+        codex_client_kind,
+        claude_client_kind,
+        body: body.clone(),
+        req_headers: req_headers.clone(),
+        request_snapshot: request_snapshot.clone(),
+        sticky_key: sticky_key.clone(),
+        plan_by_cred: Arc::new(plan_by_cred),
+    });
 
-        // ── circuit breaker ──────────────────────────────────────────────
-        if !state.cb.allow(&cb_key) {
-            tracing::debug!(cb_key = %cb_key, "circuit open, skipping");
-            let attempt_log = attempt_log_from_parts(
-                &log_ctx,
-                &attempt,
-                UpstreamAttemptPhase::Abandoned,
-                UpstreamAttemptOutcome::CircuitSkip,
-                &started_instant,
-                None,
-                None,
-                Some("circuit open".into()),
-                Usage::default(),
-            );
-            persist_upstream_attempt_log(&state, attempt_log);
-            push_routing_attempt(
-                &mut routing_attempt_trace,
-                &provider,
-                epick.credential.as_ref(),
-                &epick.credential_id,
-                "skipped (circuit open)",
-            );
-            cb_skipped_total += 1;
-            if !cb_skipped_provider_ids
-                .iter()
-                .any(|pid| pid == &provider.id)
-            {
-                cb_skipped_provider_ids.push(provider.id.clone());
-            }
-            continue;
-        }
-        attempted_after_cb += 1;
-        publish_upstream_attempt_started(
-            &state,
-            &log_ctx,
-            &attempt,
-            UpstreamAttemptPhase::Connecting,
-        );
-
-        // ── auth ─────────────────────────────────────────────────────────
-        let secret = if let Some(oauth) = epick.oauth.take() {
-            // OAuth credential: tokens stored in SQLite, auto-refresh if near-expiry.
-            match resolve_oauth_token(&state, epick.credential_id.as_deref(), oauth).await {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    if let Some(change) = state.cb.record_failure(&cb_key) {
-                        emit_circuit_event(&state, &cb_key, change);
-                    }
-                    if let Some(cid) = &epick.credential_id {
-                        fire_credential_failure(
-                            &state,
-                            cid.clone(),
-                            Some(format!("oauth refresh failed: {e}")),
-                        );
-                    }
-                    fire_health(
-                        &state,
-                        &provider.id,
-                        false,
-                        started_instant.elapsed().as_millis() as i64,
-                        Some("oauth refresh failed".into()),
-                    );
-                    push_routing_attempt(
-                        &mut routing_attempt_trace,
-                        &provider,
-                        epick.credential.as_ref(),
-                        &epick.credential_id,
-                        format!("oauth refresh failed: {e}"),
-                    );
-                    let attempt_log = attempt_log_from_parts(
-                        &log_ctx,
-                        &attempt,
-                        UpstreamAttemptPhase::Failed,
-                        UpstreamAttemptOutcome::TransportError,
-                        &started_instant,
-                        None,
-                        None,
-                        Some(format!("oauth refresh failed: {e}")),
-                        Usage::default(),
-                    );
-                    persist_upstream_attempt_log(&state, attempt_log);
-                    last_error = format!("oauth error for {}: {e}", provider.id);
-                    continue;
+    // Health-bucketed wave dispatch: 病患 (CB Open) 4-wide concurrent →
+    // 半健康 (HalfOpen) 2-wide → 健康 (Closed) 1-at-a-time. Within each wave
+    // racers run concurrently and the first terminal response wins, with
+    // `CancellationToken` aborting losers. Between waves we serialize, so a
+    // single healthy upstream is never wasted in parallel with itself.
+    let waves = selector::build_waves(expanded_picks, &state.cb);
+    for wave in waves {
+        let n = wave.len() as i32;
+        match race::run_wave(state.clone(), wave, pick_ctx.clone(), attempt_index).await {
+            race::WaveOutcome::Final(resp) => return resp,
+            race::WaveOutcome::AllNonTerminal {
+                last_error: err,
+                routing_notes,
+                cb_skip_provider_ids,
+                retry_count,
+            } => {
+                if let Some(e) = err {
+                    last_error = e;
                 }
-            }
-        } else {
-            // auth_ref scheme or passthrough.
-            match epick.auth_ref.as_deref() {
-                Some("passthrough") => {
-                    if let Some(key) = req_headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-                        Some(key.to_string())
-                    } else if let Some(auth) = req_headers
-                        .get("authorization")
-                        .and_then(|v| v.to_str().ok())
-                    {
-                        Some(auth.strip_prefix("Bearer ").unwrap_or(auth).to_string())
-                    } else {
-                        None
-                    }
-                }
-                Some(r) => match secrets::resolve(r) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        if let Some(change) = state.cb.record_failure(&cb_key) {
-                            emit_circuit_event(&state, &cb_key, change);
-                        }
-                        if let Some(cid) = &epick.credential_id {
-                            fire_credential_failure(
-                                &state,
-                                cid.clone(),
-                                Some(format!("auth resolve failed: {e}")),
-                            );
-                        }
-                        fire_health(
-                            &state,
-                            &provider.id,
-                            false,
-                            started_instant.elapsed().as_millis() as i64,
-                            Some("auth resolve failed".into()),
-                        );
-                        push_routing_attempt(
-                            &mut routing_attempt_trace,
-                            &provider,
-                            epick.credential.as_ref(),
-                            &epick.credential_id,
-                            format!("auth resolve failed: {e}"),
-                        );
-                        let attempt_log = attempt_log_from_parts(
-                            &log_ctx,
-                            &attempt,
-                            UpstreamAttemptPhase::Failed,
-                            UpstreamAttemptOutcome::TransportError,
-                            &started_instant,
-                            None,
-                            None,
-                            Some(format!("auth resolve failed: {e}")),
-                            Usage::default(),
-                        );
-                        persist_upstream_attempt_log(&state, attempt_log);
-                        last_error = format!("auth error for {}: {e}", provider.id);
-                        continue;
-                    }
-                },
-                None => None,
-            }
-        };
-
-        // ── cache injection (Anthropic only) ─────────────────────────────
-        let effective_body: Bytes =
-            if provider.kind == ProviderKind::Anthropic && state.config.failover.inject_cache {
-                cache::inject(&body)
-            } else {
-                body.clone()
-            };
-
-        let effective_body =
-            inject_chatgpt_codex_instructions_if_missing(&provider, wire, effective_body);
-
-        // ── model rewrite + adapter ───────────────────────────────────────
-        let adapter = providers::select(&provider);
-        let body_up = match adapter.rewrite_body_model(&effective_body, &upstream_model) {
-            Ok(b) => b,
-            Err(e) => {
-                push_routing_attempt(
-                    &mut routing_attempt_trace,
-                    &provider,
-                    epick.credential.as_ref(),
-                    &epick.credential_id,
-                    format!("body rewrite: {e}"),
-                );
-                let attempt_log = attempt_log_from_parts(
-                    &log_ctx,
-                    &attempt,
-                    UpstreamAttemptPhase::Failed,
-                    UpstreamAttemptOutcome::ClientError,
-                    &started_instant,
-                    None,
-                    None,
-                    Some(format!("body rewrite: {e}")),
-                    Usage::default(),
-                );
-                persist_upstream_attempt_log(&state, attempt_log);
-                last_error = format!("body rewrite: {e}");
-                continue;
-            }
-        };
-
-        // ── build request ─────────────────────────────────────────────────
-        let req = match adapter.build(
-            &provider,
-            secret.as_deref(),
-            &state.http,
-            wire,
-            &body_up,
-            upstream_path.as_deref(),
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                push_routing_attempt(
-                    &mut routing_attempt_trace,
-                    &provider,
-                    epick.credential.as_ref(),
-                    &epick.credential_id,
-                    format!("build upstream request: {e}"),
-                );
-                let attempt_log = attempt_log_from_parts(
-                    &log_ctx,
-                    &attempt,
-                    UpstreamAttemptPhase::Failed,
-                    UpstreamAttemptOutcome::ClientError,
-                    &started_instant,
-                    None,
-                    None,
-                    Some(format!("build upstream request: {e}")),
-                    Usage::default(),
-                );
-                persist_upstream_attempt_log(&state, attempt_log);
-                last_error = e.to_string();
-                continue;
-            }
-        };
-        let req = if wire == Wire::Anthropic {
-            let timeout_ms = state.claude_config().request.api_timeout_ms.max(1);
-            req.timeout(std::time::Duration::from_millis(timeout_ms))
-        } else {
-            req
-        };
-
-        // ── send ───────────────────────────────��──────────────────────────
-        let upstream = match req.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let msg = e.to_string();
-                tracing::warn!(provider_id = %provider.id, cb_key = %cb_key, error = %msg, "upstream connection error");
-                if let Some(change) = state.cb.record_failure(&cb_key) {
-                    emit_circuit_event(&state, &cb_key, change);
-                }
-                fire_health(
-                    &state,
-                    &provider.id,
-                    false,
-                    started_instant.elapsed().as_millis() as i64,
-                    Some(msg.clone()),
-                );
-                if let Some(cid) = &epick.credential_id {
-                    fire_credential_failure(&state, cid.clone(), Some(msg.clone()));
-                }
-                push_routing_attempt(
-                    &mut routing_attempt_trace,
-                    &provider,
-                    epick.credential.as_ref(),
-                    &epick.credential_id,
-                    format!("connection error: {msg}"),
-                );
-                let attempt_log = attempt_log_from_parts(
-                    &log_ctx,
-                    &attempt,
-                    UpstreamAttemptPhase::Failed,
-                    UpstreamAttemptOutcome::TransportError,
-                    &started_instant,
-                    Some(502),
-                    None,
-                    Some(msg.clone()),
-                    Usage::default(),
-                );
-                persist_upstream_attempt_log(&state, attempt_log);
-                last_error = format!("connection to {}: {msg}", provider.id);
-                continue;
-            }
-        };
-
-        let status = upstream.status();
-
-        // ── retryable errors ──────────────────────────────────────────────
-        // 429: quota / rate-limit → rotate credential; do **not** trip circuit breaker.
-        // 5xx / 401 / 402: record failure and try next pick.
-        // OpenAI Responses 404: often means this upstream does not serve /v1/responses
-        // or this model on that route, so release sticky routing and try another pick.
-        if let Some(retry_outcome) = outcome::classify_retryable(status, wire) {
-            let headers = upstream.headers().clone();
-            let retryable_resp_headers_snapshot = sanitized_headers_json(
-                &copy_response_headers(&headers),
-                state.config.log.redact_sensitive_headers,
-            );
-            let body_bytes = upstream.bytes().await.unwrap_or_default();
-            let msg = format!("upstream {} from {}", status, provider.id);
-            forget_codex_sticky_route_if_present(&state, sticky_key.as_deref());
-
-            if retry_outcome == outcome::RetryOutcome::RateLimit {
-                tracing::warn!(
-                    %msg,
-                    bytes = body_bytes.len(),
-                    "upstream 429; rotating credential without circuit breaker trip"
-                );
-                maybe_record_codex_plan(
-                    &state,
-                    &headers,
-                    &provider,
-                    epick.credential_id.as_deref(),
-                );
-                let rl = extract_rl_headers(&headers);
-                if let Some(cid) = &epick.credential_id {
-                    fire_credential_rate_limit_only(&state, cid.clone(), rl);
-                }
-                fire_health(
-                    &state,
-                    &provider.id,
-                    false,
-                    started_instant.elapsed().as_millis() as i64,
-                    Some(format!("HTTP {status}")),
-                );
-                push_routing_attempt(
-                    &mut routing_attempt_trace,
-                    &provider,
-                    epick.credential.as_ref(),
-                    &epick.credential_id,
-                    format!("HTTP {status} (rate limit / quota)"),
-                );
-                let mut attempt_log = attempt_log_from_parts(
-                    &log_ctx,
-                    &attempt,
-                    UpstreamAttemptPhase::Failed,
-                    UpstreamAttemptOutcome::RateLimit,
-                    &started_instant,
-                    Some(status.as_u16() as i32),
-                    Some(status.as_u16() as i32),
-                    Some(msg.clone()),
-                    Usage::default(),
-                );
-                attempt_log.response_headers = retryable_resp_headers_snapshot.clone();
-                attempt_log.request_body = request_snapshot.clone();
-                attempt_log.response_body = lossy_optional_body(&body_bytes);
-                persist_upstream_attempt_log(&state, attempt_log);
-                last_error = msg;
-                continue;
-            }
-
-            tracing::warn!(
-                %msg,
-                error_body_bytes = body_bytes.len(),
-                "retryable upstream error, trying next provider"
-            );
-            // 401 only: force-open CB for a cooldown period (auto-recovers after timeout).
-            // 5xx / 402 / 404: skip to next provider WITHOUT touching the circuit breaker —
-            // upstream errors are transient and should not mark credentials as unavailable.
-            if retry_outcome == outcome::RetryOutcome::AuthError {
-                let change = state.cb.force_open(&cb_key);
-                emit_circuit_event(&state, &cb_key, change);
-            }
-            fire_health(
-                &state,
-                &provider.id,
-                false,
-                started_instant.elapsed().as_millis() as i64,
-                Some(format!("HTTP {status}")),
-            );
-            if let Some(cid) = &epick.credential_id {
-                fire_credential_failure(&state, cid.clone(), Some(format!("HTTP {status}")));
-            }
-            push_routing_attempt(
-                &mut routing_attempt_trace,
-                &provider,
-                epick.credential.as_ref(),
-                &epick.credential_id,
-                format!("HTTP {status} (retryable upstream)"),
-            );
-            let mut attempt_log = attempt_log_from_parts(
-                &log_ctx,
-                &attempt,
-                UpstreamAttemptPhase::Failed,
-                UpstreamAttemptOutcome::RetryableError,
-                &started_instant,
-                Some(status.as_u16() as i32),
-                Some(status.as_u16() as i32),
-                Some(msg.clone()),
-                Usage::default(),
-            );
-            attempt_log.response_headers = retryable_resp_headers_snapshot;
-            attempt_log.request_body = request_snapshot.clone();
-            attempt_log.response_body = lossy_optional_body(&body_bytes);
-            persist_upstream_attempt_log(&state, attempt_log);
-            last_error = msg;
-            continue;
-        }
-
-        // ── non-retryable client error (400/403 etc.) ────────────────────
-        // These indicate a malformed request or forbidden resource — not a
-        // provider-specific issue, so retrying another provider won't help.
-        // Do **not** trip the circuit breaker: bursts of 400 (e.g. bad bodies from one client)
-        // would otherwise open the breaker and cause unrelated requests to see 503 when every
-        // pick is CB-skipped.
-        if status.is_client_error() {
-            fire_health(
-                &state,
-                &provider.id,
-                false,
-                started_instant.elapsed().as_millis() as i64,
-                Some(format!("client error {status}")),
-            );
-            if let Some(cid) = &epick.credential_id {
-                fire_credential_failure(&state, cid.clone(), Some(format!("HTTP {status}")));
-            }
-            let resp_headers = copy_response_headers(upstream.headers());
-            let resp_headers_snapshot = sanitized_headers_json(
-                upstream.headers(),
-                state.config.log.redact_sensitive_headers,
-            );
-            let buf = upstream.bytes().await.unwrap_or_default();
-            let err_stored = lossy_optional_body(&buf);
-            tracing::warn!(
-                provider_id = %provider.id,
-                status = %status,
-                body_bytes = buf.len(),
-                "non-retryable upstream error (4xx); full body stored in request_logs.response_body"
-            );
-            let sc = status.as_u16() as i32;
-            let mut attempt_log = attempt_log_from_parts(
-                &log_ctx,
-                &attempt,
-                UpstreamAttemptPhase::Failed,
-                UpstreamAttemptOutcome::ClientError,
-                &started_instant,
-                Some(sc),
-                Some(sc),
-                Some(format!("client error {status}")),
-                Usage::default(),
-            );
-            attempt_log.response_headers = resp_headers_snapshot;
-            attempt_log.request_body = request_snapshot.clone();
-            attempt_log.response_body = lossy_optional_body(&buf);
-            persist_upstream_attempt_log(&state, attempt_log);
-            let log = build_log(
-                &log_ctx,
-                &log_id,
-                started_at,
-                &started_instant,
-                &app,
-                Some(&provider.id),
-                &requested_model,
-                &upstream_model,
-                Some(sc),
-                Some(sc),
-                err_stored.clone(),
-                Some(format!("client error {status}")),
-                Usage::default(),
-                request_snapshot.clone(),
-                if state.config.log.bodies {
-                    lossy_optional_body(&buf)
-                } else {
-                    None
-                },
-            );
-            persist_log(&state, log);
-            return (status, resp_headers, buf).into_response();
-        }
-
-        // ── 2xx success ───────────────────────────────────────────────────
-        if let Some(change) = state.cb.record_success(&cb_key) {
-            emit_circuit_event(&state, &cb_key, change);
-        }
-        fire_health(
-            &state,
-            &provider.id,
-            true,
-            started_instant.elapsed().as_millis() as i64,
-            None,
-        );
-
-        // Extract rate-limit headers before consuming the response.
-        let rl = extract_rl_headers(upstream.headers());
-        if let Some(cid) = &epick.credential_id {
-            fire_credential_success(&state, cid.clone(), rl);
-        }
-
-        maybe_record_codex_plan(
-            &state,
-            upstream.headers(),
-            &provider,
-            epick.credential_id.as_deref(),
-        );
-
-        let resp_headers = copy_response_headers(upstream.headers());
-        let resp_headers_snapshot = sanitized_headers_json(
-            upstream.headers(),
-            state.config.log.redact_sensitive_headers,
-        );
-        let visual = codex_visual_context(
-            &provider,
-            epick.credential.as_ref(),
-            epick.credential_id.as_deref(),
-            &plan_by_cred,
-            &requested_model,
-            &upstream_model,
-        );
-
-        if body_wants_stream(&body) {
-            remember_codex_sticky_route_for_pick(
-                &state,
-                sticky_key.as_deref(),
-                &provider.id,
-                epick.credential_id.as_deref(),
-            );
-            return stream_response(
-                state,
-                adapter,
-                wire,
-                upstream,
-                status,
-                resp_headers,
-                resp_headers_snapshot,
-                log_id,
-                started_at,
-                started_instant,
-                app,
-                attempt,
-                provider.id.clone(),
-                requested_model,
-                upstream_model,
-                log_ctx,
-                request_snapshot,
-                visual,
-            );
-        }
-
-        let buf = match upstream.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                let mut attempt_log = attempt_log_from_parts(
-                    &log_ctx,
-                    &attempt,
-                    UpstreamAttemptPhase::Failed,
-                    UpstreamAttemptOutcome::TransportError,
-                    &started_instant,
-                    Some(502),
-                    Some(502),
-                    Some(format!("read upstream: {e}")),
-                    Usage::default(),
-                );
-                attempt_log.response_headers = resp_headers_snapshot.clone();
-                attempt_log.request_body = request_snapshot.clone();
-                persist_upstream_attempt_log(&state, attempt_log);
-                let log = build_log(
-                    &log_ctx,
-                    &log_id,
-                    started_at,
-                    &started_instant,
-                    &app,
-                    Some(&provider.id),
-                    &requested_model,
-                    &upstream_model,
-                    Some(502),
-                    Some(502),
-                    None,
-                    Some(format!("read upstream: {e}")),
-                    Usage::default(),
-                    request_snapshot.clone(),
-                    None,
-                );
-                persist_log(&state, log);
-                return (StatusCode::BAD_GATEWAY, format!("read upstream: {e}")).into_response();
-            }
-        };
-
-        let usage = adapter.parse_usage_body(wire, &buf);
-        let sc = status.as_u16() as i32;
-        let mut attempt_log = attempt_log_from_parts(
-            &log_ctx,
-            &attempt,
-            UpstreamAttemptPhase::Completed,
-            UpstreamAttemptOutcome::Success,
-            &started_instant,
-            Some(sc),
-            Some(sc),
-            None,
-            usage,
-        );
-        attempt_log.response_headers = resp_headers_snapshot;
-        attempt_log.request_body = request_snapshot.clone();
-        attempt_log.response_body = lossy_optional_body(&buf);
-        let do_c2r = needs_chat_to_responses_bridge(wire, provider.kind);
-        if do_c2r {
-            attempt_log.bridge_mode = Some("c2r".into());
-        }
-        persist_upstream_attempt_log(&state, attempt_log);
-        let mut client_body = buf.clone();
-        if wire == Wire::Anthropic {
-            let metrics = crate::codex_summary::SummaryMetrics::from_usage(
-                usage,
-                Some(started_instant.elapsed().as_millis() as i64),
-                None,
-            );
-            if let Some(with_summary) = crate::claude_summary::append_summary_to_message_body(
-                &client_body,
-                &state.claude_summary_config(),
-                log_ctx.claude_client_kind,
-                metrics,
-            ) {
-                client_body = Bytes::from(with_summary);
-            }
-        }
-        let mut log = build_log(
-            &log_ctx,
-            &log_id,
-            started_at,
-            &started_instant,
-            &app,
-            Some(&provider.id),
-            &requested_model,
-            &upstream_model,
-            Some(sc),
-            Some(sc),
-            None,
-            None,
-            usage,
-            request_snapshot.clone(),
-            lossy_optional_body(&buf),
-        );
-        let client_body = if do_c2r {
-            let session_id = format!("resp-{}", uuid::Uuid::new_v4().simple());
-            let item_id = format!("msg-{}", uuid::Uuid::new_v4().simple());
-            let converted = transforms::chat_body_to_responses(&client_body, &session_id, &item_id);
-            log.client_response_body = lossy_optional_body(&converted);
-            converted
-        } else {
-            if client_body != buf {
-                log.client_response_body = lossy_optional_body(&client_body);
-            }
-            client_body
-        };
-        let client_body = if route_prefix.as_deref() == Some("codex-v1")
-            && wire == Wire::OpenaiResponses
-            && state.codex_summary_config().enabled
-        {
-            let mut response_value = serde_json::from_slice::<serde_json::Value>(&client_body).ok();
-            if let Some(response) = response_value.as_mut() {
-                let mut summary_injection = codex_summary::SummaryAccumulator::new_for_turn(
-                    state.codex_summary_config(),
-                    log_ctx.codex_client_kind,
-                    Some(state.clone()),
-                    codex_summary::turn_id_from_request(&body),
-                    codex_summary::thread_id_from_request(&body),
-                    upstream_model.clone(),
-                );
-                let completed = serde_json::json!({
-                    "type": "response.completed",
-                    "response": response.clone(),
-                })
-                .to_string();
-                if let Some(appended) = summary_injection
-                    .maybe_append_to_frame(&completed, started_instant.elapsed().as_millis() as i64)
-                {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&appended) {
-                        if let Some(r) = v.get("response") {
-                            *response = r.clone();
-                        }
+                routing_attempt_trace.extend(routing_notes);
+                attempted_after_cb += retry_count;
+                for pid in cb_skip_provider_ids {
+                    cb_skipped_total += 1;
+                    if !cb_skipped_provider_ids.iter().any(|p| p == &pid) {
+                        cb_skipped_provider_ids.push(pid);
                     }
                 }
             }
-            response_value
-                .and_then(|v| serde_json::to_vec(&v).ok())
-                .map(Bytes::from)
-                .unwrap_or(client_body)
-        } else {
-            client_body
-        };
-        let client_body = if route_prefix.as_deref() == Some("codex-v1")
-            && wire == Wire::OpenaiResponses
-            && transforms::responses_input_ends_with_user_message(&body)
-            && state.codex_route_status_enabled()
-        {
-            let status = codex_visual::status_message_text(
-                &visual,
-                started_instant.elapsed().as_millis() as i64,
-            );
-            let item_id = format!("vibe_route_{}", uuid::Uuid::new_v4().simple());
-            let with_status = transforms::prepend_response_message(&client_body, &item_id, &status);
-            log.client_response_body = lossy_optional_body(&with_status);
-            with_status
-        } else {
-            log.client_response_body = lossy_optional_body(&client_body);
-            client_body
-        };
-        remember_codex_sticky_route_for_pick(
-            &state,
-            sticky_key.as_deref(),
-            &provider.id,
-            epick.credential_id.as_deref(),
-        );
-        persist_log(&state, log);
-        let mut response = (status, resp_headers, client_body).into_response();
-        response.extensions_mut().insert(VibeCodexVisual(visual));
-        response
-            .extensions_mut()
-            .insert(VibeCodexClientKind(log_ctx.codex_client_kind));
-        return response;
+        }
+        attempt_index += n;
     }
+
 
     // All candidates exhausted
     let log_ctx = LogCtx {
@@ -2307,7 +1561,7 @@ pub async fn forward(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-fn stream_response(
+pub(crate) fn stream_response(
     state: AppState,
     adapter: Box<dyn Adapter + Send + Sync>,
     wire: Wire,
@@ -2587,7 +1841,7 @@ fn stream_response(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn codex_visual_context(
+pub(crate) fn codex_visual_context(
     provider: &vibe_protocol::Provider,
     credential: Option<&Credential>,
     credential_id: Option<&str>,
@@ -2610,7 +1864,7 @@ fn codex_visual_context(
     }
 }
 
-fn body_wants_stream(body: &[u8]) -> bool {
+pub(crate) fn body_wants_stream(body: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("stream")?.as_bool())
@@ -2638,7 +1892,7 @@ pub(crate) fn codex_sticky_key(wire: Wire, headers: &HeaderMap, body: &[u8]) -> 
         .or_else(|| selector::sticky_key_from_body(body))
 }
 
-fn remember_codex_sticky_route_for_pick(
+pub(crate) fn remember_codex_sticky_route_for_pick(
     state: &AppState,
     sticky_key: Option<&str>,
     provider_id: &str,
@@ -2710,7 +1964,7 @@ fn detect_app(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-fn copy_response_headers(src: &reqwest::header::HeaderMap) -> HeaderMap {
+pub(crate) fn copy_response_headers(src: &reqwest::header::HeaderMap) -> HeaderMap {
     let mut dst = HeaderMap::new();
     for (k, v) in src {
         if is_hop_header(k.as_str()) {
@@ -2741,7 +1995,7 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
-fn lossy_optional_body(bytes: &[u8]) -> Option<String> {
+pub(crate) fn lossy_optional_body(bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }
@@ -2749,7 +2003,7 @@ fn lossy_optional_body(bytes: &[u8]) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_log(
+pub(crate) fn build_log(
     ctx: &LogCtx,
     id: &str,
     started_at: i64,
@@ -2827,7 +2081,7 @@ fn build_log(
     log
 }
 
-fn persist_log(state: &AppState, log: RequestLog) {
+pub(crate) fn persist_log(state: &AppState, log: RequestLog) {
     let db = state.db.clone();
     let ws = state.ws.clone();
     let stats_state = state.clone();
@@ -2864,7 +2118,7 @@ async fn finalize_stream_request_log(state: AppState, log: RequestLog) {
     crate::server::publish_dashboard_stats_soon(state);
 }
 
-fn fire_health(
+pub(crate) fn fire_health(
     state: &AppState,
     provider_id: &str,
     success: bool,

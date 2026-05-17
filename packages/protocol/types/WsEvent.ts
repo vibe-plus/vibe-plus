@@ -14,7 +14,6 @@ import type { ProvidersOverviewStreamStarted } from "./ProvidersOverviewStreamSt
 import type { RequestActivity } from "./RequestActivity.js";
 import type { RequestLog } from "./RequestLog.js";
 import type { RequestRuntimeStats } from "./RequestRuntimeStats.js";
-import type { Route } from "./Route.js";
 import type { Status } from "./Status.js";
 import type { UpstreamAttemptActivity } from "./UpstreamAttemptActivity.js";
 import type { UpstreamAttemptLog } from "./UpstreamAttemptLog.js";
@@ -38,6 +37,5 @@ export type WsEvent =
   | ({ type: "providers-overview-credentials-chunk" } & ProvidersOverviewCredentialsChunk)
   | ({ type: "providers-overview-codex-plans-chunk" } & ProvidersOverviewCodexPlansChunk)
   | ({ type: "providers-overview-stream-ended" } & ProvidersOverviewStreamEnded)
-  | { type: "routes-changed"; routes: Array<Route> }
   | ({ type: "client-status-changed" } & ClientStatus)
   | ({ type: "codex-app-status-changed" } & CodexAppStatus);

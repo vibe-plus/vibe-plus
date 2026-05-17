@@ -167,7 +167,9 @@ const CLAUDE_MODEL_OVERRIDES: &[&str] = &[
 /// - Remove any hardcoded model overrides from prior proxies (Mimo, etc.)
 ///   so Claude Code uses its built-in defaults, which route through us.
 fn patch_claude_settings(path: &PathBuf, base_url: &str) -> Result<()> {
-    let cfg = crate::config::Config::load_or_init(&paths::config_path()?)?;
+    // takeover defaults are no longer user-configurable; they live in the
+    // hard-coded `ClaudeNativeConfig::default()` block.
+    let cfg = crate::config::Config::default();
     let native = &cfg.claude.native;
     if !native.manage_settings_json {
         return Ok(());

@@ -34,3 +34,7 @@ source or use a future standalone installer for those platforms.
 ```sh
 vibe update
 ```
+
+## License
+
+PolyForm Noncommercial 1.0.0 — see [LICENSE](LICENSE).

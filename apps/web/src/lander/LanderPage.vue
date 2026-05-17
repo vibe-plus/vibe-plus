@@ -343,7 +343,7 @@ function copy(text: string) {
             class="hover:text-gray-400 transition-colors"
             >GitHub</a
           >
-          <span>MIT License</span>
+          <span>PolyForm Noncommercial 1.0.0</span>
         </div>
       </div>
     </footer>

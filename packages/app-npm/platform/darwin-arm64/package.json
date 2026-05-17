@@ -2,7 +2,7 @@
   "name": "@vibe-plus/app-darwin-arm64",
   "version": "0.0.2",
   "description": "vibe+ App binary for darwin-arm64",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "author": "cheezone",
   "files": [
     "bin/"

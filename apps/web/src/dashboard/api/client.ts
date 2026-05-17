@@ -31,10 +31,7 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export type ProviderKind = "anthropic" | "openai-chat" | "openai-responses" | "gemini-native";
-export type RouteTier = "high" | "low" | "default";
 export type ForwardStrategy = "rotate" | "race" | "fallback";
-export const ROUTE_FANOUT_N_MAX = 4;
-export const ROUTE_FANOUT_N_DEFAULT = 2;
 
 export interface ModelAlias {
   alias: string;
@@ -125,27 +122,6 @@ export interface ProvidersOverview {
   pools: ProviderAuthPoolSummary[];
   credentials: Record<string, Credential[]>;
   codex_plans: Record<string, ProviderCodexPlanItem[]>;
-}
-export interface Route {
-  id: string;
-  name: string;
-  match_model: string;
-  target_provider_id: string | null;
-  target_model: string | null;
-  tier: RouteTier;
-  priority: number;
-  strategy: ForwardStrategy;
-  fanout_n: number;
-}
-export interface RouteInput {
-  name: string;
-  match_model: string;
-  target_provider_id: string | null;
-  target_model: string | null;
-  tier: RouteTier;
-  priority: number;
-  strategy: ForwardStrategy;
-  fanout_n: number;
 }
 export interface RequestLog {
   id: string;
@@ -1043,20 +1019,6 @@ export const api = {
       }),
     groups: (id: string) => req<UpstreamGroupInfo[]>(`/_vp/credentials/${id}/groups`),
   },
-  routes: {
-    list: () => req<Route[]>("/_vp/routes"),
-    create: (input: RouteInput) =>
-      req<Route>("/_vp/routes", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
-    update: (id: string, input: RouteInput) =>
-      req<Route>(`/_vp/routes/${id}`, {
-        method: "PUT",
-        body: JSON.stringify(input),
-      }),
-    delete: (id: string) => req<void>(`/_vp/routes/${id}`, { method: "DELETE" }),
-  },
   logs: {
     list: (f: LogFilters = {}) => {
       const p = new URLSearchParams();
@@ -1115,29 +1077,5 @@ export const api = {
     open: () => req<CodexAppActionResult>("/_vp/codex-app/open", { method: "POST" }),
     quit: () => req<CodexAppActionResult>("/_vp/codex-app/quit", { method: "POST" }),
     restart: () => req<CodexAppActionResult>("/_vp/codex-app/restart", { method: "POST" }),
-  },
-  codexFiles: {
-    list: (path = "") => req<CodexFileList>(`/_vp/codex-files?path=${encodeURIComponent(path)}`),
-    read: (path = "config.toml") =>
-      req<CodexFile>(`/_vp/codex-files/file?path=${encodeURIComponent(path)}`),
-    write: (path: string, rawText: string) =>
-      req<CodexFile>("/_vp/codex-files/file", {
-        method: "PUT",
-        body: JSON.stringify({ path, raw_text: rawText }),
-      }),
-    delete: (path: string) =>
-      req<void>(`/_vp/codex-files/file?path=${encodeURIComponent(path)}`, {
-        method: "DELETE",
-      }),
-    mkdir: (path: string) =>
-      req<CodexFileList>("/_vp/codex-files/dir", {
-        method: "POST",
-        body: JSON.stringify({ path }),
-      }),
-    move: (from: string, to: string, overwrite = false) =>
-      req<CodexFile>("/_vp/codex-files/move", {
-        method: "POST",
-        body: JSON.stringify({ from, to, overwrite }),
-      }),
   },
 };

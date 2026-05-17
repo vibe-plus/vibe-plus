@@ -9,7 +9,6 @@ use crate::forward;
 use crate::forward::{VibeCodexClientKind, VibeCodexVisual};
 use crate::local_import;
 use crate::providers::Wire;
-use crate::router;
 use crate::state::AppState;
 use crate::stream_trace::{empty_stream_fields, StreamTraceStats};
 use crate::transforms;
@@ -58,7 +57,6 @@ mod imports;
 mod models;
 mod providers;
 mod proxy;
-mod routes;
 
 use clients::*;
 use codex_http::*;
@@ -70,7 +68,6 @@ use imports::*;
 use models::*;
 use providers::*;
 use proxy::*;
-use routes::*;
 pub fn router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -85,7 +82,6 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/_vp/meta", get(get_meta))
-        .route("/_vp/config", get(get_config).put(put_config))
         // Generic model APIs (no tool prefix — for direct / legacy usage)
         .route("/v1/models", get(list_models_all))
         .route("/v1/messages", post(post_messages_plain))
@@ -152,9 +148,6 @@ pub fn router(state: AppState) -> Router {
             post(refresh_provider_models),
         )
         .route("/_vp/pools", get(provider_pool_list))
-        .route("/_vp/routes", get(list_routes).post(create_route))
-        .route("/_vp/routes/explain", get(explain_route))
-        .route("/_vp/routes/:id", put(update_route).delete(delete_route))
         .route(
             "/_vp/providers/:id/circuit/reset",
             post(provider_circuit_reset),
@@ -329,40 +322,6 @@ async fn status(State(state): State<AppState>) -> Result<Json<Status>, AppError>
     Ok(Json(compute_status(state).await?))
 }
 
-async fn get_config(
-    State(state): State<AppState>,
-) -> Result<Json<crate::config::Config>, AppError> {
-    let path = crate::paths::config_path()?;
-    let cfg =
-        tokio::task::spawn_blocking(move || crate::config::Config::load_or_init(&path)).await??;
-    state.set_codex_summary_config(cfg.codex.summary.clone());
-    state.set_codex_route_status_enabled(cfg.codex.route_status_enabled);
-    state.set_claude_config(cfg.claude.clone());
-    Ok(Json(cfg))
-}
-
-async fn put_config(
-    State(state): State<AppState>,
-    Json(input): Json<crate::config::Config>,
-) -> Result<Json<crate::config::Config>, AppError> {
-    let path = crate::paths::config_path()?;
-    let saved = tokio::task::spawn_blocking(move || -> anyhow::Result<crate::config::Config> {
-        input.save(&path)?;
-        crate::config::Config::load_or_init(&path)
-    })
-    .await??;
-    let current = (*state.config).clone();
-    if current.server.port != saved.server.port || current.server.host != saved.server.host {
-        tracing::warn!(
-            "config server address changed on disk; restart vibe for server host/port changes"
-        );
-    }
-    state.set_codex_summary_config(saved.codex.summary.clone());
-    state.set_codex_route_status_enabled(saved.codex.route_status_enabled);
-    state.set_claude_config(saved.claude.clone());
-    Ok(Json(saved))
-}
-
 #[cfg(test)]
 mod request_body_limit_tests {
     use super::*;
@@ -373,35 +332,25 @@ mod request_body_limit_tests {
     #[tokio::test]
     async fn codex_responses_allows_payloads_above_axum_default_body_limit() {
         let db = vibe_db::Db::memory().expect("db");
-        let provider = db
-            .provider_insert(ProviderInput {
-                name: "dummy responses".into(),
-                group_name: None,
-                avatar_url: None,
-                kind: ProviderKind::OpenaiResponses,
-                base_url: "http://127.0.0.1:9".into(),
-                protocols: vec![],
-                host: None,
-                auth_ref: None,
-                enabled: true,
-                priority: 100,
-                supports_websocket: None,
-                passthrough_mode: true,
-                model_aliases: vec![ModelAlias {
-                    alias: "gpt-test".into(),
-                    upstream_model: "gpt-test".into(),
-                }],
-            })
-            .expect("provider");
-        db.route_insert(vibe_protocol::RouteInput {
-            name: "default".into(),
-            match_model: "gpt-test".into(),
-            target_provider_id: Some(provider.id),
-            target_model: Some("gpt-test".into()),
-            tier: vibe_protocol::RouteTier::Default,
+        db.provider_insert(ProviderInput {
+            name: "dummy responses".into(),
+            group_name: None,
+            avatar_url: None,
+            kind: ProviderKind::OpenaiResponses,
+            base_url: "http://127.0.0.1:9".into(),
+            protocols: vec![],
+            host: None,
+            auth_ref: None,
+            enabled: true,
             priority: 100,
+            supports_websocket: None,
+            passthrough_mode: true,
+            model_aliases: vec![ModelAlias {
+                alias: "gpt-test".into(),
+                upstream_model: "gpt-test".into(),
+            }],
         })
-        .expect("route");
+        .expect("provider");
 
         let state = AppState::init(db, crate::config::Config::default(), 0).expect("state");
         let large_input = "x".repeat(2 * 1024 * 1024 + 64 * 1024);

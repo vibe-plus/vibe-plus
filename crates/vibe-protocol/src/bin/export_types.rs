@@ -16,10 +16,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ProviderSpeedtestResult::export_all()?;
     ModelAlias::export_all()?;
     ProviderKind::export_all()?;
-    Route::export_all()?;
-    RouteInput::export_all()?;
-    RouteTier::export_all()?;
-    ForwardStrategy::export_all()?;
     RequestLog::export_all()?;
     ModelPricing::export_all()?;
     Meta::export_all()?;

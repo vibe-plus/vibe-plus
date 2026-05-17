@@ -11,7 +11,7 @@
     "openai",
     "vibe"
   ],
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "author": "cheezone <cheezone@163.com>",
   "bin": {
     "v": "bin/vibe.js",
@@ -20,6 +20,7 @@
   },
   "files": [
     "bin/",
+    "LICENSE",
     "README.md"
   ],
   "type": "module",

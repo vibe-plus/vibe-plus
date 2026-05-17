@@ -74,11 +74,12 @@ pub fn spawn_background(port: u16) -> Result<()> {
 }
 
 pub async fn start_server(port: u16) -> Result<()> {
+    // Config is in-memory only; the runtime defaults live in
+    // `vibe_core::config::Config::default()`. The CLI `--port` flag below is
+    // the one user-visible knob still in play.
     let db_path = paths::db_path()?;
-    let cfg_path = paths::config_path()?;
-    let mut cfg = Config::load_or_init(&cfg_path)?;
+    let mut cfg = Config::default();
     cfg.server.port = port;
-    cfg.save(&cfg_path)?;
     let db = Db::open(&db_path)?;
     let state = AppState::init(db, cfg, port)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
