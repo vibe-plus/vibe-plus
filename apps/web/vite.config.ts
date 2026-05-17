@@ -70,7 +70,7 @@ export default defineConfig({
     strictPort: true,
   },
   plugins: [
-    caddyLocalhost({ host: "web.vibe-plus.localhost" }),
+    caddyLocalhost(),
     ...(process.env.NODE_ENV === "test" || process.env.VITEST ? [] : [singleton()]),
     vue(),
     UnoCSS(),
