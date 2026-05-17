@@ -28,13 +28,13 @@ const views: SidebarView[] = [
     id: "codex",
     label: "Codex",
     icon: "terminal",
-    iconClass: "i-lobe-codex-color",
+    iconClass: "i-[lobe--codex-color]",
   },
   {
     id: "claude",
     label: "Claude",
     icon: "sparkles",
-    iconClass: "i-lobe-claude-color",
+    iconClass: "i-[lobe--claude-color]",
     badge: "EXP",
   },
 ];
@@ -52,7 +52,6 @@ const topTabs: { to: string; label: string; icon: vp_icon_name; scoped?: boolean
   { to: "/ui/overview", label: "Overview", icon: "layout-dashboard", scoped: true },
   { to: "/ui/providers", label: "Providers", icon: "server", scoped: true },
   { to: "/ui/statistics", label: "Statistics", icon: "pie-chart", scoped: true },
-  { to: "/ui/monitor", label: "Monitor", icon: "activity", scoped: true },
   { to: "/ui/settings", label: "Settings", icon: "settings", scoped: true },
 ];
 

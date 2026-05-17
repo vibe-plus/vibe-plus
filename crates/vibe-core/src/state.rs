@@ -2,14 +2,187 @@
 
 use crate::circuit_breaker::CircuitBreakers;
 use crate::config::{ClaudeConfig, CodexSummaryConfig, Config};
-use crate::ws::WsHub;
 use anyhow::Result;
 use reqwest::Client;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use vibe_db::Db;
+use vibe_protocol::{AppLogEvent, LogPage, RequestLog, UpstreamAttemptLog};
+
+
+const MAX_IN_MEMORY_REQUEST_LOGS: usize = 2_000;
+const MAX_IN_MEMORY_APP_LOGS: usize = 500;
+const MAX_IN_MEMORY_ATTEMPT_LOGS: usize = 4_000;
+
+#[derive(Default)]
+pub struct InMemoryRequestLogs {
+    inner: Mutex<VecDeque<RequestLog>>,
+}
+
+impl InMemoryRequestLogs {
+    pub fn push(&self, mut log: RequestLog) {
+        // Never retain raw network payloads in process memory. The overview only needs summary fields.
+        log.request_body = None;
+        log.response_body = None;
+        log.client_response_body = None;
+        log.request_headers = None;
+        log.response_headers = None;
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(pos) = inner.iter().position(|row| row.id == log.id) {
+            inner.remove(pos);
+        }
+        inner.push_front(log);
+        while inner.len() > MAX_IN_MEMORY_REQUEST_LOGS {
+            inner.pop_back();
+        }
+    }
+
+    pub fn list(
+        &self,
+        limit: i64,
+        offset: i64,
+        since: Option<i64>,
+        provider_id: Option<&str>,
+        status_ok: Option<bool>,
+    ) -> LogPage {
+        let limit = limit.clamp(1, 500);
+        let offset = offset.max(0) as usize;
+        let inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut filtered = inner
+            .iter()
+            .filter(|log| since.is_none_or(|ts| log.started_at >= ts))
+            .filter(|log| provider_id.is_none_or(|pid| log.provider_id.as_deref() == Some(pid)))
+            .filter(|log| match status_ok {
+                Some(true) => log.status_code.is_some_and(|code| (200..300).contains(&code)),
+                Some(false) => log.status_code.is_none_or(|code| code >= 400),
+                None => true,
+            })
+            .skip(offset)
+            .take(limit as usize + 1)
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_more = filtered.len() > limit as usize;
+        if has_more {
+            filtered.pop();
+        }
+        LogPage {
+            total: offset as i64 + filtered.len() as i64,
+            items: filtered,
+            limit,
+            offset: offset as i64,
+            has_more,
+        }
+    }
+
+    pub fn get(&self, id: &str) -> Option<RequestLog> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|log| log.id == id)
+            .cloned()
+    }
+
+    pub fn count_since(&self, since: i64) -> i64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|log| log.started_at >= since)
+            .count() as i64
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
+
+#[derive(Default)]
+pub struct InMemoryAppLogs {
+    inner: Mutex<VecDeque<AppLogEvent>>,
+}
+
+impl InMemoryAppLogs {
+    pub fn push(&self, event: AppLogEvent) {
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.push_front(event);
+        while inner.len() > MAX_IN_MEMORY_APP_LOGS {
+            inner.pop_back();
+        }
+    }
+
+    pub fn list(&self, limit: i64, since: Option<i64>) -> Vec<AppLogEvent> {
+        let limit = limit.clamp(1, 500) as usize;
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|log| since.is_none_or(|ts| log.ts >= ts))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Default)]
+pub struct InMemoryAttemptLogs {
+    inner: Mutex<VecDeque<UpstreamAttemptLog>>,
+}
+
+impl InMemoryAttemptLogs {
+    pub fn push(&self, mut attempt: UpstreamAttemptLog) {
+        attempt.request_body = None;
+        attempt.response_body = None;
+        attempt.request_headers = None;
+        attempt.response_headers = None;
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(pos) = inner.iter().position(|row| row.attempt_id == attempt.attempt_id) {
+            inner.remove(pos);
+        }
+        inner.push_front(attempt);
+        while inner.len() > MAX_IN_MEMORY_ATTEMPT_LOGS {
+            inner.pop_back();
+        }
+    }
+
+    pub fn get(&self, attempt_id: &str) -> Option<UpstreamAttemptLog> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|attempt| attempt.attempt_id == attempt_id)
+            .cloned()
+    }
+
+    pub fn for_request(&self, request_id: &str) -> Vec<UpstreamAttemptLog> {
+        let mut rows = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|attempt| attempt.request_id == request_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|attempt| attempt.attempt_index);
+        rows
+    }
+
+    pub fn list(&self, limit: i64, offset: i64) -> Vec<UpstreamAttemptLog> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .skip(offset.max(0) as usize)
+            .take(limit.clamp(1, 500) as usize)
+            .cloned()
+            .collect()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CodexStickyRoute {
@@ -85,7 +258,6 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub started_at: Instant,
     pub port: u16,
-    pub ws: WsHub,
     pub cb: CircuitBreakers,
     /// Monotonically increasing per-request counter used for round-robin
     /// load balancing among same-priority providers.
@@ -100,8 +272,9 @@ pub struct AppState {
     /// Accumulated (input_sum, output_sum) per turn_id across ALL requests in a turn.
     /// Lets the final-request summary see tokens from every tool-call iteration.
     pub codex_turn_io: Arc<Mutex<HashMap<String, (i64, i64, Instant)>>>,
-    pub dashboard_stats_publish_pending: Arc<AtomicBool>,
-    pub providers_overview_publish_pending: Arc<AtomicBool>,
+    pub request_logs: Arc<InMemoryRequestLogs>,
+    pub app_logs: Arc<InMemoryAppLogs>,
+    pub upstream_attempt_logs: Arc<InMemoryAttemptLogs>,
     codex_summary_config: Arc<Mutex<CodexSummaryConfig>>,
     /// Mirrors `codex.route_status_enabled` from disk; updated on config GET/PUT.
     codex_route_status_on: Arc<AtomicBool>,
@@ -126,7 +299,6 @@ impl AppState {
             config: Arc::new(config),
             started_at: Instant::now(),
             port,
-            ws: WsHub::new(),
             cb,
             lb_counter: Arc::new(AtomicUsize::new(0)),
             codex_status_dedupe: Arc::new(Mutex::new(HashMap::new())),
@@ -136,8 +308,9 @@ impl AppState {
             codex_sticky_routes: Arc::new(Mutex::new(HashMap::new())),
             codex_thread_costs: Arc::new(Mutex::new(HashMap::new())),
             codex_turn_io: Arc::new(Mutex::new(HashMap::new())),
-            dashboard_stats_publish_pending: Arc::new(AtomicBool::new(false)),
-            providers_overview_publish_pending: Arc::new(AtomicBool::new(false)),
+            request_logs: Arc::new(InMemoryRequestLogs::default()),
+            app_logs: Arc::new(InMemoryAppLogs::default()),
+            upstream_attempt_logs: Arc::new(InMemoryAttemptLogs::default()),
         })
     }
 
@@ -337,5 +510,91 @@ impl AppState {
             .filter(|(_, _, ts)| now.duration_since(*ts) <= ttl)
             .map(|(i, o, _)| (*i, *o))
             .unwrap_or((0, 0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_log(id: usize) -> RequestLog {
+        let mut log = RequestLog {
+            id: format!("log-{id}"),
+            started_at: id as i64,
+            app: None,
+            provider_id: Some("provider-a".into()),
+            requested_model: Some("gpt-test".into()),
+            upstream_model: None,
+            status_code: Some(200),
+            error: None,
+            latency_ms: Some(42),
+            first_token_ms: Some(10),
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            estimated_cost_usd: "0".into(),
+            wire: None,
+            route_prefix: None,
+            credential_id: None,
+            cb_key: None,
+            upstream_http_status: None,
+            upstream_error_preview: None,
+            dedupe_key: None,
+            client_transport: None,
+            request_headers: Some("secret headers".into()),
+            request_body: Some("secret request".into()),
+            response_headers: Some("secret response headers".into()),
+            response_body: Some("secret response".into()),
+            client_response_body: Some("secret client response".into()),
+            stream_kind: None,
+            stream_terminal_seen: None,
+            stream_end_reason: None,
+            stream_error_detail: None,
+            upstream_first_byte_ms: None,
+            client_first_write_ms: None,
+            last_upstream_event_ms: None,
+            last_client_write_ms: None,
+            upstream_chunk_count: 0,
+            upstream_bytes: 0,
+            client_chunk_count: 0,
+            client_bytes: 0,
+            sse_event_count: 0,
+            sse_data_count: 0,
+            sse_comment_count: 0,
+            sse_keepalive_count: 0,
+            sse_done_count: 0,
+            parse_error_count: 0,
+            first_keepalive_ms: None,
+            last_keepalive_ms: None,
+            max_gap_between_upstream_events_ms: None,
+            max_gap_between_data_events_ms: None,
+            keepalive_after_last_data_count: 0,
+            last_data_event_ms: None,
+            bridge_mode: None,
+            status_injected: false,
+            terminal_injected: false,
+            upstream_terminal_type: None,
+        };
+        // Keep this assignment so the test fails if sanitization is removed.
+        log.request_body = Some("must-not-survive".into());
+        log
+    }
+
+    #[test]
+    fn in_memory_logs_are_bounded_and_strip_network_payloads_quickly() {
+        let logs = InMemoryRequestLogs::default();
+        let started = Instant::now();
+        for i in 0..2_500 {
+            logs.push(test_log(i));
+        }
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert_eq!(logs.len(), MAX_IN_MEMORY_REQUEST_LOGS);
+        let latest = logs.get("log-2499").expect("latest log");
+        assert!(latest.request_headers.is_none());
+        assert!(latest.request_body.is_none());
+        assert!(latest.response_headers.is_none());
+        assert!(latest.response_body.is_none());
+        assert!(latest.client_response_body.is_none());
     }
 }

@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import { api, type AppLogEvent } from "../api/client.ts";
 import { useWs } from "../composables/useProxy.ts";
 
+const props = withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
 const MAX_LINES = 500;
 const lines = ref<AppLogEvent[]>([]);
 const live = ref(true);
@@ -80,7 +81,7 @@ function clear() {
 
 <template>
   <div>
-    <div class="mb-3 flex items-center gap-3 flex-wrap">
+    <div v-if="!props.compact" class="mb-3 flex items-center gap-3 flex-wrap">
       <label class="flex items-center gap-2 text-sm text-vp-muted cursor-pointer select-none">
         <input
           v-model="live"
@@ -105,9 +106,18 @@ function clear() {
       >
     </div>
 
-    <div class="card-base overflow-hidden">
+    <div
+      :class="
+        props.compact
+          ? 'overflow-hidden rounded-xl border border-vp-border'
+          : 'card-base overflow-hidden'
+      "
+    >
       <div
-        class="hidden border-b border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2.5%,var(--vp-surface))] px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-vp-muted sm:grid"
+        :class="[
+          props.compact ? 'px-3 py-1.5' : 'px-4 py-2',
+          'hidden border-b border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2.5%,var(--vp-surface))] text-[11px] font-medium uppercase tracking-wide text-vp-muted sm:grid',
+        ]"
         style="grid-template-columns: 4.5rem 3.5rem 5rem 1fr"
       >
         <span>time</span>
@@ -159,7 +169,10 @@ function clear() {
 
           <!-- desktop: single row -->
           <div
-            class="hidden items-start gap-0 px-4 py-1.5 font-mono text-xs sm:grid"
+            :class="[
+              props.compact ? 'px-3 py-1' : 'px-4 py-1.5',
+              'hidden items-start gap-0 font-mono text-xs sm:grid',
+            ]"
             style="grid-template-columns: 4.5rem 3.5rem 5rem 1fr"
           >
             <span class="text-vp-muted text-[11px] pt-px">{{ formatTime(line.ts) }}</span>

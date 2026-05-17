@@ -703,7 +703,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
         scopedLiveTokensPerSec.value > 0
           ? `${fmtTps(scopedLiveTokensPerSec.value)} flowing right now.`
           : `${compactBytes(scopedLiveBytesPerSec.value)}/s flowing right now.`,
-      to: "/ui/monitor",
+      to: "/ui/overview",
       tone: "live",
     });
   } else {
@@ -714,7 +714,7 @@ const overviewInsights = computed<OverviewInsight[]>(() => {
       detail: hasProviderAttention.value
         ? "Idle right now; provider capacity has separate attention items below."
         : `${activeCredentialTotal.value} ready credential${activeCredentialTotal.value === 1 ? "" : "s"} standing by.`,
-      to: hasProviderAttention.value ? "/ui/providers" : "/ui/monitor",
+      to: hasProviderAttention.value ? "/ui/providers" : "/ui/overview",
       tone: hasProviderAttention.value ? "warn" : "muted",
     });
   }
@@ -1393,7 +1393,7 @@ const codexTransportItems = computed(() => [
               <span class="font-mono text-xs text-vp-muted">{{ visibleRecentLogs.length }}</span>
             </div>
             <RouterLink
-              :to="{ path: '/ui/monitor', query: route.query }"
+              :to="{ path: '/ui/overview', query: route.query }"
               class="block px-4 py-3 hover:bg-vp-bg-hover"
             >
               <div v-if="currentLog" class="flex min-w-0 items-center gap-2">

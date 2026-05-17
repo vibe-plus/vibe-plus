@@ -1,5 +1,3 @@
-import "@unocss/reset/tailwind.css";
-import "uno.css";
 import "./dashboard/assets/tailwind.css";
 import "./dashboard/assets/global.css";
 import { createApp } from "vue";

@@ -45,15 +45,14 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use vibe_protocol::{
-    AppLogEvent, AppLogLevel, Credential, CredentialPlanSnapshot, ProviderKind, RequestActivity,
-    RequestLog, RequestRuntimeStats, UpstreamAttemptActivity, UpstreamAttemptLog,
-    UpstreamAttemptOutcome, UpstreamAttemptPhase, WsEvent,
+    AppLogEvent, AppLogLevel, Credential, CredentialPlanSnapshot, ProviderKind, RequestLog,
+    UpstreamAttemptLog, UpstreamAttemptOutcome, UpstreamAttemptPhase,
 };
 
 // Re-export types used by callers outside this module.
 pub use selector::{CredOAuth, ExpandedPick};
 
-/// Emit a `WsEvent::AppLog` for a circuit-breaker state change.
+/// Persist a circuit-breaker state change as an app log entry.
 pub(crate) fn emit_circuit_event(
     state: &AppState,
     cb_key: &str,
@@ -87,11 +86,7 @@ pub(crate) fn emit_circuit_event(
         message,
         detail,
     };
-    state.ws.publish(WsEvent::AppLog(ev.clone()));
-    let state2 = state.clone();
-    tokio::task::spawn_blocking(move || {
-        let _ = state2.db.app_log_insert(&ev);
-    });
+    state.app_logs.push(ev);
 }
 
 const CODEX_STICKY_ROUTE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -310,27 +305,14 @@ pub(crate) fn persist_request_log(state: &AppState, log: RequestLog) {
 }
 
 pub(crate) fn publish_request_started(
-    state: &AppState,
-    id: &str,
-    started_at: i64,
-    app: &Option<String>,
-    log_ctx: &LogCtx,
-    provider_id: Option<&str>,
-    requested_model: &str,
+    _state: &AppState,
+    _id: &str,
+    _started_at: i64,
+    _app: &Option<String>,
+    _log_ctx: &LogCtx,
+    _provider_id: Option<&str>,
+    _requested_model: &str,
 ) {
-    state.ws.publish(WsEvent::RequestStarted(RequestActivity {
-        id: id.to_string(),
-        started_at,
-        app: app.clone(),
-        wire: Some(wire_as_str(log_ctx.wire).to_string()),
-        route_prefix: log_ctx.route_prefix.clone(),
-        provider_id: provider_id.map(str::to_string),
-        requested_model: if requested_model.is_empty() {
-            None
-        } else {
-            Some(requested_model.to_string())
-        },
-    }));
 }
 
 pub(crate) fn persist_request_log_placeholder(
@@ -440,73 +422,33 @@ pub(crate) fn new_attempt_ctx(
 }
 
 pub(crate) fn publish_upstream_attempt_started(
-    state: &AppState,
-    log_ctx: &LogCtx,
-    attempt: &AttemptCtx,
-    phase: UpstreamAttemptPhase,
+    _state: &AppState,
+    _log_ctx: &LogCtx,
+    _attempt: &AttemptCtx,
+    _phase: UpstreamAttemptPhase,
 ) {
-    state
-        .ws
-        .publish(WsEvent::UpstreamAttemptStarted(UpstreamAttemptActivity {
-            attempt_id: attempt.attempt_id.clone(),
-            request_id: attempt.request_id.clone(),
-            attempt_index: attempt.attempt_index,
-            started_at: attempt.started_at,
-            phase,
-            provider_id: attempt.provider_id.clone(),
-            credential_id: attempt.credential_id.clone(),
-            wire: Some(wire_as_str(log_ctx.wire).to_string()),
-            route_prefix: log_ctx.route_prefix.clone(),
-            requested_model: (!attempt.requested_model.is_empty())
-                .then(|| attempt.requested_model.clone()),
-            upstream_model: (!attempt.upstream_model.is_empty())
-                .then(|| attempt.upstream_model.clone()),
-        }));
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_runtime_stats(
-    state: &AppState,
-    request_id: &str,
-    attempt_id: Option<&str>,
-    provider_id: Option<&str>,
-    active_request_tokens_per_sec: Option<f64>,
-    active_upstream_decode_tps: Option<f64>,
-    active_downstream_emit_tps: Option<f64>,
-    active_output_tokens_per_sec: Option<f64>,
-    active_upstream_bytes_per_sec: f64,
-    active_downstream_bytes_per_sec: f64,
-    active_flow_bytes_per_sec: f64,
-    output_tokens_so_far: i64,
-    upstream_bytes_so_far: i64,
-    client_bytes_so_far: i64,
-    upstream_first_byte_ms: Option<i64>,
-    client_first_write_ms: Option<i64>,
-    attempt_scoped: bool,
+    _state: &AppState,
+    _request_id: &str,
+    _attempt_id: Option<&str>,
+    _provider_id: Option<&str>,
+    _active_request_tokens_per_sec: Option<f64>,
+    _active_upstream_decode_tps: Option<f64>,
+    _active_downstream_emit_tps: Option<f64>,
+    _active_output_tokens_per_sec: Option<f64>,
+    _active_upstream_bytes_per_sec: f64,
+    _active_downstream_bytes_per_sec: f64,
+    _active_flow_bytes_per_sec: f64,
+    _output_tokens_so_far: i64,
+    _upstream_bytes_so_far: i64,
+    _client_bytes_so_far: i64,
+    _upstream_first_byte_ms: Option<i64>,
+    _client_first_write_ms: Option<i64>,
+    _attempt_scoped: bool,
 ) {
-    let stats = RequestRuntimeStats {
-        request_id: request_id.to_string(),
-        attempt_id: attempt_id.map(str::to_string),
-        provider_id: provider_id.map(str::to_string),
-        active_request_tokens_per_sec,
-        active_upstream_decode_tps,
-        active_downstream_emit_tps,
-        active_output_tokens_per_sec,
-        active_upstream_bytes_per_sec,
-        active_downstream_bytes_per_sec,
-        active_flow_bytes_per_sec,
-        output_tokens_so_far,
-        upstream_bytes_so_far,
-        client_bytes_so_far,
-        upstream_first_byte_ms,
-        client_first_write_ms,
-        attempt_scoped,
-        updated_at: chrono::Utc::now().timestamp_millis(),
-    };
-    if attempt_scoped {
-        state.ws.publish(WsEvent::UpstreamAttemptUpdated(stats));
-    } else {
-        state.ws.publish(WsEvent::RequestUpdated(stats));
-    }
 }
 
 pub(crate) fn attempt_log_from_parts(
@@ -579,14 +521,7 @@ pub(crate) fn attempt_log_from_parts(
 }
 
 pub(crate) fn persist_upstream_attempt_log(state: &AppState, attempt: UpstreamAttemptLog) {
-    let db = state.db.clone();
-    let ws = state.ws.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = db.upstream_attempt_insert(&attempt) {
-            tracing::warn!(?e, "failed to insert upstream attempt log");
-        }
-        ws.publish(WsEvent::UpstreamAttemptFinished(attempt));
-    });
+    state.upstream_attempt_logs.push(attempt);
 }
 
 pub(crate) fn mark_provider_health(
@@ -690,7 +625,7 @@ pub(crate) async fn prepare_forward_once(
         crate::claude_summary::detect_client(req_headers, route_prefix.as_deref());
     let requested_model = request_model_for_body(wire, upstream_path, &body);
 
-    let request_snapshot = lossy_optional_body(&body);
+    let request_snapshot = None;
 
     let providers_list = state
         .db
@@ -1310,7 +1245,7 @@ pub async fn forward(
         extract_model(&body).unwrap_or_default()
     };
 
-    let request_snapshot = lossy_optional_body(&body);
+    let request_snapshot = None;
 
     let providers_list = match state.db.provider_list() {
         Ok(v) => v,
@@ -1760,7 +1695,7 @@ pub(crate) fn stream_response(
         }
 
         let sc = status.as_u16() as i32;
-        let response_body = lossy_optional_body(&raw_accum);
+        let response_body = None;
         let mut log = build_log(
             &log_ctx,
             &log_id,
@@ -1818,8 +1753,6 @@ pub(crate) fn stream_response(
         attempt_log.upstream_terminal_type = log.upstream_terminal_type.clone();
         attempt_log.active_upstream_decode_tps_peak = upstream_decode_tps_peak;
         attempt_log.active_downstream_emit_tps_peak = downstream_emit_tps_peak;
-        attempt_log.request_body = log.request_body.clone();
-        attempt_log.response_body = log.response_body.clone();
         attempt_log.response_headers = resp_headers_snapshot;
         persist_upstream_attempt_log(&state_for_task, attempt_log);
         finalize_stream_request_log(state_for_task, log).await;
@@ -2082,40 +2015,12 @@ pub(crate) fn build_log(
 }
 
 pub(crate) fn persist_log(state: &AppState, log: RequestLog) {
-    let db = state.db.clone();
-    let ws = state.ws.clone();
-    let stats_state = state.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = db.log_insert(&log) {
-            tracing::warn!(?e, "failed to insert request log");
-        }
-        let mut thin = log;
-        thin.request_headers = None;
-        thin.request_body = None;
-        thin.response_body = None;
-        thin.client_response_body = None;
-        ws.publish(WsEvent::LogAppended(thin));
-    });
-    crate::server::publish_dashboard_stats_soon(stats_state);
+    state.request_logs.push(log);
 }
 
-/// Insert row + WS notify, awaited before dropping the streaming channel so callers can PATCH `client_response_body`.
+/// Insert the streaming request log; awaited before dropping the channel so callers can PATCH `client_response_body`.
 async fn finalize_stream_request_log(state: AppState, log: RequestLog) {
-    let db = state.db.clone();
-    let ws = state.ws.clone();
-    let log_insert = log.clone();
-    match tokio::task::spawn_blocking(move || db.log_insert(&log_insert)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!(?e, "failed to insert stream request log"),
-        Err(join_err) => tracing::warn!(%join_err, "stream log insert task panicked"),
-    }
-    let mut thin = log;
-    thin.request_headers = None;
-    thin.request_body = None;
-    thin.response_body = None;
-    thin.client_response_body = None;
-    ws.publish(WsEvent::LogAppended(thin));
-    crate::server::publish_dashboard_stats_soon(state);
+    state.request_logs.push(log);
 }
 
 pub(crate) fn fire_health(

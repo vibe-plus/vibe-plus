@@ -1,4 +1,4 @@
-/** Aligned with router `name`; used by page titles, primary buttons, and labels with full Tailwind class names to avoid dynamic purge misses. */
+/** Aligned with router `name`; used by page titles, primary buttons, and labels. Keep full Tailwind class names here so the scanner can detect them. */
 export interface PageAccentClasses {
   /** Page main title */
   heading: string;
@@ -77,18 +77,4 @@ export function resolvePageAccent(
 ): PageAccentClasses {
   const key = routeName == null ? "" : String(routeName);
   return pageAccentByRouteName[key] ?? fallback;
-}
-
-/** Used by UnoCSS `safelist`: color classes live only in TS constants, avoiding on-demand scan misses and missing runtime styles. */
-export function getPageAccentSafelistTokens(): string[] {
-  const buckets: PageAccentClasses[] = [fallback, ...Object.values(pageAccentByRouteName)];
-  const out = new Set<string>();
-  for (const b of buckets) {
-    for (const raw of [b.heading, b.kicker, b.btnPrimary, b.chipActive, b.accentBar]) {
-      for (const t of raw.split(/\s+/)) {
-        if (t) out.add(t);
-      }
-    }
-  }
-  return [...out];
 }

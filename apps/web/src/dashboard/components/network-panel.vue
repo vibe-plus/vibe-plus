@@ -795,7 +795,7 @@ onBeforeUnmount(() => {
       <div class="flex flex-col gap-2.5 xl:flex-row xl:items-center">
         <label class="relative min-w-0 flex-1">
           <span
-            class="i-lucide-search absolute left-3 top-1/2 size-4 -translate-y-1/2 text-vp-muted"
+            class="i-[lucide--search] absolute left-3 top-1/2 size-4 -translate-y-1/2 text-vp-muted"
           />
           <input
             v-model="searchText"

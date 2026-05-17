@@ -1,13 +1,11 @@
 //! axum HTTP server: routes, handlers, listener.
 
 use crate::circuit_breaker::State as CbState;
-use crate::codex_config::{CodexConfigSettings, CodexConfigSettingsInput};
 use crate::codex_summary;
 use crate::codex_upstream_ws::{StatusDecision, UpstreamWsOutcome};
 use crate::codex_visual;
 use crate::forward;
 use crate::forward::{VibeCodexClientKind, VibeCodexVisual};
-use crate::local_import;
 use crate::providers::Wire;
 use crate::state::AppState;
 use crate::stream_trace::{empty_stream_fields, StreamTraceStats};
@@ -20,40 +18,32 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use axum::{Json, Router};
-use futures_util::{SinkExt, StreamExt};
-use scraper::{Html, Selector};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-#[cfg(target_os = "macos")]
-use vibe_protocol::CodexAppProcess;
 use vibe_protocol::{
-    AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexAppActionResult,
-    CodexAppStatus, CodexPlanRefreshResult, Credential, CredentialInput, CredentialPlanSnapshot,
-    CredentialPoolStatus, DashboardStats, Health, HealthSummary, LogPage, Meta, Provider,
-    ProviderAuthPoolSummary, ProviderBalanceSnapshot, ProviderCodexPlanItem, ProviderHealth,
-    ProviderHealthSummary, ProviderInput, ProviderSpeedtestInput, ProviderSpeedtestResult,
-    ProvidersOverview, ProvidersOverviewCodexPlansChunk, ProvidersOverviewCredentialsChunk,
-    ProvidersOverviewHealthChunk, ProvidersOverviewPoolsChunk, ProvidersOverviewProvidersChunk,
-    ProvidersOverviewStreamEnded, ProvidersOverviewStreamStarted, Status, UpstreamAttemptLog,
-    UsageSummary, WsEvent,
+    AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexPlanRefreshResult,
+    Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats,
+    Health, HealthSummary, LogPage, Meta, Provider, ProviderAuthPoolSummary,
+    ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary, ProviderInput,
+    ProvidersOverview, Status, UpstreamAttemptLog, UsageSummary,
 };
 
 mod clients;
 mod codex_http;
 mod codex_ws;
-mod config;
 mod dashboard;
-mod imports;
+mod fetch;
+mod files;
 mod models;
 mod providers;
 mod proxy;
@@ -61,13 +51,13 @@ mod proxy;
 use clients::*;
 use codex_http::*;
 use codex_ws::*;
-use config::*;
-pub(crate) use dashboard::publish_dashboard_stats_soon;
 use dashboard::*;
-use imports::*;
+use fetch::*;
+use files::*;
 use models::*;
 use providers::*;
 use proxy::*;
+
 pub fn router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -101,10 +91,6 @@ pub fn router(state: AppState) -> Router {
         // WS text messages.  Chat Completions falls back to plain POST.
         .route("/codex/v1/chat/completions", any(post_or_reject))
         .route("/codex/v1/responses", any(codex_responses_handler))
-        .route("/codex/v1/responses/compact", any(codex_responses_handler))
-        // Codex sometimes sends double-prefix paths (openai_base_url already has /v1)
-        .route("/codex/v1/v1/responses", any(codex_responses_handler))
-        .route("/codex/v1/v1/chat/completions", any(post_or_reject))
         .route("/codex/v1/models", get(list_models_openai))
         // ── OpenCode tool prefix (/opencode/*) ──────────────────────────────
         // baseURL = http://127.0.0.1:PORT/opencode/v1
@@ -116,17 +102,8 @@ pub fn router(state: AppState) -> Router {
         .route("/opencode/v1/models", get(list_models_openai))
         // Gemini Native passthrough — wildcard captures the full model/action path
         .route("/v1beta/models/*path", post(post_gemini))
-        // providers CRUD + local import
+        // providers CRUD
         .route("/_vp/providers", get(list_providers).post(create_provider))
-        .route(
-            "/_vp/providers/import-local",
-            get(scan_local_providers).post(import_local_providers),
-        )
-        .route("/_vp/providers/import-ccs", post(import_ccs_profile_bundle))
-        .route(
-            "/_vp/providers/import-ccswitch",
-            post(import_cc_switch_deeplink),
-        )
         .route("/_vp/providers/overview", get(provider_overview))
         .route("/_vp/clients/:client/status", get(client_status))
         .route("/_vp/clients/:client/doctor", get(client_doctor))
@@ -138,15 +115,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/_vp/providers/health", get(provider_health_list))
         .route("/_vp/providers/:id/health", get(provider_health))
-        .route("/_vp/providers/:id/test", post(provider_test))
-        .route("/_vp/providers/:id/probe", post(provider_probe))
-        .route("/_vp/providers/:id/speedtest", post(provider_speedtest))
-        .route("/_vp/providers/:id/sync", post(provider_sync))
         .route("/_vp/providers/:id/pool", get(provider_pool_summary))
-        .route(
-            "/_vp/providers/:id/models/refresh",
-            post(refresh_provider_models),
-        )
         .route("/_vp/pools", get(provider_pool_list))
         .route(
             "/_vp/providers/:id/circuit/reset",
@@ -188,18 +157,6 @@ pub fn router(state: AppState) -> Router {
             post(credential_circuit_reset),
         )
         .route(
-            "/_vp/credentials/:id/models/refresh",
-            post(refresh_credential_models),
-        )
-        .route(
-            "/_vp/credentials/:id/balance/refresh",
-            post(refresh_credential_balance),
-        )
-        .route(
-            "/_vp/providers/:id/detect-vendor",
-            post(detect_provider_vendor),
-        )
-        .route(
             "/_vp/credentials/:id/login",
             post(credential_upstream_login),
         )
@@ -218,30 +175,17 @@ pub fn router(state: AppState) -> Router {
         .route("/_vp/attempts", get(list_upstream_attempts))
         .route("/_vp/usage/summary", get(usage_summary))
         .route("/_vp/stats/dashboard", get(dashboard_stats))
-        .route(
-            "/_vp/tool-configs/:tool/raw",
-            get(get_tool_config_raw).put(put_tool_config_raw),
-        )
-        .route(
-            "/_vp/tool-configs/codex/settings",
-            get(get_codex_config_settings).put(put_codex_config_settings),
-        )
-        .route("/_vp/codex-app/status", get(get_codex_app_status))
-        .route("/_vp/codex-app/open", post(post_codex_app_open))
-        .route("/_vp/codex-app/quit", post(post_codex_app_quit))
-        .route("/_vp/codex-app/restart", post(post_codex_app_restart))
-        .route("/_vp/codex-files", get(list_codex_files))
-        .route(
-            "/_vp/codex-files/file",
-            get(read_codex_file)
-                .put(write_codex_file)
-                .delete(delete_codex_file),
-        )
-        .route("/_vp/codex-files/dir", post(create_codex_dir))
-        .route("/_vp/codex-files/move", post(move_codex_file))
         .route("/_vp/app-logs", get(list_app_logs))
-        // websocket
-        .route("/_vp/ws", any(ws_handler))
+        // sandboxed read/write of ~/.codex and ~/.claude
+        .route("/_vp/files/:scope", get(list_files))
+        .route(
+            "/_vp/files/:scope/file",
+            get(read_file).put(write_file).delete(delete_file),
+        )
+        .route("/_vp/files/:scope/dir", post(create_dir))
+        .route("/_vp/files/:scope/move", post(move_file))
+        // local fetch proxy for the dashboard (sidesteps browser CORS)
+        .route("/_vp/proxy/*path", any(proxy_forward))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         // Model requests can legitimately exceed axum's small 2 MiB default
@@ -269,7 +213,6 @@ async fn root_discovery() -> Json<Value> {
         "health": "/health",
         "status": "/status",
         "meta": "/_vp/meta",
-        "websocket": "/_vp/ws",
         "control_api": "/_vp/",
         "web_dev": "http://127.0.0.1:15876",
         "note": "The gateway does not host the Web UI; during development run apps/web separately outside this port (see vite.config port).",
@@ -297,7 +240,7 @@ async fn health() -> Json<Health> {
 async fn compute_status(state: AppState) -> Result<Status, AppError> {
     let providers = run_blocking(state.clone(), |s| s.db.provider_list()).await?;
     let one_hour_ago = chrono::Utc::now().timestamp() - 3600;
-    let recent = run_blocking(state.clone(), move |s| s.db.count_logs_since(one_hour_ago)).await?;
+    let recent = state.request_logs.count_since(one_hour_ago);
     let codex_transport = state.codex_transport.snapshot();
     Ok(Status {
         version: VERSION.to_string(),
@@ -373,27 +316,6 @@ mod request_body_limit_tests {
             .expect("response");
 
         assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    }
-
-    #[test]
-    fn speedtest_timeout_is_clamped_to_safe_bounds() {
-        assert_eq!(
-            sanitize_speedtest_timeout(None),
-            SPEEDTEST_DEFAULT_TIMEOUT_SECS
-        );
-        assert_eq!(
-            sanitize_speedtest_timeout(Some(0)),
-            SPEEDTEST_MIN_TIMEOUT_SECS
-        );
-        assert_eq!(
-            sanitize_speedtest_timeout(Some(1)),
-            SPEEDTEST_MIN_TIMEOUT_SECS
-        );
-        assert_eq!(sanitize_speedtest_timeout(Some(12)), 12);
-        assert_eq!(
-            sanitize_speedtest_timeout(Some(120)),
-            SPEEDTEST_MAX_TIMEOUT_SECS
-        );
     }
 
     #[test]
@@ -499,39 +421,6 @@ mod request_body_limit_tests {
             .find(|c| c.credential_id == open.id)
             .expect("open status");
         assert!(open_status.circuit_open);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn codex_app_process_roles_are_specific() {
-        assert_eq!(
-            classify_codex_app_process("/Applications/Codex.app/Contents/MacOS/Codex"),
-            "main"
-        );
-        assert_eq!(
-            classify_codex_app_process(
-                "/Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process"
-            ),
-            "helper"
-        );
-        assert_eq!(
-            classify_codex_app_process(
-                "/Applications/Codex.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex Helper (Renderer) --type=renderer"
-            ),
-            "renderer"
-        );
-        assert_eq!(
-            classify_codex_app_process(
-                "/Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled"
-            ),
-            "app-server"
-        );
-        assert_eq!(
-            classify_codex_app_process(
-                "/Applications/Codex.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler"
-            ),
-            "crashpad"
-        );
     }
 
     fn test_provider(id: &str) -> Provider {

@@ -619,7 +619,7 @@ const PROVIDER_TAB_OPTIONS: ProviderTabOption[] = [
     id: "common",
     label: "Common",
     shortLabel: "all",
-    icon: "i-lucide-compass",
+    icon: "i-[lucide--compass]",
     description: "",
   },
   ...CLIENT_TOOLS.map((tool) => ({
@@ -839,7 +839,7 @@ async function remove(id: string) {
 }
 
 function viewProviderLogs(providerId: string) {
-  void router.push({ path: "/ui/monitor", query: { ...route.query, provider_id: providerId } });
+  void router.push({ path: "/ui/overview", query: route.query });
 }
 
 // Credential actions

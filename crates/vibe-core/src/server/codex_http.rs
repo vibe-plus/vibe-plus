@@ -27,7 +27,8 @@ pub(super) async fn codex_responses_handler(
             HeaderValue::from_static(client_transport),
         );
         let stripped = transforms::strip_ws_envelope(&body);
-        let thread_source = codex_summary::thread_source_from_request(&body)
+        let thread_source = codex_summary::thread_source_from_headers(&headers)
+            .or_else(|| codex_summary::thread_source_from_request(&body))
             .or_else(|| codex_summary::thread_source_from_request(&stripped));
         // Begin-slot is meant for user-facing thread display. Subagent
         // threads run as background workers but Codex Desktop renders their
@@ -37,9 +38,11 @@ pub(super) async fn codex_responses_handler(
         let is_subagent = thread_source == Some(codex_summary::CodexThreadSource::Subagent);
         let should_show_status =
             !is_subagent && transforms::responses_input_ends_with_user_message(&stripped);
-        let turn_id = codex_summary::turn_id_from_request(&body)
+        let turn_id = codex_summary::turn_id_from_headers(&headers)
+            .or_else(|| codex_summary::turn_id_from_request(&body))
             .or_else(|| codex_summary::turn_id_from_request(&stripped));
-        let thread_id = codex_summary::thread_id_from_request(&body)
+        let thread_id = codex_summary::thread_id_from_headers(&headers)
+            .or_else(|| codex_summary::thread_id_from_request(&body))
             .or_else(|| codex_summary::thread_id_from_request(&stripped));
         let request_started_instant = Instant::now();
         let upstream = forward::forward(

@@ -36,7 +36,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
             tracing::debug!(preview = %preview, "codex ws body (first 300 bytes)");
         }
         let stripped = transforms::strip_ws_envelope(&body_bytes);
-        let thread_source = codex_summary::thread_source_from_request(&body_bytes)
+        let thread_source = codex_summary::thread_source_from_headers(&ws_headers)
+            .or_else(|| codex_summary::thread_source_from_request(&body_bytes))
             .or_else(|| codex_summary::thread_source_from_request(&stripped));
         // Suppress the begin slot for subagent requests so they don't bleed
         // into the main thread's chat display. See CLAUDE.md → Codex
@@ -44,9 +45,11 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
         let is_subagent = thread_source == Some(codex_summary::CodexThreadSource::Subagent);
         let should_show_status =
             !is_subagent && transforms::responses_input_ends_with_user_message(&stripped);
-        let turn_id = codex_summary::turn_id_from_request(&body_bytes)
+        let turn_id = codex_summary::turn_id_from_headers(&ws_headers)
+            .or_else(|| codex_summary::turn_id_from_request(&body_bytes))
             .or_else(|| codex_summary::turn_id_from_request(&stripped));
-        let thread_id = codex_summary::thread_id_from_request(&body_bytes)
+        let thread_id = codex_summary::thread_id_from_headers(&ws_headers)
+            .or_else(|| codex_summary::thread_id_from_request(&body_bytes))
             .or_else(|| codex_summary::thread_id_from_request(&stripped));
 
         match crate::codex_upstream_ws::try_forward_official_codex_ws(

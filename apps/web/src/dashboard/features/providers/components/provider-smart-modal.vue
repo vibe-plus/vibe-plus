@@ -61,7 +61,7 @@ interface Preset {
 const PRESETS: Preset[] = [
   {
     label: "OpenAI",
-    icon: "i-lucide-bot",
+    icon: "i-[lucide--bot]",
     name: "OpenAI",
     kind: "openai-responses",
     base_url: "https://api.openai.com",
@@ -69,7 +69,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Anthropic",
-    icon: "i-lucide-sparkles",
+    icon: "i-[lucide--sparkles]",
     name: "Anthropic",
     kind: "anthropic",
     base_url: "https://api.anthropic.com",
@@ -77,7 +77,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "DeepSeek",
-    icon: "i-lucide-brain",
+    icon: "i-[lucide--brain]",
     name: "DeepSeek",
     kind: "openai-chat",
     base_url: "https://api.deepseek.com",
@@ -85,7 +85,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Gemini",
-    icon: "i-lucide-gem",
+    icon: "i-[lucide--gem]",
     name: "Google Gemini",
     kind: "gemini-native",
     base_url: "https://generativelanguage.googleapis.com/v1beta",
@@ -93,7 +93,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Qwen",
-    icon: "i-lucide-cloud",
+    icon: "i-[lucide--cloud]",
     name: "Qwen",
     kind: "openai-chat",
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -101,7 +101,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Moonshot",
-    icon: "i-lucide-moon",
+    icon: "i-[lucide--moon]",
     name: "Moonshot",
     kind: "openai-chat",
     base_url: "https://api.moonshot.cn/v1",

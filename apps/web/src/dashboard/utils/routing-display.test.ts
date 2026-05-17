@@ -35,9 +35,9 @@ describe("routing/display pure helpers", () => {
 
   test("parses visual provider hints from urls and hostnames", () => {
     expect(frameworkIconFromBaseUrl("https://relay.example.com/new-api/v1")).toBe(
-      "i-lucide-layers",
+      "i-[lucide--layers]",
     );
-    expect(frameworkIconFromBaseUrl("https://sub2api.example.com/v1")).toBe("i-lucide-shuffle");
+    expect(frameworkIconFromBaseUrl("https://sub2api.example.com/v1")).toBe("i-[lucide--shuffle]");
     expect(hostFromUrlOrHost(" https://www.example.com:8443/v1 ")).toBe("www.example.com");
     expect(hostFromUrlOrHost("www.example.com:8443/v1")).toBe("example.com");
     expect(faviconUrlForHost("www.example.com")).toBe(

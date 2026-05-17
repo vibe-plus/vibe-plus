@@ -668,6 +668,42 @@ fn thread_id_from_metadata_value_inner(v: &Value) -> Option<String> {
     }
 }
 
+/// Extract `turn_id` from the `x-codex-turn-metadata` HTTP header (JSON object).
+pub fn turn_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    let s = headers.get("x-codex-turn-metadata")?.to_str().ok()?;
+    serde_json::from_str::<Value>(s)
+        .ok()?
+        .get("turn_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Extract `thread_id` from HTTP headers — first tries the direct `thread-id` /
+/// `thread_id` header, then falls back to the `x-codex-turn-metadata` JSON object.
+pub fn thread_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    if let Some(id) = headers
+        .get("thread-id")
+        .or_else(|| headers.get("thread_id"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+    {
+        return Some(id);
+    }
+    let s = headers.get("x-codex-turn-metadata")?.to_str().ok()?;
+    serde_json::from_str::<Value>(s)
+        .ok()?
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Extract `thread_source` from the `x-codex-turn-metadata` HTTP header.
+pub fn thread_source_from_headers(headers: &HeaderMap) -> Option<CodexThreadSource> {
+    let s = headers.get("x-codex-turn-metadata")?.to_str().ok()?;
+    let v: Value = serde_json::from_str(s).ok()?;
+    thread_source_from_metadata_value_inner(&v)
+}
+
 pub fn summary_slot_key(turn_id: Option<&str>, client: CodexClientKind) -> String {
     format!(
         "{}|{}",
@@ -1133,7 +1169,7 @@ fn metric_label(overrides: &CodexSummaryLabelOverrides, key: &str) -> String {
         "thread_cost" => overrides
             .thread_cost
             .clone()
-            .unwrap_or_else(|| "∑usd".to_string()),
+            .unwrap_or_else(|| "Σusd".to_string()),
         _ => key.to_string(),
     }
 }
@@ -1408,6 +1444,49 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&body).unwrap();
         assert_eq!(turn_id_from_request(&bytes).as_deref(), Some("turn-123"));
+    }
+
+    #[test]
+    fn extracts_turn_id_and_thread_id_from_headers() {
+        let meta = serde_json::json!({
+            "turn_id": "turn-abc",
+            "thread_id": "thread-xyz",
+            "thread_source": "user",
+            "session_id": "sess-111",
+            "turn_started_at_unix_ms": 1700000000000_u64
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_str(&meta.to_string()).unwrap(),
+        );
+        assert_eq!(turn_id_from_headers(&headers).as_deref(), Some("turn-abc"));
+        assert_eq!(
+            thread_id_from_headers(&headers).as_deref(),
+            Some("thread-xyz")
+        );
+        assert_eq!(
+            thread_source_from_headers(&headers),
+            Some(CodexThreadSource::User)
+        );
+    }
+
+    #[test]
+    fn thread_id_from_headers_prefers_direct_header() {
+        let meta = serde_json::json!({
+            "turn_id": "turn-abc",
+            "thread_id": "thread-from-meta",
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_str(&meta.to_string()).unwrap(),
+        );
+        headers.insert("thread-id", HeaderValue::from_static("thread-direct"));
+        assert_eq!(
+            thread_id_from_headers(&headers).as_deref(),
+            Some("thread-direct")
+        );
     }
 
     #[test]

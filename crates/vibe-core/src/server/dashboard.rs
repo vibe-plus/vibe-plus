@@ -6,16 +6,6 @@ pub(super) struct RollingHoursQuery {
     hours: i64,
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) enum WsClientMessage {
-    Snapshot {
-        request_id: Option<String>,
-        topic: String,
-        hours: Option<i64>,
-        client: Option<String>,
-    },
-}
-
 pub(super) async fn provider_overview(
     State(state): State<AppState>,
     Query(q): Query<RollingHoursQuery>,
@@ -179,34 +169,7 @@ pub(super) fn emit_app_log(state: &AppState, level: AppLogLevel, category: &str,
         message,
         detail: None,
     };
-    state.ws.publish(WsEvent::AppLog(ev.clone()));
-    let state2 = state.clone();
-    tokio::task::spawn_blocking(move || {
-        let _ = state2.db.app_log_insert(&ev);
-    });
-}
-
-pub(super) fn publish_providers_overview_soon(state: AppState) {
-    if state
-        .providers_overview_publish_pending
-        .swap(true, Ordering::Relaxed)
-    {
-        return;
-    }
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(350)).await;
-        for hours in [1, default_rolling_hours()] {
-            match build_providers_overview(state.clone(), hours).await {
-                Ok(overview) => state
-                    .ws
-                    .publish(WsEvent::ProvidersOverviewChanged(overview)),
-                Err(e) => tracing::warn!(?e, hours, "build providers overview ws event failed"),
-            }
-        }
-        state
-            .providers_overview_publish_pending
-            .store(false, Ordering::Relaxed);
-    });
+    state.app_logs.push(ev);
 }
 
 pub(super) async fn provider_health(
@@ -409,7 +372,7 @@ pub(super) async fn provider_circuit_reset(
 
     let (circuit_state, consecutive_failures, is_healthy) =
         effective_circuit_for_provider(&state, &id, &cred_ids);
-    let out = ProviderHealth {
+    Ok(Json(ProviderHealth {
         provider_id: db_row.provider_id,
         is_healthy,
         circuit_state,
@@ -423,9 +386,7 @@ pub(super) async fn provider_circuit_reset(
         last_error: db_row.last_error,
         avg_latency_ms: db_row.avg_latency_ms,
         updated_at: db_row.updated_at,
-    };
-    publish_providers_overview_soon(state);
-    Ok(Json(out))
+    }))
 }
 
 pub(super) async fn health_all_providers(
@@ -559,7 +520,6 @@ pub(super) async fn create_credential(
         "credential",
         format!("Credential added: {label}"),
     );
-    publish_providers_overview_soon(state);
     Ok(Json(c))
 }
 
@@ -595,7 +555,6 @@ pub(super) async fn update_credential(
         "credential",
         format!("Credential updated: {label}"),
     );
-    publish_providers_overview_soon(state);
     Ok(Json(c))
 }
 
@@ -659,7 +618,6 @@ pub(super) async fn credential_plan_refresh(
     })
     .await?;
     let snap = snap_opt.ok_or_else(|| anyhow::anyhow!("plan snapshot missing after refresh"))?;
-    publish_providers_overview_soon(state);
     Ok(Json(snap))
 }
 
@@ -767,7 +725,6 @@ pub(super) async fn provider_codex_plan_refresh_all(
         }
     }
 
-    publish_providers_overview_soon(state);
     Ok(Json(CodexPlanRefreshResult {
         attempted,
         ok,
@@ -787,7 +744,6 @@ pub(super) async fn delete_credential(
         "credential",
         format!("Credential deleted: {id}"),
     );
-    publish_providers_overview_soon(state);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -807,7 +763,6 @@ pub(super) async fn enable_credential(
         "credential",
         format!("Credential enabled: {}", c.label),
     );
-    publish_providers_overview_soon(state);
     Ok(Json(c))
 }
 
@@ -827,7 +782,6 @@ pub(super) async fn disable_credential(
         "credential",
         format!("Credential disabled: {}", c.label),
     );
-    publish_providers_overview_soon(state);
     Ok(Json(c))
 }
 
@@ -843,7 +797,6 @@ pub(super) async fn credential_circuit_reset(
             format!("Circuit reset: {id}"),
         );
     }
-    publish_providers_overview_soon(state);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -863,8 +816,7 @@ pub(super) async fn list_app_logs(
 ) -> Result<Json<Vec<AppLogEvent>>, AppError> {
     let limit = q.limit.unwrap_or(200).clamp(1, 500);
     let since = q.since;
-    let logs = run_blocking(state, move |s| s.db.app_log_list(limit, since)).await?;
-    Ok(Json(logs))
+    Ok(Json(state.app_logs.list(limit, since)))
 }
 
 // ---------------------------------------------------------------------------
@@ -891,7 +843,7 @@ pub(super) async fn get_request_log(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let log = run_blocking(state, move |s| s.db.log_get(&id)).await?;
+    let log = state.request_logs.get(&id);
     Ok(match log {
         Some(log) => Json(log).into_response(),
         None => (StatusCode::NOT_FOUND, "log not found").into_response(),
@@ -902,7 +854,7 @@ pub(super) async fn get_upstream_attempt(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let attempt = run_blocking(state, move |s| s.db.upstream_attempt_get(&id)).await?;
+    let attempt = state.upstream_attempt_logs.get(&id);
     Ok(match attempt {
         Some(attempt) => Json(attempt).into_response(),
         None => (StatusCode::NOT_FOUND, "attempt not found").into_response(),
@@ -913,8 +865,7 @@ pub(super) async fn list_request_attempts(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<UpstreamAttemptLog>>, AppError> {
-    let attempts = run_blocking(state, move |s| s.db.upstream_attempts_for_request(&id)).await?;
-    Ok(Json(attempts))
+    Ok(Json(state.upstream_attempt_logs.for_request(&id)))
 }
 
 pub(super) async fn list_upstream_attempts(
@@ -923,8 +874,7 @@ pub(super) async fn list_upstream_attempts(
 ) -> Result<Json<Vec<UpstreamAttemptLog>>, AppError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let offset = q.offset.unwrap_or(0).max(0);
-    let attempts = run_blocking(state, move |s| s.db.upstream_attempt_list(limit, offset)).await?;
-    Ok(Json(attempts))
+    Ok(Json(state.upstream_attempt_logs.list(limit, offset)))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -965,7 +915,7 @@ pub(super) async fn get_log_stream_trace(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let log = run_blocking(state, move |s| s.db.log_get(&id)).await?;
+    let log = state.request_logs.get(&id);
     let Some(log) = log else {
         return Ok((StatusCode::NOT_FOUND, "log not found").into_response());
     };
@@ -1034,10 +984,9 @@ pub(super) async fn list_logs(
         Some("error") => Some(false),
         _ => None,
     };
-    let p = run_blocking(state, move |s| {
-        s.db.log_list_filtered(limit, offset, q.since, q.provider_id.as_deref(), status_ok)
-    })
-    .await?;
+    let p = state
+        .request_logs
+        .list(limit, offset, q.since, q.provider_id.as_deref(), status_ok);
     Ok(Json(p))
 }
 
@@ -1071,34 +1020,41 @@ pub(super) async fn build_dashboard_stats(
     state: AppState,
     hours: i64,
 ) -> anyhow::Result<DashboardStats> {
+    let now = chrono::Utc::now().timestamp();
+    let since_1h = now - 3600;
+    let recent_1h = state.request_logs.list(500, 0, Some(since_1h), None, None);
+    let requests_last_hour = recent_1h.items.len() as i64;
+    let success_rate_last_hour = if requests_last_hour == 0 {
+        1.0
+    } else {
+        recent_1h
+            .items
+            .iter()
+            .filter(|row| row.status_code.is_some_and(|code| (200..300).contains(&code)))
+            .count() as f64
+            / requests_last_hour as f64
+    };
+
     let stats = run_blocking(state, move |s| {
-        let now = chrono::Utc::now().timestamp();
-        let since_window = now - hours * 3600;
-        let since_1h = now - 3600;
+        let requests_last_24h = s.db.health_list()?.iter().map(|h| h.total_requests).sum::<i64>();
+        let success_rate_in_window = success_rate_last_hour;
 
-        let requests_last_hour = s.db.count_logs_since(since_1h)?;
-        let requests_last_24h = s.db.count_logs_since(now - 86400)?;
-
-        let (ok_window, total_window) = s.db.ok_total_since(since_window)?;
-        let (ok_1h, total_1h) = s.db.ok_total_since(since_1h)?;
-        let success_rate_in_window = if total_window == 0 {
-            1.0
-        } else {
-            ok_window as f64 / total_window as f64
-        };
-        let success_rate_last_hour = if total_1h == 0 {
-            1.0
-        } else {
-            ok_1h as f64 / total_1h as f64
-        };
-
-        let (p50, p95) = s.db.latency_percentiles(hours)?;
-        let top_models = s.db.top_models(hours, 10)?;
+        let p50 = 0;
+        let p95 = 0;
+        let top_models = Vec::new();
         let per_provider = s.db.per_provider_stats(hours)?;
-        let output_tokens_per_sec_in_window = s.db.output_tokens_per_sec(hours)?;
-        let decode_output_tokens_per_sec_in_window = s.db.decode_output_tokens_per_sec(hours)?;
-        let summary_window = s.db.usage_summary_last_hours(hours)?;
-        let summary_24h = s.db.usage_summary_last_hours(24)?;
+        let output_tokens_per_sec_in_window = 0.0;
+        let decode_output_tokens_per_sec_in_window = 0.0;
+        let summary_window = UsageSummary {
+            range: format!("last_{hours}h"),
+            requests: requests_last_hour,
+            input_tokens: recent_1h.items.iter().map(|row| row.input_tokens).sum(),
+            output_tokens: recent_1h.items.iter().map(|row| row.output_tokens).sum(),
+            cache_read_tokens: recent_1h.items.iter().map(|row| row.cache_read_tokens).sum(),
+            cache_creation_tokens: recent_1h.items.iter().map(|row| row.cache_creation_tokens).sum(),
+            estimated_cost_usd: "0".into(),
+        };
+        let summary_24h = summary_window.clone();
 
         let window_label = match hours {
             1 => "Last 1 hour".to_string(),
@@ -1132,202 +1088,4 @@ pub(super) async fn build_dashboard_stats(
     })
     .await?;
     Ok(stats)
-}
-
-pub(crate) fn publish_dashboard_stats_soon(state: AppState) {
-    if state
-        .dashboard_stats_publish_pending
-        .swap(true, Ordering::Relaxed)
-    {
-        return;
-    }
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        for hours in [1, 24] {
-            match build_dashboard_stats(state.clone(), hours).await {
-                Ok(stats) => state.ws.publish(WsEvent::DashboardStatsChanged(stats)),
-                Err(e) => tracing::warn!(?e, hours, "build dashboard stats ws event failed"),
-            }
-        }
-        state
-            .dashboard_stats_publish_pending
-            .store(false, Ordering::Relaxed);
-    });
-}
-
-pub(super) async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| ws_session(socket, state))
-}
-
-pub(super) async fn ws_session(socket: WebSocket, state: AppState) {
-    let (mut tx, mut rx) = socket.split();
-    let mut sub = state.ws.subscribe();
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<WsEvent>(32);
-    let hello = WsEvent::Hello {
-        version: VERSION.into(),
-    };
-    if let Ok(j) = serde_json::to_string(&hello) {
-        let _ = tx.send(Message::Text(j)).await;
-    }
-    if let Ok(snapshot) = compute_status(state.clone()).await {
-        if let Ok(j) = serde_json::to_string(&WsEvent::StatusChanged(snapshot)) {
-            let _ = tx.send(Message::Text(j)).await;
-        }
-    }
-    loop {
-        tokio::select! {
-            ev = sub.recv() => {
-                let Ok(ev) = ev else { break };
-                let Ok(j) = serde_json::to_string(&ev) else { continue };
-                if tx.send(Message::Text(j)).await.is_err() { break; }
-            }
-            ev = outbound_rx.recv() => {
-                let Some(ev) = ev else { continue };
-                let Ok(j) = serde_json::to_string(&ev) else { continue };
-                if tx.send(Message::Text(j)).await.is_err() { break; }
-            }
-            incoming = rx.next() => {
-                match incoming {
-                    None => break,
-                    Some(Err(_)) => break,
-                    Some(Ok(Message::Close(_))) => break,
-                    Some(Ok(Message::Text(text))) => {
-                        handle_ws_client_text(state.clone(), outbound_tx.clone(), text.to_string()).await;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
-pub(super) async fn handle_ws_client_text(
-    state: AppState,
-    outbound: mpsc::Sender<WsEvent>,
-    text: String,
-) {
-    let Ok(message) = serde_json::from_str::<WsClientMessage>(&text) else {
-        return;
-    };
-    match message {
-        WsClientMessage::Snapshot {
-            request_id,
-            topic,
-            hours,
-            client,
-        } => {
-            let request_id = request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            tokio::spawn(async move {
-                match topic.as_str() {
-                    "status" => {
-                        if let Ok(snapshot) = compute_status(state.clone()).await {
-                            let _ = outbound.send(WsEvent::StatusChanged(snapshot)).await;
-                        }
-                    }
-                    "dashboard-stats" => {
-                        let hours = hours.unwrap_or(24).clamp(1, 24 * 30);
-                        if let Ok(stats) = build_dashboard_stats(state.clone(), hours).await {
-                            let _ = outbound.send(WsEvent::DashboardStatsChanged(stats)).await;
-                        }
-                    }
-                    "providers-overview" => {
-                        let hours = hours.unwrap_or(default_rolling_hours()).clamp(1, 24 * 30);
-                        stream_providers_overview(state.clone(), outbound, request_id, hours).await;
-                    }
-                    "codex-app-status" => {
-                        if let Ok(Ok(status)) = tokio::task::spawn_blocking(codex_app_status).await
-                        {
-                            let _ = outbound.send(WsEvent::CodexAppStatusChanged(status)).await;
-                        }
-                    }
-                    "client-status" => {
-                        if let Some(client) = client {
-                            if let Ok(status) = client_status_inner(&client, state.port) {
-                                let _ = outbound.send(WsEvent::ClientStatusChanged(status)).await;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            });
-        }
-    }
-}
-
-pub(super) async fn stream_providers_overview(
-    state: AppState,
-    outbound: mpsc::Sender<WsEvent>,
-    request_id: String,
-    hours: i64,
-) {
-    let Ok(overview) = build_providers_overview(state, hours).await else {
-        return;
-    };
-    let _ = outbound
-        .send(WsEvent::ProvidersOverviewStreamStarted(
-            ProvidersOverviewStreamStarted {
-                request_id: request_id.clone(),
-                rolling_hours: hours,
-            },
-        ))
-        .await;
-    let _ = outbound
-        .send(WsEvent::ProvidersOverviewProvidersChunk(
-            ProvidersOverviewProvidersChunk {
-                request_id: request_id.clone(),
-                rolling_hours: hours,
-                providers: overview.providers,
-            },
-        ))
-        .await;
-    let _ = outbound
-        .send(WsEvent::ProvidersOverviewHealthChunk(
-            ProvidersOverviewHealthChunk {
-                request_id: request_id.clone(),
-                rolling_hours: hours,
-                health: overview.health,
-            },
-        ))
-        .await;
-    let _ = outbound
-        .send(WsEvent::ProvidersOverviewPoolsChunk(
-            ProvidersOverviewPoolsChunk {
-                request_id: request_id.clone(),
-                rolling_hours: hours,
-                pools: overview.pools,
-            },
-        ))
-        .await;
-    for (provider_id, credentials) in overview.credentials {
-        let _ = outbound
-            .send(WsEvent::ProvidersOverviewCredentialsChunk(
-                ProvidersOverviewCredentialsChunk {
-                    request_id: request_id.clone(),
-                    rolling_hours: hours,
-                    provider_id,
-                    credentials,
-                },
-            ))
-            .await;
-    }
-    for (provider_id, codex_plans) in overview.codex_plans {
-        let _ = outbound
-            .send(WsEvent::ProvidersOverviewCodexPlansChunk(
-                ProvidersOverviewCodexPlansChunk {
-                    request_id: request_id.clone(),
-                    rolling_hours: hours,
-                    provider_id,
-                    codex_plans,
-                },
-            ))
-            .await;
-    }
-    let _ = outbound
-        .send(WsEvent::ProvidersOverviewStreamEnded(
-            ProvidersOverviewStreamEnded {
-                request_id,
-                rolling_hours: hours,
-            },
-        ))
-        .await;
 }

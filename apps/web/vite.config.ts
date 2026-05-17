@@ -5,7 +5,6 @@ import type { Plugin } from "vite";
 import { defineConfig } from "vite-plus";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
-import UnoCSS from "unocss/vite";
 import singleton from "unplugin-singleton/vite";
 import caddyLocalhost from "unplugin-caddy-localhost/vite";
 
@@ -75,7 +74,6 @@ export default defineConfig({
     ...(process.env.NODE_ENV === "test" || process.env.VITEST ? [] : [singleton()]),
     vue(),
     tailwindcss(),
-    UnoCSS(),
     generateUiManifest(pkg.version),
   ],
   build: {

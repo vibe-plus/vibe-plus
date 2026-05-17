@@ -48,7 +48,7 @@ async function setTab(tab: MonitorTab) {
           "
           @click="setTab('network')"
         >
-          <span class="i-lucide-network size-3.5" aria-hidden="true" />
+          <span class="i-[lucide--network] size-3.5" aria-hidden="true" />
           Network
         </button>
         <button
@@ -61,7 +61,7 @@ async function setTab(tab: MonitorTab) {
           "
           @click="setTab('logs')"
         >
-          <span class="i-lucide-scroll-text size-3.5" aria-hidden="true" />
+          <span class="i-[lucide--scroll-text] size-3.5" aria-hidden="true" />
           Logs
         </button>
       </div>

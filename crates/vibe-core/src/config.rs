@@ -3,8 +3,8 @@
 //! There is **no** user-editable config file anymore. Every field below is a
 //! hard-coded default that the binary uses at startup. The `Config` struct is
 //! still threaded through `AppState` because many call sites read fields like
-//! `state.config.failover.inject_cache` or `state.config.log.bodies` — but the
-//! struct is constructed once via `Config::default()` and never mutated or
+//! `state.config.failover.inject_cache` — but the struct is constructed once
+//! via `Config::default()` and never mutated or
 //! persisted to disk.
 //!
 //! If you need to change one of these knobs, change the constant inline.
@@ -64,8 +64,6 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogConfig {
-    /// Raw request/response bodies are persisted for log inspection.
-    pub bodies: bool,
     /// When true, sensitive inbound headers such as Authorization and x-api-key are redacted.
     pub redact_sensitive_headers: bool,
 }
@@ -73,7 +71,6 @@ pub struct LogConfig {
 impl Default for LogConfig {
     fn default() -> Self {
         Self {
-            bodies: true,
             redact_sensitive_headers: true,
         }
     }

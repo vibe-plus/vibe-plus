@@ -439,8 +439,8 @@ pub(crate) async fn try_one_pick(
                 Usage::default(),
             );
             attempt_log.response_headers = retryable_resp_headers_snapshot.clone();
-            attempt_log.request_body = ctx.request_snapshot.clone();
-            attempt_log.response_body = lossy_optional_body(&body_bytes);
+            
+            
             persist_upstream_attempt_log(&state, attempt_log);
             return PickResult::Retry {
                 last_error: msg,
@@ -485,8 +485,8 @@ pub(crate) async fn try_one_pick(
             Usage::default(),
         );
         attempt_log.response_headers = retryable_resp_headers_snapshot;
-        attempt_log.request_body = ctx.request_snapshot.clone();
-        attempt_log.response_body = lossy_optional_body(&body_bytes);
+        
+        
         persist_upstream_attempt_log(&state, attempt_log);
         return PickResult::Retry {
             last_error: msg,
@@ -532,8 +532,8 @@ pub(crate) async fn try_one_pick(
             Usage::default(),
         );
         attempt_log.response_headers = resp_headers_snapshot;
-        attempt_log.request_body = ctx.request_snapshot.clone();
-        attempt_log.response_body = lossy_optional_body(&buf);
+        
+        
         persist_upstream_attempt_log(&state, attempt_log);
         let log = build_log(
             &log_ctx,
@@ -549,12 +549,8 @@ pub(crate) async fn try_one_pick(
             err_stored.clone(),
             Some(format!("client error {status}")),
             Usage::default(),
-            ctx.request_snapshot.clone(),
-            if state.config.log.bodies {
-                lossy_optional_body(&buf)
-            } else {
-                None
-            },
+            None,
+            None,
         );
         persist_log(&state, log);
         return PickResult::Final((status, resp_headers, buf).into_response());
@@ -621,7 +617,7 @@ pub(crate) async fn try_one_pick(
             ctx.requested_model.clone(),
             upstream_model,
             log_ctx,
-            ctx.request_snapshot.clone(),
+            None,
             visual,
         ));
     }
@@ -641,7 +637,7 @@ pub(crate) async fn try_one_pick(
                 Usage::default(),
             );
             attempt_log.response_headers = resp_headers_snapshot.clone();
-            attempt_log.request_body = ctx.request_snapshot.clone();
+            
             persist_upstream_attempt_log(&state, attempt_log);
             let log = build_log(
                 &log_ctx,
@@ -657,7 +653,7 @@ pub(crate) async fn try_one_pick(
                 None,
                 Some(format!("read upstream: {e}")),
                 Usage::default(),
-                ctx.request_snapshot.clone(),
+                None,
                 None,
             );
             persist_log(&state, log);
@@ -681,8 +677,8 @@ pub(crate) async fn try_one_pick(
         usage,
     );
     attempt_log.response_headers = resp_headers_snapshot;
-    attempt_log.request_body = ctx.request_snapshot.clone();
-    attempt_log.response_body = lossy_optional_body(&buf);
+    
+    
     let do_c2r = needs_chat_to_responses_bridge(ctx.wire, provider.kind);
     if do_c2r {
         attempt_log.bridge_mode = Some("c2r".into());
@@ -718,18 +714,18 @@ pub(crate) async fn try_one_pick(
         None,
         None,
         usage,
-        ctx.request_snapshot.clone(),
-        lossy_optional_body(&buf),
+        None,
+        None,
     );
     let client_body = if do_c2r {
         let session_id = format!("resp-{}", uuid::Uuid::new_v4().simple());
         let item_id = format!("msg-{}", uuid::Uuid::new_v4().simple());
         let converted = transforms::chat_body_to_responses(&client_body, &session_id, &item_id);
-        log.client_response_body = lossy_optional_body(&converted);
+        log.client_response_body = None;
         converted
     } else {
         if client_body != buf {
-            log.client_response_body = lossy_optional_body(&client_body);
+            log.client_response_body = None;
         }
         client_body
     };
@@ -782,10 +778,10 @@ pub(crate) async fn try_one_pick(
         let item_id = format!("vibe_route_{}", uuid::Uuid::new_v4().simple());
         let with_status =
             transforms::prepend_response_message(&client_body, &item_id, &status_text);
-        log.client_response_body = lossy_optional_body(&with_status);
+        log.client_response_body = None;
         with_status
     } else {
-        log.client_response_body = lossy_optional_body(&client_body);
+        log.client_response_body = None;
         client_body
     };
     remember_codex_sticky_route_for_pick(
