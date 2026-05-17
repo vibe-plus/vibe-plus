@@ -367,8 +367,18 @@ impl SummaryAccumulator {
         }
     }
 
-    /// Persist turn cost and return cumulative thread cost (call after slot reserve).
+    /// Return cumulative conversation cost. Prefer Codex's own durable rollout
+    /// counters (`~/.codex/sessions/**/*.jsonl`) so restarting Vibe does not
+    /// reset Σusd. Fall back to the in-memory accumulator when no rollout file
+    /// can be found (older/non-Codex clients).
     fn persist_thread_cost(&self, turn_cost: f64) -> Option<f64> {
+        if let Some(thread_id) = self.thread_id.as_deref() {
+            if let Some(cost) = crate::codex_session_usage::usage_for_session_id(thread_id)
+                .and_then(|usage| usage.total_cost_usd)
+            {
+                return Some(cost);
+            }
+        }
         let state = self.state.as_ref()?;
         let thread_id = self.thread_id.as_deref()?;
         Some(state.add_codex_thread_cost(thread_id, turn_cost))
@@ -524,6 +534,9 @@ impl SummaryAccumulator {
         }
         let mut metrics = self.build_metrics(latency_ms);
         let _ = render_summary(&self.cfg, self.client, metrics)?;
+        if !self.has_message_summary_target(frame_json) {
+            return None;
+        }
         if let Some(state) = &self.state {
             if !reserve_summary_slot(state, self.turn_id.as_deref(), self.client) {
                 self.emitted = true;

@@ -13,6 +13,7 @@ pub mod circuit_breaker;
 pub mod claude_summary;
 pub mod codex_auth_json;
 pub mod codex_plan_headers;
+pub mod codex_session_usage;
 pub mod codex_summary;
 pub mod codex_upstream_ws;
 pub mod codex_visual;
