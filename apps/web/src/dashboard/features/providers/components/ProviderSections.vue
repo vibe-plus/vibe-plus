@@ -10,6 +10,9 @@ import type {
 } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderCard from "./provider-card.vue";
+import UiBadge from "../../../components/ui/badge.vue";
+import UiButton from "../../../components/ui/button.vue";
+import UiCard from "../../../components/ui/card.vue";
 import type { ProviderSectionView } from "../types.ts";
 
 const props = defineProps<{
@@ -80,84 +83,80 @@ function tokensPerSec(providerId: string): number | null | undefined {
 </script>
 
 <template>
-  <div class="space-y-3">
-    <div v-for="section in sections" :key="section.key" class="space-y-2.5">
-      <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 shadow-sm">
-        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div class="min-w-0 flex-1">
+  <div class="space-y-4">
+    <UiCard v-for="section in sections" :key="section.key" class="overflow-hidden">
+      <div class="border-b border-border bg-muted/40 px-4 py-4 sm:px-5">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div class="min-w-0 flex-1 space-y-2">
             <div class="flex min-w-0 flex-wrap items-center gap-2">
-              <span :class="['i-lucide-layers-3', 'size-4 text-slate-500']" aria-hidden="true" />
-              <h2 class="text-sm font-semibold text-slate-900">{{ section.title }}</h2>
               <span
-                class="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-600"
+                class="inline-flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary"
               >
-                {{ section.summary.enabledEndpoints }}/{{ section.summary.totalEndpoints }}
-                endpoints
+                <VpIcon name="layers-3" size-class="size-4" />
               </span>
-              <span
-                v-if="section.summary.activeRequests"
-                class="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700"
-              >
-                live {{ section.summary.activeRequests }}
-              </span>
-              <span
-                v-if="section.summary.blockedCredentials"
-                class="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800"
-              >
-                {{ section.summary.blockedCredentials }} blocked creds
-              </span>
+              <div class="min-w-0">
+                <h2 class="truncate text-base font-semibold text-foreground">
+                  {{ section.title }}
+                </h2>
+                <p class="text-xs text-muted-foreground">{{ section.description }}</p>
+              </div>
             </div>
-            <div
-              class="mt-2 grid grid-cols-2 gap-1.5 text-[11px] text-slate-500 sm:grid-cols-3 lg:grid-cols-4"
-            >
-              <span class="rounded-md bg-slate-50 px-2 py-1"
-                >{{ section.summary.availableCredentials }}/{{
-                  section.summary.enabledCredentials
+            <div class="flex flex-wrap gap-2 text-xs">
+              <UiBadge variant="secondary">
+                {{ section.summary.enabledEndpoints }}/{{ section.summary.totalEndpoints }} active
+              </UiBadge>
+              <UiBadge v-if="section.summary.activeRequests" variant="default">
+                live {{ section.summary.activeRequests }}
+              </UiBadge>
+              <UiBadge v-if="section.summary.blockedCredentials" variant="outline">
+                {{ section.summary.blockedCredentials }} blocked creds
+              </UiBadge>
+              <UiBadge variant="outline">
+                {{ section.summary.availableCredentials }}/{{ section.summary.enabledCredentials }}
+                creds
+              </UiBadge>
+              <UiBadge variant="outline">
+                {{
+                  section.summary.fastestLatencyMs == null
+                    ? "no speed"
+                    : `${Math.round(section.summary.fastestLatencyMs)}ms best`
                 }}
-                credentials</span
-              >
-              <span class="rounded-md bg-slate-50 px-2 py-1">{{
-                section.summary.fastestLatencyMs == null
-                  ? "no speed"
-                  : `${Math.round(section.summary.fastestLatencyMs)}ms best`
-              }}</span>
-              <span class="rounded-md bg-slate-50 px-2 py-1"
-                >{{ section.summary.remoteModels }} models</span
-              >
-              <span class="rounded-md bg-slate-50 px-2 py-1"
-                >{{ section.summary.nativeEndpoints }} native /
-                {{ section.summary.bridgedEndpoints }} bridge</span
-              >
+              </UiBadge>
+              <UiBadge variant="outline">{{ section.summary.remoteModels }} models</UiBadge>
+              <UiBadge variant="outline">
+                {{ section.summary.nativeEndpoints }} native ·
+                {{ section.summary.bridgedEndpoints }} bridge
+              </UiBadge>
             </div>
           </div>
-          <div class="flex shrink-0 items-center gap-2">
-            <button
-              type="button"
-              class="btn-ghost inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs"
+          <div class="flex shrink-0 flex-wrap items-center gap-2">
+            <UiButton
+              size="sm"
+              variant="outline"
               :disabled="sectionSpeedtestBusy(section)"
               @click="emit('speedtestProviders', providerIdsFromSection(section))"
             >
-              <VpIcon name="radar" size-class="size-3.5" :spin="sectionSpeedtestBusy(section)" />
-              probe
-            </button>
-            <button
-              type="button"
-              class="btn-ghost inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs"
+              <VpIcon name="radar" size-class="size-4" :spin="sectionSpeedtestBusy(section)" />
+              Probe
+            </UiButton>
+            <UiButton
+              size="sm"
+              variant="outline"
               :disabled="sectionModelRefreshBusy(section)"
               @click="emit('refreshProviderModelsForProviders', providerIdsFromSection(section))"
             >
               <VpIcon
                 name="book-open"
-                size-class="size-3.5"
+                size-class="size-4"
                 :spin="sectionModelRefreshBusy(section)"
               />
-              models
-            </button>
+              Models
+            </UiButton>
           </div>
         </div>
       </div>
 
-      <div class="grid grid-cols-1 gap-3">
+      <div class="space-y-3 p-4 sm:p-5">
         <ProviderCard
           v-for="card in section.providers"
           :id="`provider-${card.provider.id}`"
@@ -181,7 +180,7 @@ function tokensPerSec(providerId: string): number | null | undefined {
           :detect-vendor-busy="!!detectVendorBusy[card.provider.id]"
           :class="[
             highlightedProviderId === card.provider.id
-              ? 'ring-2 ring-sky-300 ring-offset-2 ring-offset-vp-bg'
+              ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background'
               : '',
           ]"
           @sync-creds="emit('syncCreds', $event)"
@@ -201,6 +200,6 @@ function tokensPerSec(providerId: string): number | null | undefined {
           @view-logs="emit('viewLogs', $event)"
         />
       </div>
-    </div>
+    </UiCard>
   </div>
 </template>

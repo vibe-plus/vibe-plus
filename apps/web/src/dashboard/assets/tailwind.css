@@ -1,0 +1,35 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme inline {
+  --color-background: var(--vp-bg);
+  --color-foreground: var(--vp-text);
+  --color-card: var(--vp-surface);
+  --color-card-foreground: var(--vp-text);
+  --color-popover: var(--vp-surface);
+  --color-popover-foreground: var(--vp-text);
+  --color-primary: var(--vp-primary);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: color-mix(in srgb, var(--vp-text) 5%, var(--vp-surface));
+  --color-secondary-foreground: var(--vp-text);
+  --color-muted: color-mix(in srgb, var(--vp-text) 4%, var(--vp-surface));
+  --color-muted-foreground: var(--vp-muted);
+  --color-accent: color-mix(in srgb, var(--vp-primary) 12%, var(--vp-surface));
+  --color-accent-foreground: var(--vp-text);
+  --color-destructive: var(--vp-danger);
+  --color-destructive-foreground: #ffffff;
+  --color-border: var(--vp-border);
+  --color-input: var(--vp-border);
+  --color-ring: var(--vp-primary);
+  --radius: 0.8rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/40;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}

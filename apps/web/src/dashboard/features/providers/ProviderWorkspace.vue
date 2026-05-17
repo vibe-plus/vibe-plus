@@ -26,6 +26,9 @@ import { resolvePageAccent } from "../../utils/page-accent.ts";
 import { displayProviderName } from "../../utils/providers-display.ts";
 import { hintsFromAuthJsonTokens } from "../../utils/codex-oauth-hints.ts";
 import VpIcon from "../../components/vp-icon.vue";
+import UiButton from "../../components/ui/button.vue";
+import UiCard from "../../components/ui/card.vue";
+import UiSkeleton from "../../components/ui/skeleton.vue";
 import ProviderSections from "./components/ProviderSections.vue";
 import ProviderSmartModal from "./components/provider-smart-modal.vue";
 import ProviderImportModal from "./components/provider-import-modal.vue";
@@ -651,6 +654,10 @@ function sectionModelRefreshBusy(section: ProviderSectionView): boolean {
 }
 
 const providerTabs = computed(() => PROVIDER_TAB_OPTIONS);
+const activeToolTab = computed<ClientToolInfo | null>(() => {
+  if (activeProviderTab.value === "common") return null;
+  return CLIENT_TOOLS.find((tool) => tool.id === activeProviderTab.value) ?? null;
+});
 
 const providerSections = computed<ProviderSectionView[]>(() =>
   buildProviderSections({
@@ -1147,7 +1154,7 @@ useWs((ev: unknown) => {
 
 <template>
   <div class="mx-auto w-full max-w-[1040px]">
-    <div class="relative mb-4 rounded-xl border border-slate-200/90 bg-vp-surface shadow-sm">
+    <UiCard class="relative mb-4 overflow-hidden">
       <div
         class="relative z-10 flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between"
       >
@@ -1156,44 +1163,46 @@ useWs((ev: unknown) => {
           <h1 :class="['text-2xl font-bold tracking-tight', pageAccent.heading]">Providers</h1>
         </div>
         <div class="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:w-auto">
-          <button
+          <UiButton
             type="button"
-            class="btn-ghost flex min-h-11 items-center justify-center gap-2 px-3 py-2 text-sm rounded-lg border border-vp-border/80 sm:py-1.5"
+            variant="outline"
+            class="min-h-11 sm:min-h-9"
             title="Local import"
             aria-label="Local import"
             @click="showImportModal = true"
           >
             <VpIcon name="folder-input" size-class="size-4 shrink-0" />
             <span class="hidden sm:inline">Import</span>
-          </button>
-          <button
+          </UiButton>
+          <UiButton
             type="button"
-            :class="[
-              'flex min-h-11 min-w-11 items-center justify-center gap-2 px-3 py-2 sm:py-1.5 rounded-lg text-sm font-medium',
-              pageAccent.btnPrimary,
-            ]"
+            class="min-h-11 min-w-11 sm:min-h-9"
             aria-label="provider:add"
             title="provider:add"
             @click="startAdd"
           >
             <VpIcon name="plus" size-class="size-4 shrink-0 text-white" />
             <span class="sr-only">provider:add</span>
-          </button>
+          </UiButton>
         </div>
       </div>
-    </div>
+    </UiCard>
 
     <div
       v-if="error"
-      class="mb-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-2"
+      class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
     >
       {{ error }}
     </div>
 
-    <div v-if="loading" class="text-slate-500 text-sm">...</div>
+    <div v-if="loading" class="space-y-4">
+      <UiSkeleton class="h-28 w-full" />
+      <UiSkeleton class="h-36 w-full" />
+      <UiSkeleton class="h-36 w-full" />
+    </div>
     <div
       v-else-if="providers.length === 0"
-      class="font-mono text-slate-500 text-sm py-12 text-center"
+      class="rounded-xl border border-dashed border-border bg-card py-12 text-center font-mono text-sm text-muted-foreground"
       title="empty"
       aria-label="empty"
     >

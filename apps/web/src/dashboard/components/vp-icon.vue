@@ -50,6 +50,7 @@ export type vp_icon_name =
   | "square"
   | "globe"
   | "radar"
+  | "layers-3"
   | "clock"
   | "scan-search";
 
@@ -110,6 +111,7 @@ const iconClassByName: Record<vp_icon_name, string> = {
   square: "i-lucide-square",
   globe: "i-lucide-globe",
   radar: "i-lucide-radar",
+  "layers-3": "i-lucide-layers-3",
   clock: "i-lucide-clock-3",
   "scan-search": "i-lucide-scan-search",
 };
