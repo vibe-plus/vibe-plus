@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
+import { useI18n } from "vue-i18n";
 import type {
   Provider,
   ProviderInput,
@@ -10,6 +11,8 @@ import type {
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderLogo from "../../../components/provider-logo.vue";
 import { credentialPrimaryAccountLabel } from "../../../utils/providers-display.ts";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   open: boolean;
@@ -61,7 +64,7 @@ interface Preset {
 const PRESETS: Preset[] = [
   {
     label: "OpenAI",
-    icon: "i-lucide-bot",
+    icon: "i-[lucide--bot]",
     name: "OpenAI",
     kind: "openai-responses",
     base_url: "https://api.openai.com",
@@ -69,7 +72,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Anthropic",
-    icon: "i-lucide-sparkles",
+    icon: "i-[lucide--sparkles]",
     name: "Anthropic",
     kind: "anthropic",
     base_url: "https://api.anthropic.com",
@@ -77,7 +80,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "DeepSeek",
-    icon: "i-lucide-brain",
+    icon: "i-[lucide--brain]",
     name: "DeepSeek",
     kind: "openai-chat",
     base_url: "https://api.deepseek.com",
@@ -85,7 +88,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Gemini",
-    icon: "i-lucide-gem",
+    icon: "i-[lucide--gem]",
     name: "Google Gemini",
     kind: "gemini-native",
     base_url: "https://generativelanguage.googleapis.com/v1beta",
@@ -93,7 +96,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Qwen",
-    icon: "i-lucide-cloud",
+    icon: "i-[lucide--cloud]",
     name: "Qwen",
     kind: "openai-chat",
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -101,7 +104,7 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Moonshot",
-    icon: "i-lucide-moon",
+    icon: "i-[lucide--moon]",
     name: "Moonshot",
     kind: "openai-chat",
     base_url: "https://api.moonshot.cn/v1",
@@ -358,8 +361,8 @@ function tryParse(raw: string): boolean {
         }
         form.value = next;
         parseNote.value = pendingCredentialAuthRef.value
-          ? "Parsed provider profile; API key will be saved as a credential."
-          : "Parsed provider profile from JSON.";
+          ? t("parseNotes.providerProfileWithKey")
+          : t("parseNotes.providerProfile");
         return true;
       }
 
@@ -373,7 +376,7 @@ function tryParse(raw: string): boolean {
           next.base_url = preset.base_url;
           stashCredentialKey(val.trim());
           form.value = next;
-          parseNote.value = `Detected ${preset.name} from ${envKey}; key will be saved as a credential.`;
+          parseNote.value = t("parseNotes.detectedFromEnv", { name: preset.name, envKey });
           return true;
         }
       }
@@ -395,7 +398,7 @@ function tryParse(raw: string): boolean {
       next.base_url = preset.base_url;
       stashCredentialKey(envVal);
       form.value = next;
-      parseNote.value = `Detected ${preset.name} from ${envKey}; key will be saved as a credential.`;
+      parseNote.value = t("parseNotes.detectedFromEnv", { name: preset.name, envKey });
       return true;
     }
   }
@@ -412,9 +415,9 @@ function tryParse(raw: string): boolean {
     next.base_url = det.base_url;
     if (keyMatch) {
       stashCredentialKey(keyMatch[0]);
-      parseNote.value = `Detected ${det.name} from URL + key; key will be saved as a credential.`;
+      parseNote.value = t("parseNotes.detectedFromUrlKey", { name: det.name });
     } else {
-      parseNote.value = `Detected ${det.name} from URL.`;
+      parseNote.value = t("parseNotes.detectedFromUrl", { name: det.name });
     }
     form.value = next;
     return true;
@@ -431,12 +434,12 @@ function tryParse(raw: string): boolean {
       next.base_url = det.base_url;
       stashCredentialKey(key);
       form.value = next;
-      parseNote.value = `Detected ${det.name} from API key; key will be saved as a credential.`;
+      parseNote.value = t("parseNotes.detectedFromApiKey", { name: det.name });
       return true;
     }
   }
 
-  parseError.value = "Could not parse input. Paste JSON, base URL, env line, or URL + API key.";
+  parseError.value = t("parseErrors.unrecognized");
   return false;
 }
 
@@ -458,13 +461,13 @@ async function readClipboard() {
   try {
     const text = await navigator.clipboard.readText();
     if (!text.trim()) {
-      parseError.value = "Clipboard is empty.";
+      parseError.value = t("parseErrors.clipboardEmpty");
       return;
     }
     pasteRaw.value = text;
     if (tryParse(text)) phase.value = "review";
   } catch {
-    parseError.value = "Could not read clipboard — paste into the text box instead.";
+    parseError.value = t("parseErrors.clipboardReadFailed");
   }
 }
 
@@ -483,7 +486,7 @@ function applyPreset(p: Preset) {
     model_aliases: [],
   };
   pendingCredentialAuthRef.value = null;
-  parseNote.value = `Applied “${p.label}” preset.`;
+  parseNote.value = t("parseNotes.appliedPreset", { label: p.label });
   phase.value = "review";
 }
 
@@ -517,8 +520,8 @@ function kindLabel(kind: ProviderKind): string {
 }
 
 const title = computed(() => {
-  if (props.editTarget) return "Edit provider";
-  return phase.value === "review" ? "Review configuration" : "Add provider";
+  if (props.editTarget) return t("title.edit");
+  return phase.value === "review" ? t("title.review") : t("title.add");
 });
 
 const hasLegacyProviderKey = computed(() => !!props.editTarget?.auth_ref?.trim());
@@ -599,7 +602,7 @@ function handleSave() {
           <button
             type="button"
             class="vp-icon-btn shrink-0"
-            aria-label="Close"
+            :aria-label="t('actions.close')"
             @click="emit('close')"
           >
             <VpIcon name="x" size-class="size-5" />
@@ -609,15 +612,14 @@ function handleSave() {
         <!-- ── PASTE PHASE ── -->
         <div v-if="phase === 'paste'" class="flex flex-1 flex-col overflow-y-auto px-5 py-5">
           <p class="mb-3 text-sm text-vp-muted">
-            Paste JSON, a base URL, or an env line. API keys are stored as credentials only — never
-            on the provider.
+            {{ t("paste.description") }}
           </p>
 
           <textarea
             :value="pasteRaw"
             rows="6"
             class="w-full resize-none rounded-xl border border-vp-border bg-white px-4 py-3 font-mono text-sm text-slate-900 placeholder:text-slate-400 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20"
-            placeholder="JSON config / base URL / KEY=value / URL + API key…"
+            :placeholder="t('paste.placeholder')"
             @input="onTextareaInput"
             @paste="onTextareaPaste"
           />
@@ -631,7 +633,7 @@ function handleSave() {
               @click="readClipboard"
             >
               <VpIcon name="clipboard" size-class="size-4" />
-              Read clipboard
+              {{ t("actions.readClipboard") }}
             </button>
             <button
               v-if="pasteRaw.trim()"
@@ -640,14 +642,14 @@ function handleSave() {
               @click="doParseAndAdvance"
             >
               <VpIcon name="sparkles" size-class="size-4" />
-              Parse
+              {{ t("actions.parse") }}
             </button>
           </div>
 
           <!-- Presets -->
           <div class="mt-5">
             <p class="mb-2.5 text-xs font-medium uppercase tracking-wide text-vp-muted">
-              Or pick a preset
+              {{ t("paste.pickPreset") }}
             </p>
             <div class="grid grid-cols-3 gap-2">
               <button
@@ -669,7 +671,7 @@ function handleSave() {
             class="mt-4 self-start text-xs text-vp-muted hover:text-vp-text hover:underline"
             @click="phase = 'review'"
           >
-            Skip — fill in manually →
+            {{ t("actions.skipManual") }}
           </button>
         </div>
 
@@ -679,32 +681,38 @@ function handleSave() {
             v-if="hasLegacyProviderKey"
             class="rounded-xl border border-amber-200 bg-amber-50/80 px-3 py-2.5 text-xs text-amber-950"
           >
-            This provider has a legacy provider-level API key. Saving clears it — manage keys under
-            <strong>Credentials</strong> below.
+            {{ t("hints.legacyKeyBefore") }} <strong>{{ t("sections.credentials") }}</strong>
+            {{ t("hints.legacyKeyAfter") }}
           </p>
           <p
             v-else-if="pendingCredentialAuthRef"
             class="rounded-xl border border-emerald-200 bg-emerald-50/80 px-3 py-2.5 text-xs text-emerald-950"
           >
-            An API key was detected and will be created as a <strong>credential</strong> when you
-            save (not stored on the provider).
+            {{ t("hints.detectedKeyBefore") }} <strong>{{ t("hints.credential") }}</strong>
+            {{ t("hints.detectedKeyAfter") }}
           </p>
 
           <!-- Core fields -->
           <section class="space-y-3 rounded-2xl border border-vp-border bg-white p-4">
-            <h3 class="text-xs font-semibold uppercase tracking-wide text-vp-muted">Basics</h3>
+            <h3 class="text-xs font-semibold uppercase tracking-wide text-vp-muted">
+              {{ t("sections.basics") }}
+            </h3>
             <div class="grid gap-3 sm:grid-cols-2">
               <label>
-                <span class="mb-1 block text-xs font-medium text-slate-600">Name</span>
+                <span class="mb-1 block text-xs font-medium text-slate-600">{{
+                  t("fields.name")
+                }}</span>
                 <input
                   v-model="form.name"
                   class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20"
-                  placeholder="Provider name"
+                  :placeholder="t('fields.providerName')"
                 />
               </label>
               <!-- Protocol — visible by default, crucial for compatibility -->
               <label>
-                <span class="mb-1 block text-xs font-medium text-slate-600">Protocol</span>
+                <span class="mb-1 block text-xs font-medium text-slate-600">{{
+                  t("fields.protocol")
+                }}</span>
                 <select
                   v-model="form.kind"
                   class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20"
@@ -715,7 +723,9 @@ function handleSave() {
                 </select>
               </label>
               <label class="sm:col-span-2">
-                <span class="mb-1 block text-xs font-medium text-slate-600">Base URL</span>
+                <span class="mb-1 block text-xs font-medium text-slate-600">{{
+                  t("fields.baseUrl")
+                }}</span>
                 <input
                   v-model="form.base_url"
                   class="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm text-slate-900 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20"
@@ -734,7 +744,7 @@ function handleSave() {
             >
               <span class="flex items-center gap-2">
                 <VpIcon name="settings" size-class="size-4 text-slate-400" />
-                Advanced
+                {{ t("sections.advanced") }}
               </span>
               <VpIcon
                 name="chevron-down"
@@ -745,7 +755,9 @@ function handleSave() {
             <div v-if="showAdvanced" class="border-t border-vp-border/60 px-4 pb-4 pt-3">
               <div class="grid gap-3 sm:grid-cols-2">
                 <label>
-                  <span class="mb-1 block text-xs font-medium text-slate-600">Priority</span>
+                  <span class="mb-1 block text-xs font-medium text-slate-600">{{
+                    t("fields.priority")
+                  }}</span>
                   <input
                     v-model.number="form.priority"
                     type="number"
@@ -753,24 +765,26 @@ function handleSave() {
                   />
                 </label>
                 <label>
-                  <span class="mb-1 block text-xs font-medium text-slate-600">Group</span>
+                  <span class="mb-1 block text-xs font-medium text-slate-600">{{
+                    t("fields.group")
+                  }}</span>
                   <input
                     v-model="form.group_name"
                     class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none"
-                    placeholder="e.g. official / personal"
+                    :placeholder="t('fields.groupPlaceholder')"
                   />
                 </label>
                 <label
                   class="flex cursor-pointer items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
                 >
                   <input v-model="form.enabled" type="checkbox" class="rounded" />
-                  <span>Provider enabled</span>
+                  <span>{{ t("fields.providerEnabled") }}</span>
                 </label>
                 <label
                   class="flex cursor-pointer items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
                 >
                   <input v-model="form.passthrough_mode" type="checkbox" class="rounded" />
-                  <span>Passthrough model names</span>
+                  <span>{{ t("fields.passthrough") }}</span>
                 </label>
               </div>
             </div>
@@ -785,7 +799,7 @@ function handleSave() {
             >
               <span class="flex items-center gap-2">
                 <VpIcon name="route" size-class="size-4 text-slate-400" />
-                Model aliases
+                {{ t("sections.aliases") }}
                 <span
                   v-if="form.model_aliases.length"
                   class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600"
@@ -804,7 +818,7 @@ function handleSave() {
                 v-if="!form.model_aliases.length"
                 class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500"
               >
-                No aliases. Add rows only when upstream model IDs differ from client requests.
+                {{ t("aliases.empty") }}
               </div>
               <div
                 v-for="(alias, index) in form.model_aliases"
@@ -814,12 +828,12 @@ function handleSave() {
                 <input
                   v-model="alias.alias"
                   class="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm focus:border-violet-400 focus:outline-none"
-                  placeholder="Client alias"
+                  :placeholder="t('aliases.clientAlias')"
                 />
                 <input
                   v-model="alias.upstream_model"
                   class="rounded-lg border border-slate-200 px-2.5 py-1.5 font-mono text-sm focus:border-violet-400 focus:outline-none"
-                  placeholder="Upstream model ID"
+                  :placeholder="t('aliases.upstreamModel')"
                 />
                 <button
                   type="button"
@@ -835,7 +849,7 @@ function handleSave() {
                 @click="addAliasRow"
               >
                 <VpIcon name="plus" size-class="size-3.5" />
-                Add row
+                {{ t("actions.addRow") }}
               </button>
             </div>
           </section>
@@ -849,7 +863,7 @@ function handleSave() {
             >
               <span class="flex items-center gap-2">
                 <VpIcon name="key" size-class="size-4 text-slate-400" />
-                Credentials
+                {{ t("sections.credentials") }}
                 <span
                   v-if="creds.length"
                   class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600"
@@ -863,7 +877,7 @@ function handleSave() {
                   class="rounded-md bg-teal-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-teal-700"
                   @click.stop="emit('addCredential')"
                 >
-                  Add
+                  {{ t("actions.add") }}
                 </button>
                 <VpIcon
                   name="chevron-down"
@@ -874,13 +888,13 @@ function handleSave() {
             </button>
             <div v-if="showCreds" class="border-t border-vp-border/60 px-4 pb-4 pt-3">
               <div v-if="loadingCreds" class="py-3 text-center text-xs text-slate-500">
-                Loading…
+                {{ t("states.loading") }}
               </div>
               <div
                 v-else-if="!creds.length"
                 class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500"
               >
-                No credentials yet.
+                {{ t("states.noCredentials") }}
               </div>
               <ul v-else class="space-y-2">
                 <li
@@ -903,21 +917,21 @@ function handleSave() {
                       :disabled="!!credToggleBusy[cred.id]"
                       @click="emit('toggleCredential', cred)"
                     >
-                      {{ cred.enabled ? "Disable" : "Enable" }}
+                      {{ cred.enabled ? t("actions.disable") : t("actions.enable") }}
                     </button>
                     <button
                       type="button"
                       class="rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-700 hover:bg-white"
                       @click="emit('editCredential', cred)"
                     >
-                      Edit
+                      {{ t("actions.edit") }}
                     </button>
                     <button
                       type="button"
                       class="rounded-md border border-red-200 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50"
                       @click="emit('removeCredential', cred)"
                     >
-                      Remove
+                      {{ t("actions.remove") }}
                     </button>
                   </div>
                 </li>
@@ -930,8 +944,8 @@ function handleSave() {
             v-if="!editTarget && !pendingCredentialAuthRef"
             class="rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2.5 text-xs text-amber-900"
           >
-            API keys live under <strong>Credentials</strong> on the provider card after you create
-            this provider — never on the provider record itself.
+            {{ t("hints.keysUnderBefore") }} <strong>{{ t("sections.credentials") }}</strong>
+            {{ t("hints.keysUnderAfter") }}
           </p>
         </div>
 
@@ -946,14 +960,14 @@ function handleSave() {
             @click="backToPaste"
           >
             <VpIcon name="rotate-ccw" size-class="size-4" />
-            Paste again
+            {{ t("actions.pasteAgain") }}
           </button>
           <button
             type="button"
             class="btn-ghost inline-flex flex-1 items-center justify-center gap-1.5 px-4 py-2 text-sm sm:flex-none"
             @click="emit('close')"
           >
-            Cancel
+            {{ t("actions.cancel") }}
           </button>
           <button
             v-if="phase === 'review'"
@@ -962,10 +976,155 @@ function handleSave() {
             @click="handleSave"
           >
             <VpIcon name="check" size-class="size-4" />
-            {{ editTarget ? "Save changes" : "Create provider" }}
+            {{ editTarget ? t("actions.saveChanges") : t("actions.createProvider") }}
           </button>
         </div>
       </div>
     </div>
   </Teleport>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "actions": {
+      "add": "Add",
+      "addRow": "Add row",
+      "cancel": "Cancel",
+      "close": "Close",
+      "createProvider": "Create provider",
+      "disable": "Disable",
+      "edit": "Edit",
+      "enable": "Enable",
+      "parse": "Parse",
+      "pasteAgain": "Paste again",
+      "readClipboard": "Read clipboard",
+      "remove": "Remove",
+      "saveChanges": "Save changes",
+      "skipManual": "Skip — fill in manually →"
+    },
+    "aliases": {
+      "clientAlias": "Client alias",
+      "empty": "No aliases. Add rows only when upstream model IDs differ from client requests.",
+      "upstreamModel": "Upstream model ID"
+    },
+    "fields": {
+      "baseUrl": "Base URL",
+      "group": "Group",
+      "groupPlaceholder": "e.g. official / personal",
+      "name": "Name",
+      "passthrough": "Passthrough model names",
+      "priority": "Priority",
+      "protocol": "Protocol",
+      "providerEnabled": "Provider enabled",
+      "providerName": "Provider name"
+    },
+    "hints": {
+      "credential": "credential",
+      "detectedKeyAfter": "when you save (not stored on the provider).",
+      "detectedKeyBefore": "An API key was detected and will be created as a",
+      "keysUnderAfter": "on the provider card after you create this provider — never on the provider record itself.",
+      "keysUnderBefore": "API keys live under",
+      "legacyKeyAfter": "below.",
+      "legacyKeyBefore": "This provider has a legacy provider-level API key. Saving clears it — manage keys under"
+    },
+    "paste": {
+      "description": "Paste JSON, a base URL, or an env line. API keys are stored as credentials only — never on the provider.",
+      "pickPreset": "Or pick a preset",
+      "placeholder": "JSON config / base URL / KEY=value / URL + API key…"
+    },
+    "parseErrors": {
+      "clipboardEmpty": "Clipboard is empty.",
+      "clipboardReadFailed": "Could not read clipboard — paste into the text box instead.",
+      "unrecognized": "Could not parse input. Paste JSON, base URL, env line, or URL + API key."
+    },
+    "parseNotes": {
+      "appliedPreset": "Applied “{label}” preset.",
+      "detectedFromApiKey": "Detected {name} from API key; key will be saved as a credential.",
+      "detectedFromEnv": "Detected {name} from {envKey}; key will be saved as a credential.",
+      "detectedFromUrl": "Detected {name} from URL.",
+      "detectedFromUrlKey": "Detected {name} from URL + key; key will be saved as a credential.",
+      "providerProfile": "Parsed provider profile from JSON.",
+      "providerProfileWithKey": "Parsed provider profile; API key will be saved as a credential."
+    },
+    "sections": {
+      "advanced": "Advanced",
+      "aliases": "Model aliases",
+      "basics": "Basics",
+      "credentials": "Credentials"
+    },
+    "states": { "loading": "Loading…", "noCredentials": "No credentials yet." },
+    "title": { "add": "Add provider", "edit": "Edit provider", "review": "Review configuration" }
+  },
+  "zh-CN": {
+    "actions": {
+      "add": "添加",
+      "addRow": "添加行",
+      "cancel": "取消",
+      "close": "关闭",
+      "createProvider": "创建供应商",
+      "disable": "禁用",
+      "edit": "编辑",
+      "enable": "启用",
+      "parse": "解析",
+      "pasteAgain": "重新粘贴",
+      "readClipboard": "读取剪贴板",
+      "remove": "移除",
+      "saveChanges": "保存更改",
+      "skipManual": "跳过，手动填写 →"
+    },
+    "aliases": {
+      "clientAlias": "客户端别名",
+      "empty": "暂无别名。仅当上游模型 ID 与客户端请求不同时才需要添加行。",
+      "upstreamModel": "上游模型 ID"
+    },
+    "fields": {
+      "baseUrl": "Base URL",
+      "group": "分组",
+      "groupPlaceholder": "例如 official / personal",
+      "name": "名称",
+      "passthrough": "透传模型名",
+      "priority": "优先级",
+      "protocol": "协议",
+      "providerEnabled": "启用供应商",
+      "providerName": "供应商名称"
+    },
+    "hints": {
+      "credential": "凭证",
+      "detectedKeyAfter": "，保存时创建（不会存到供应商上）。",
+      "detectedKeyBefore": "检测到 API Key，会作为",
+      "keysUnderAfter": "中管理，不会写入供应商记录。",
+      "keysUnderBefore": "创建后 API Key 会在供应商卡片的",
+      "legacyKeyAfter": "中管理。",
+      "legacyKeyBefore": "该供应商存在旧版 provider-level API Key。保存会清除它，请改在"
+    },
+    "paste": {
+      "description": "粘贴 JSON、Base URL 或 env 行。API Key 只会作为凭证保存，绝不存到供应商上。",
+      "pickPreset": "或选择预设",
+      "placeholder": "JSON 配置 / Base URL / KEY=value / URL + API Key…"
+    },
+    "parseErrors": {
+      "clipboardEmpty": "剪贴板为空。",
+      "clipboardReadFailed": "无法读取剪贴板，请直接粘贴到文本框。",
+      "unrecognized": "无法解析输入。请粘贴 JSON、Base URL、env 行，或 URL + API Key。"
+    },
+    "parseNotes": {
+      "appliedPreset": "已应用「{label}」预设。",
+      "detectedFromApiKey": "从 API Key 识别到 {name}；Key 会保存为凭证。",
+      "detectedFromEnv": "从 {envKey} 识别到 {name}；Key 会保存为凭证。",
+      "detectedFromUrl": "从 URL 识别到 {name}。",
+      "detectedFromUrlKey": "从 URL + Key 识别到 {name}；Key 会保存为凭证。",
+      "providerProfile": "已从 JSON 解析供应商配置。",
+      "providerProfileWithKey": "已解析供应商配置；API Key 会保存为凭证。"
+    },
+    "sections": {
+      "advanced": "高级",
+      "aliases": "模型别名",
+      "basics": "基础",
+      "credentials": "凭证"
+    },
+    "states": { "loading": "加载中…", "noCredentials": "暂无凭证。" },
+    "title": { "add": "添加供应商", "edit": "编辑供应商", "review": "检查配置" }
+  }
+}
+</i18n>

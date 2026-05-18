@@ -10,7 +10,6 @@ import {
 } from "../../../utils/client-tools.ts";
 import { displayProviderName } from "../../../utils/providers-display.ts";
 import type {
-  LiveRequestMetric,
   ProviderCardProtocolBadge,
   ProviderCardView,
   ProviderGroupKey,
@@ -23,19 +22,48 @@ export type BuildProviderSectionsInput = {
   selectedTool: ClientToolInfo | null;
   healthMap: Record<string, ProviderHealthSummary>;
   poolByProviderId: Record<string, ProviderAuthPoolSummary>;
-  activeRequestCountsByProvider: Map<string, number>;
-  liveTokensPerSecByProvider: Map<string, number>;
-  liveRequestMetrics: Record<string, LiveRequestMetric>;
+  fallbackGroupName?: string;
+  text?: Partial<ProviderSectionText>;
 };
 
-export function providerGroupName(provider: Provider): string {
-  const trimmed = provider.group_name?.trim();
-  if (trimmed) return trimmed;
-  return "Ungrouped";
+export type ProviderSectionText = {
+  bridge: string;
+  credentialShort: string;
+  fastest: (ms: number) => string;
+  first: (ms: number) => string;
+  models: string;
+  native: string;
+  noCredential: string;
+  notTested: string;
+  success: (pct: number) => string;
+  tokensPerSecond: (value: string) => string;
+};
+
+const DEFAULT_TEXT: ProviderSectionText = {
+  bridge: "bridge",
+  credentialShort: "cred",
+  fastest: (ms) => `${ms}ms best`,
+  first: (ms) => `${ms}ms first`,
+  models: "models",
+  native: "native",
+  noCredential: "no cred",
+  notTested: "not tested",
+  success: (pct) => `${pct}% ok`,
+  tokensPerSecond: (value) => `${value} tok/s`,
+};
+
+function sectionText(input: BuildProviderSectionsInput): ProviderSectionText {
+  return { ...DEFAULT_TEXT, ...input.text };
 }
 
-export function providerGroupKey(provider: Provider): string {
-  return providerGroupName(provider).toLowerCase();
+export function providerGroupName(provider: Provider, fallback = "Ungrouped"): string {
+  const trimmed = provider.group_name?.trim();
+  if (trimmed) return trimmed;
+  return fallback;
+}
+
+export function providerGroupKey(provider: Provider, fallback?: string): string {
+  return providerGroupName(provider, fallback).toLowerCase();
 }
 
 export function buildProviderSections(input: BuildProviderSectionsInput): ProviderSectionView[] {
@@ -49,8 +77,8 @@ export function buildProviderSections(input: BuildProviderSectionsInput): Provid
 
   const grouped = new Map<string, ProviderSectionView>();
   for (const card of cards) {
-    const key = providerGroupKey(card.provider);
-    const title = providerGroupName(card.provider);
+    const key = providerGroupKey(card.provider, input.fallbackGroupName);
+    const title = providerGroupName(card.provider, input.fallbackGroupName);
     const section =
       grouped.get(key) ??
       ({
@@ -72,7 +100,7 @@ export function buildProviderSections(input: BuildProviderSectionsInput): Provid
         ...section,
         providers,
         summary,
-        description: providerSectionDescription(summary),
+        description: providerSectionDescription(summary, sectionText(input)),
       };
     })
     .sort((a, b) => a.title.localeCompare(b.title, "zh-Hans-CN"));
@@ -84,7 +112,6 @@ function latencyCandidatesForProvider(
 ): number[] {
   const health = input.healthMap[provider.id];
   const values = [
-    providerLiveFirstByteMs(provider.id, input.liveRequestMetrics),
     provider.last_speedtest?.latency_ms ?? null,
     health?.rolling?.avg_latency_ms ?? null,
     health?.cumulative.avg_latency_ms ?? null,
@@ -104,7 +131,6 @@ function summarizeProviderSection(
   let availableCredentials = 0;
   let enabledCredentials = 0;
   let blockedCredentials = 0;
-  let activeRequests = 0;
   let remoteModels = 0;
   let testedEndpoints = 0;
   let directEndpoints = 0;
@@ -125,7 +151,6 @@ function summarizeProviderSection(
       directEndpoints += 1;
     }
     remoteModels += provider.remote_models?.length ?? 0;
-    activeRequests += input.activeRequestCountsByProvider.get(provider.id) ?? 0;
     availableCredentials += pool?.available_credentials ?? 0;
     enabledCredentials += pool?.enabled_credentials ?? 0;
     blockedCredentials +=
@@ -141,7 +166,6 @@ function summarizeProviderSection(
     availableCredentials,
     enabledCredentials,
     blockedCredentials,
-    activeRequests,
     fastestLatencyMs: latencies.length ? Math.min(...latencies) : null,
     remoteModels,
     testedEndpoints,
@@ -151,17 +175,20 @@ function summarizeProviderSection(
   };
 }
 
-function providerSectionDescription(summary: ProviderSectionSummary): string {
+function providerSectionDescription(
+  summary: ProviderSectionSummary,
+  text: ProviderSectionText,
+): string {
   const pieces = [
-    summary.nativeEndpoints ? `${summary.nativeEndpoints} native` : "",
-    summary.bridgedEndpoints ? `${summary.bridgedEndpoints} bridge` : "",
+    summary.nativeEndpoints ? `${summary.nativeEndpoints} ${text.native}` : "",
+    summary.bridgedEndpoints ? `${summary.bridgedEndpoints} ${text.bridge}` : "",
     summary.availableCredentials
-      ? `${summary.availableCredentials}/${summary.enabledCredentials} cred`
-      : "no cred",
+      ? `${summary.availableCredentials}/${summary.enabledCredentials} ${text.credentialShort}`
+      : text.noCredential,
     summary.fastestLatencyMs == null
-      ? "not tested"
-      : `${Math.round(summary.fastestLatencyMs)}ms best`,
-    summary.remoteModels ? `${summary.remoteModels} models` : "",
+      ? text.notTested
+      : text.fastest(Math.round(summary.fastestLatencyMs)),
+    summary.remoteModels ? `${summary.remoteModels} ${text.models}` : "",
   ].filter(Boolean);
   return pieces.join(" · ");
 }
@@ -180,18 +207,6 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-function providerLiveFirstByteMs(
-  providerId: string,
-  liveRequestMetrics: Record<string, LiveRequestMetric>,
-): number | null {
-  const values = Object.values(liveRequestMetrics)
-    .filter((metric) => metric.provider_id === providerId)
-    .map((metric) => metric.upstream_first_byte_ms)
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (!values.length) return null;
-  return Math.min(...values);
-}
-
 function providerCompositeScore(
   provider: Provider,
   input: BuildProviderSectionsInput,
@@ -199,16 +214,13 @@ function providerCompositeScore(
   const health = input.healthMap[provider.id];
   const rolling = health?.rolling ?? null;
   const pool = input.poolByProviderId[provider.id];
-  const activeRequests = input.activeRequestCountsByProvider.get(provider.id) ?? 0;
-  const liveTps = input.liveTokensPerSecByProvider.get(provider.id) ?? 0;
   const rollingTps = rolling?.decode_output_tokens_per_sec || rolling?.output_tokens_per_sec || 0;
-  const tps = liveTps || rollingTps;
+  const tps = rollingTps;
   const successRate =
     rolling && rolling.requests > 0
       ? rolling.success_rate
       : (health?.cumulative.success_rate ?? (provider.enabled ? 1 : 0));
   const latencyMs =
-    providerLiveFirstByteMs(provider.id, input.liveRequestMetrics) ??
     provider.last_speedtest?.latency_ms ??
     rolling?.avg_latency_ms ??
     health?.cumulative.avg_latency_ms ??
@@ -222,7 +234,6 @@ function providerCompositeScore(
   const latencyScore = latencyMs == null ? 120 : 260 * (1 - clamp01(latencyMs / 5000));
   const speedScore = Math.min(360, tps * 10);
   const score =
-    activeRequests * 5000 +
     (provider.enabled ? 650 : -1600) +
     (circuitOpen ? -1200 : 250) +
     availableCreds * 180 +
@@ -234,11 +245,12 @@ function providerCompositeScore(
     speedScore +
     priorityScore;
   const reasonParts = [
-    activeRequests ? `live x${activeRequests}` : "",
-    `${Math.round(successRate * 100)}% ok`,
-    latencyMs == null ? "" : `${Math.round(latencyMs)}ms first`,
-    tps ? `${tps.toFixed(1)} tok/s` : "",
-    availableCreds ? `${availableCreds} cred` : "no cred",
+    sectionText(input).success(Math.round(successRate * 100)),
+    latencyMs == null ? "" : sectionText(input).first(Math.round(latencyMs)),
+    tps ? sectionText(input).tokensPerSecond(tps.toFixed(1)) : "",
+    availableCreds
+      ? `${availableCreds} ${sectionText(input).credentialShort}`
+      : sectionText(input).noCredential,
   ].filter(Boolean);
   return { score, reason: reasonParts.join(" · ") };
 }

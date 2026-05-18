@@ -120,17 +120,20 @@ $env:VIBE_HOME = $testHome
 $ExePath = (Resolve-Path $ExePath).Path
 Write-Host "Testing Windows CLI binary: $ExePath"
 
-Invoke-Vibe -FilePath $ExePath -Arguments @("--help") -Expected "local AI API gateway" | Out-Null
+Invoke-Vibe -FilePath $ExePath -Arguments @("--help") -Expected "local API gateway" | Out-Null
 Invoke-Vibe -FilePath $ExePath -Arguments @("--version") -Expected "vibe" | Out-Null
 Invoke-Vibe -FilePath $ExePath -Arguments @("status") -Expected "vibe is not running" | Out-Null
-Invoke-Vibe -FilePath $ExePath -Arguments @("config", "path") -Expected "vibe" | Out-Null
-Invoke-Vibe -FilePath $ExePath -Arguments @("autostart", "status") -Expected "unsupported" | Out-Null
+Invoke-Vibe -FilePath $ExePath -Arguments @("doctor") -Expected "vibe doctor" | Out-Null
 
 $smokePort = Get-FreeTcpPort
 $vibeServer = $null
 try {
   $vibeServer = Start-VibeForegroundForSmokeTest -FilePath $ExePath -Port $smokePort
-  Invoke-Vibe -FilePath $ExePath -Arguments @("status") -Expected "endpoint:         http://127.0.0.1:$smokePort" | Out-Null
+  $healthUrl = "http://127.0.0.1:$smokePort/health"
+  $health = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
+  if ($health.StatusCode -ne 200) {
+    throw "Gateway health check failed at $healthUrl (status $($health.StatusCode))"
+  }
 } finally {
   if ($null -ne $vibeServer -and -not $vibeServer.HasExited) {
     Stop-Process -Id $vibeServer.Id -Force -ErrorAction SilentlyContinue
@@ -181,7 +184,7 @@ try {
       throw "npm did not create the vibe.cmd binary shim"
     }
 
-    Invoke-Vibe -FilePath $installedVibeShim -Arguments @("--help") -Expected "local AI API gateway" | Out-Null
+    Invoke-Vibe -FilePath $installedVibeShim -Arguments @("--help") -Expected "local API gateway" | Out-Null
     Invoke-Vibe -FilePath $installedVibeShim -Arguments @("--version") -Expected "vibe" | Out-Null
     Invoke-Vibe -FilePath $installedVibeShim -Arguments @("statusline") -Stdin $statusLineInput -Expected "Vibe+" | Out-Null
   } finally {

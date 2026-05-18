@@ -1,102 +1,182 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useRoute } from "vue-router";
+import { useI18n } from "vue-i18n";
+import Badge from "../components/ui/badge.vue";
+import Button from "../components/ui/button.vue";
+import Card from "../components/ui/card.vue";
+import Separator from "../components/ui/separator.vue";
 import VpIcon from "../components/vp-icon.vue";
 import { useBrandLogo, type BrandLogoId } from "../composables/use-brand-logo.ts";
-import { setUiLanguage, useUiLanguage } from "../composables/use-ui-language.ts";
-import { resolvePageAccent } from "../utils/page-accent.ts";
+import { setUiLanguage, useUiLanguage, type UiLanguage } from "../composables/use-ui-language.ts";
 
-const route = useRoute();
-const pa = computed(() => resolvePageAccent(route.name));
+const { t } = useI18n();
 const { brandLogos, currentBrandLogo, selectedBrandLogoId, setBrandLogo } = useBrandLogo();
 const { language, languageOptions } = useUiLanguage();
 
-function selectBrandLogo(id: BrandLogoId) {
-  setBrandLogo(id);
+const themeSummary = computed(() => t("theme.summary", { theme: currentBrandLogo.value.label }));
+const languageSummary = computed(
+  () => languageOptions.find((option) => option.value === language.value)?.label ?? language.value,
+);
+
+function isSelectedLogo(id: BrandLogoId) {
+  return selectedBrandLogoId.value === id;
+}
+
+function isSelectedLanguage(value: UiLanguage) {
+  return language.value === value;
 }
 </script>
 
 <template>
-  <div class="mx-auto max-w-4xl space-y-4 sm:space-y-6">
-    <div class="min-w-0 space-y-2 sm:space-y-3">
-      <span :class="['text-xs uppercase', pa.kicker]">settings</span>
-      <h1 :class="['text-2xl sm:text-3xl font-bold tracking-tight', pa.heading]">Settings</h1>
-      <p class="max-w-2xl text-sm text-vp-muted">
-        Only browser-local preferences live here. Theme and language are saved in localStorage.
-      </p>
-    </div>
-
-    <section class="space-y-3">
-      <section id="theme" class="card-base p-4 sm:p-5 scroll-mt-20">
-        <div class="mb-3 sm:mb-4 flex items-center gap-2">
-          <VpIcon name="palette" size-class="size-4 text-vp-muted" />
-          <span class="text-sm font-medium text-vp-text">Theme</span>
+  <div class="mx-auto max-w-3xl space-y-5 sm:space-y-6">
+    <Card class="overflow-hidden">
+      <section id="theme" class="scroll-mt-20 p-4 sm:p-5">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <VpIcon name="palette" size-class="size-4 text-muted-foreground" />
+            <div>
+              <h2 class="text-sm font-semibold text-foreground">{{ t("theme.title") }}</h2>
+              <p class="text-xs text-muted-foreground">{{ themeSummary }}</p>
+            </div>
+          </div>
+          <Badge variant="secondary">{{ t("badges.local") }}</Badge>
         </div>
+
         <div class="grid grid-cols-2 gap-2 sm:grid-cols-5">
-          <button
+          <Button
             v-for="logo in brandLogos"
             :key="logo.id"
             type="button"
-            class="group flex min-h-20 flex-col items-center justify-center gap-1.5 rounded-lg border px-2 py-2.5 transition hover:bg-vp-bg-hover sm:min-h-24 sm:gap-2 sm:px-3 sm:py-3"
+            variant="outline"
+            class="relative h-auto min-h-24 flex-col gap-2 rounded-xl px-3 py-3"
             :class="
-              selectedBrandLogoId === logo.id
-                ? 'border-[color-mix(in_srgb,var(--vp-primary)_55%,var(--vp-border))] bg-[color-mix(in_srgb,var(--vp-primary)_8%,var(--vp-surface))] text-vp-text shadow-sm'
-                : 'border-vp-border text-vp-muted'
+              isSelectedLogo(logo.id)
+                ? 'border-primary bg-accent text-foreground shadow-md ring-2 ring-primary/35 ring-offset-2 ring-offset-card'
+                : 'border-border/70 bg-card/70 text-muted-foreground opacity-75 hover:border-primary/35 hover:bg-card hover:opacity-100 hover:text-foreground'
             "
             :title="logo.label"
-            :aria-pressed="selectedBrandLogoId === logo.id"
-            @click="selectBrandLogo(logo.id)"
+            :aria-pressed="isSelectedLogo(logo.id)"
+            @click="setBrandLogo(logo.id)"
           >
             <span
-              class="flex size-11 items-center justify-center rounded-xl border border-[color-mix(in_srgb,var(--vp-text)_8%,transparent)] bg-vp-surface shadow-sm sm:size-14"
+              v-if="isSelectedLogo(logo.id)"
+              class="absolute right-2 top-2 inline-flex size-5 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm"
+              aria-hidden="true"
+            >
+              <VpIcon name="check" size-class="size-3.5" />
+            </span>
+            <span
+              class="flex size-12 items-center justify-center rounded-xl border bg-card shadow-sm"
+              :class="isSelectedLogo(logo.id) ? 'border-primary/25' : 'border-border'"
               :style="{
-                boxShadow: `0 10px 24px color-mix(in srgb, ${logo.accent} 24%, transparent)`,
+                boxShadow: `0 10px 24px color-mix(in srgb, ${logo.accent} ${isSelectedLogo(logo.id) ? 36 : 18}%, transparent)`,
               }"
             >
-              <img :src="logo.src" alt="" class="size-9 rounded-lg sm:size-12" />
+              <img :src="logo.src" alt="" class="size-10 rounded-lg" />
             </span>
-            <span class="text-[11px] font-semibold leading-tight sm:text-xs">{{ logo.label }}</span>
-          </button>
+            <span class="text-xs font-semibold leading-tight">{{ logo.label }}</span>
+            <span
+              v-if="isSelectedLogo(logo.id)"
+              class="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary"
+            >
+              {{ t("common.active") }}
+            </span>
+          </Button>
         </div>
-        <p class="mt-3 text-xs text-vp-muted">
-          Current theme: <span class="font-medium text-vp-text">{{ currentBrandLogo.label }}</span>
-        </p>
       </section>
 
-      <section id="language" class="card-base p-4 sm:p-5 scroll-mt-20">
-        <div class="mb-3 sm:mb-4 flex items-center gap-2">
-          <VpIcon name="languages" size-class="size-4 text-vp-muted" />
-          <span class="text-sm font-medium text-vp-text">Language</span>
+      <Separator />
+
+      <section id="language" class="scroll-mt-20 p-4 sm:p-5">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <VpIcon name="languages" size-class="size-4 text-muted-foreground" />
+            <div>
+              <h2 class="text-sm font-semibold text-foreground">{{ t("language.title") }}</h2>
+              <p class="text-xs text-muted-foreground">
+                {{ t("language.selected", { language: languageSummary }) }}
+              </p>
+            </div>
+          </div>
+          <Badge variant="secondary">{{ t("badges.futureCopy") }}</Badge>
         </div>
-        <p class="mb-3 text-xs text-vp-muted">
-          This only stores the selected language for future use. It does not change UI copy yet.
-        </p>
+
         <div class="grid gap-2 sm:grid-cols-2">
-          <button
+          <Button
             v-for="option in languageOptions"
             :key="option.value"
             type="button"
-            class="flex items-start justify-between gap-3 rounded-lg border px-4 py-3 text-left transition hover:bg-vp-bg-hover"
+            variant="outline"
+            class="h-auto justify-between rounded-xl px-4 py-3 text-left"
             :class="
-              language === option.value
-                ? 'border-[color-mix(in_srgb,var(--vp-primary)_55%,var(--vp-border))] bg-[color-mix(in_srgb,var(--vp-primary)_8%,var(--vp-surface))] text-vp-text shadow-sm'
-                : 'border-vp-border text-vp-muted'
+              isSelectedLanguage(option.value)
+                ? 'border-primary/50 bg-accent text-foreground shadow-sm'
+                : 'bg-card text-muted-foreground hover:text-foreground'
             "
-            :aria-pressed="language === option.value"
+            :aria-pressed="isSelectedLanguage(option.value)"
             @click="setUiLanguage(option.value)"
           >
             <span>
               <span class="block text-sm font-medium">{{ option.label }}</span>
-              <span class="mt-1 block text-xs">{{ option.hint }}</span>
+              <span class="mt-1 block text-xs font-normal">{{ option.hint }}</span>
             </span>
             <VpIcon
-              v-if="language === option.value"
+              v-if="isSelectedLanguage(option.value)"
               name="check"
-              size-class="size-4 shrink-0 text-vp-primary"
+              size-class="size-4 shrink-0 text-primary"
             />
-          </button>
+          </Button>
         </div>
       </section>
-    </section>
+    </Card>
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "badges": {
+      "futureCopy": "Future copy",
+      "local": "Local"
+    },
+    "common": {
+      "active": "Active"
+    },
+    "language": {
+      "selected": "Selected: {language}",
+      "title": "Language"
+    },
+    "page": {
+      "description": "Keep this page focused on browser-local preferences saved in localStorage.",
+      "kicker": "settings",
+      "title": "Settings"
+    },
+    "theme": {
+      "summary": "Current theme: {theme}",
+      "title": "Theme"
+    }
+  },
+  "zh-CN": {
+    "badges": {
+      "futureCopy": "后续文案",
+      "local": "本地"
+    },
+    "common": {
+      "active": "已启用"
+    },
+    "language": {
+      "selected": "当前：{language}",
+      "title": "语言"
+    },
+    "page": {
+      "description": "这个页面只管理保存在 localStorage 中的浏览器本地偏好。",
+      "kicker": "设置",
+      "title": "设置"
+    },
+    "theme": {
+      "summary": "当前主题：{theme}",
+      "title": "主题"
+    }
+  }
+}
+</i18n>

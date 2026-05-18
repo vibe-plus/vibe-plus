@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
+import { ref, computed, onMounted, watch, nextTick } from "vue";
+import { useI18n } from "vue-i18n";
 import {
   api,
+  type CredentialPlanSnapshot,
   type Provider,
+  type ProviderCodexPlanItem,
   type ProviderInput,
   type ProviderHealthSummary,
   type ProviderAuthPoolSummary,
@@ -10,7 +13,6 @@ import {
   type Credential,
   type CredentialInput,
   type ProvidersOverview,
-  type RequestRuntimeStats,
   type UpstreamGroupInfo,
   isProviderHealthSummary,
 } from "../../api/client.ts";
@@ -20,17 +22,19 @@ import {
   type ClientToolId,
   type ClientToolInfo,
 } from "../../utils/client-tools.ts";
-import type { LiveRequestMetric, ProviderSectionView, ProviderTabOption } from "./types.ts";
+import type { ProviderSectionView, ProviderTabOption } from "./types.ts";
 import { useRoute, useRouter } from "vue-router";
-import { resolvePageAccent } from "../../utils/page-accent.ts";
 import { displayProviderName } from "../../utils/providers-display.ts";
 import { hintsFromAuthJsonTokens } from "../../utils/codex-oauth-hints.ts";
 import VpIcon from "../../components/vp-icon.vue";
+import UiButton from "../../components/ui/button.vue";
+import UiCard from "../../components/ui/card.vue";
+import UiSkeleton from "../../components/ui/skeleton.vue";
 import ProviderSections from "./components/ProviderSections.vue";
 import ProviderSmartModal from "./components/provider-smart-modal.vue";
 import ProviderImportModal from "./components/provider-import-modal.vue";
 import CredentialFormModal from "./components/CredentialFormModal.vue";
-import { requestWsSnapshot, useWs } from "../../composables/useProxy.ts";
+
 import { workspaceViewFromQuery, type WorkspaceView } from "../../utils/workspace-view.ts";
 import { buildProviderSections } from "./utils/provider-sections.ts";
 import {
@@ -43,29 +47,20 @@ const healthMap = ref<Record<string, ProviderHealthSummary>>({});
 /** `GET /_vp/pools` — credential-level circuit/rate-limit summary, loaded in parallel with the list. */
 const poolByProviderId = ref<Record<string, ProviderAuthPoolSummary>>({});
 const route = useRoute();
+const { t } = useI18n();
 const router = useRouter();
-const pageAccent = computed(() => resolvePageAccent(route.name));
 const workspaceView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
 const codexRouteTool = computed(() => getCodexClientTool());
-/** Hours for `GET /_vp/providers/:id/health?hours=` — gateway `request_logs` rollup only (not Codex plan windows). */
+/** Hours for provider health and quota snapshots (not request body logging). */
 const GATEWAY_ROLLING_STAT_HOURS = 24;
 const loading = ref(true);
 const error = ref("");
 
-const activeRequestProviderIds = ref<Record<string, string>>({});
-const activeAttemptCredentials = ref<Record<string, { providerId: string; credentialId: string }>>(
-  {},
-);
-const liveRequestMetrics = ref<Record<string, LiveRequestMetric>>({});
 const highlightedProviderId = ref<string | null>(null);
 /** Inline enable/disable debounce state (PUT /_vp/providers/:id). */
 const toggleBusy = ref<Record<string, boolean>>({});
 /** Per-provider manual circuit reset busy state (POST /_vp/providers/:id/circuit/reset). */
 const circuitResetBusy = ref<Record<string, boolean>>({});
-/** Per-provider protocol probe busy state (POST /_vp/providers/:id/probe). */
-const speedtestBusy = ref<Record<string, boolean>>({});
-/** Per-provider vendor auto-detect busy state. */
-const detectVendorBusy = ref<Record<string, boolean>>({});
 /** Per-provider remote model refresh busy state. */
 const modelRefreshBusy = ref<Record<string, boolean>>({});
 const credModelRefreshBusy = ref<Record<string, boolean>>({});
@@ -73,8 +68,6 @@ const credBalanceRefreshBusy = ref<Record<string, boolean>>({});
 /** Per-credential enable/disable busy state (PUT /_vp/credentials/:id). */
 const credToggleBusy = ref<Record<string, boolean>>({});
 const activeProviderTab = ref<"common" | ClientToolId>("common");
-let providersOverviewStreamRequestId: string | null = null;
-let providersOverviewFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Provider form
 const showForm = ref(false);
@@ -91,9 +84,9 @@ const editProviderLive = computed(() => {
 const editProviderModelCount = computed(() => editProviderLive.value?.remote_models?.length ?? 0);
 const editProviderSpeedLabel = computed(() => {
   const result = editProviderLive.value?.last_speedtest;
-  if (!result) return "Not tested";
+  if (!result) return t("speed.notTested");
   if (result.error) return result.error;
-  return result.latency_ms == null ? "Tested" : `${result.latency_ms}ms`;
+  return result.latency_ms == null ? t("speed.tested") : `${result.latency_ms}ms`;
 });
 
 // Credential management (list loads by default; see load())
@@ -192,7 +185,7 @@ function applyAuthJsonText(raw: string, clearPaste: boolean) {
     if (mode === "chatgpt") {
       const triple = extractOauthTriple(v);
       if (!triple) {
-        authJsonPasteErr.value = "ChatGPT OAuth requires tokens.access_token in JSON.";
+        authJsonPasteErr.value = t("authJson.requiresAccessToken");
         return;
       }
       fillOauthFromTriple(triple, v);
@@ -219,12 +212,11 @@ function applyAuthJsonText(raw: string, clearPaste: boolean) {
         if (clearPaste) authJsonPaste.value = "";
         return;
       }
-      authJsonPasteErr.value =
-        'Unrecognized JSON: need OPENAI_API_KEY, or tokens.access_token, or auth_mode "chatgpt".';
+      authJsonPasteErr.value = t("authJson.unrecognized");
       return;
     }
 
-    authJsonPasteErr.value = `Unknown auth_mode "${mode}".`;
+    authJsonPasteErr.value = t("authJson.unknownMode", { mode });
   } catch (e: unknown) {
     authJsonPasteErr.value = e instanceof Error ? e.message : String(e);
   }
@@ -255,7 +247,7 @@ function readAuthJsonFile(file: File) {
     applyAuthJsonText(text, false);
   };
   reader.onerror = () => {
-    authJsonPasteErr.value = "Could not read file.";
+    authJsonPasteErr.value = t("authJson.readFileFailed");
   };
   reader.readAsText(file, "UTF-8");
 }
@@ -277,7 +269,7 @@ function onAuthJsonDrop(ev: DragEvent) {
   authJsonDragActive.value = false;
   const file = ev.dataTransfer?.files?.[0];
   if (!file) {
-    authJsonPasteErr.value = "Drop a single .json file.";
+    authJsonPasteErr.value = t("authJson.dropSingleJson");
     return;
   }
   readAuthJsonFile(file);
@@ -295,15 +287,6 @@ function jwtExp(token: string | null | undefined): number | null {
     return typeof exp === "number" ? exp : null;
   } catch {
     return null;
-  }
-}
-
-/** Try merging local Codex / Claude: add credentials or refresh auth_ref for existing upstreams; idempotent. */
-async function mergeLocalToolsFromDisk() {
-  try {
-    await api.providers.importLocal(["codex", "claude"]);
-  } catch {
-    /* Gateway is not running or ~/.codex / ~/.claude is absent */
   }
 }
 
@@ -355,33 +338,24 @@ async function load() {
   loading.value = true;
   try {
     error.value = "";
-    if (providersOverviewFallbackTimer) clearTimeout(providersOverviewFallbackTimer);
-    // Request snapshot first to avoid serial latency with local import; gateway emits stream-started only after build_providers_overview finishes.
-    const requestId = requestWsSnapshot("providers-overview", {
-      hours: GATEWAY_ROLLING_STAT_HOURS,
-    });
-    providersOverviewStreamRequestId = requestId;
-    providersOverviewFallbackTimer = window.setTimeout(() => {
-      if (providersOverviewStreamRequestId !== requestId || !loading.value) return;
-      void loadProvidersOverviewViaHttpFallback(requestId);
-    }, 3000);
-    void mergeLocalToolsFromDisk();
+    try {
+      const cached = sessionStorage.getItem("vp-providers-overview-cache");
+      if (cached) {
+        applyProvidersOverview(JSON.parse(cached) as ProvidersOverview);
+        loading.value = false;
+      }
+    } catch {}
+    // The websocket snapshot endpoint was removed with the monitor subsystem.
+    // Do not wait for a 3s fallback: Providers first paint must be a direct DB snapshot.
+    const overview = await api.providers.overview(GATEWAY_ROLLING_STAT_HOURS);
+    if (!applyProvidersOverview(overview)) return;
+    try {
+      sessionStorage.setItem("vp-providers-overview-cache", JSON.stringify(overview));
+    } catch {}
   } catch (e) {
     error.value = String(e);
-  }
-}
-
-async function loadProvidersOverviewViaHttpFallback(requestId: string) {
-  try {
-    const overview = await api.providers.overview(GATEWAY_ROLLING_STAT_HOURS);
-    if (providersOverviewStreamRequestId !== requestId) return;
-    error.value = "";
-    if (!applyProvidersOverview(overview)) return;
-    void runCodexWhamBackgroundRefresh();
-  } catch (e) {
-    if (providersOverviewStreamRequestId === requestId) error.value = String(e);
   } finally {
-    if (providersOverviewStreamRequestId === requestId) loading.value = false;
+    loading.value = false;
   }
 }
 
@@ -411,61 +385,9 @@ const {
   codexRefreshNote,
   codexPlanRefreshing,
   refreshCodexPlanFromChatgpt,
-  runCodexWhamBackgroundRefresh,
   resetCodexPlans,
   applyCodexPlanRows,
 } = useProviderCodexPlans(providers, { loadCreds, refreshSinglePool });
-
-function timestampExpired(ts: number | null | undefined): boolean {
-  return typeof ts === "number" && ts > 0 && ts <= Math.floor(Date.now() / 1000);
-}
-
-function poolNeedsStaleStatusRefresh(pool: ProviderAuthPoolSummary): boolean {
-  if (pool.provider_circuit_open && (pool.provider_circuit_open_remaining_secs ?? 1) <= 0) {
-    return true;
-  }
-  return pool.credentials.some((row) => {
-    if (row.circuit_open && (row.circuit_open_remaining_secs ?? 1) <= 0) return true;
-    if (row.is_rate_limited) {
-      return timestampExpired(row.rl_requests_reset_at) || timestampExpired(row.rl_tokens_reset_at);
-    }
-    return false;
-  });
-}
-
-async function refreshStalePoolStatuses() {
-  const targets = Object.values(poolByProviderId.value)
-    .filter(poolNeedsStaleStatusRefresh)
-    .map((pool) => pool.provider_id);
-  if (!targets.length) return;
-  await Promise.all(targets.map((providerId) => refreshSinglePool(providerId)));
-}
-
-async function autoProbeStalePools() {
-  const providerIds = Object.values(poolByProviderId.value)
-    .filter(
-      (pool) =>
-        pool.provider_circuit_open ||
-        pool.credentials.some((row) => row.circuit_open || row.is_rate_limited),
-    )
-    .map((pool) => pool.provider_id);
-  if (!providerIds.length) return;
-  await Promise.all(
-    providerIds.map(async (providerId) => {
-      const pool = poolByProviderId.value[providerId];
-      if (!pool) return;
-      if (pool.provider_circuit_open && (pool.provider_circuit_open_remaining_secs ?? 1) <= 0) {
-        await refreshSinglePool(providerId);
-      }
-      const needsSpeedtest = providers.value.some(
-        (p) => p.id === providerId && p.enabled && !speedtestBusy.value[providerId],
-      );
-      if (needsSpeedtest && !pool.provider_circuit_open) {
-        await speedtestProvider(providerId);
-      }
-    }),
-  );
-}
 
 async function reloadProviderCreds(providerId: string) {
   await Promise.all([loadCreds(providerId), refreshSinglePool(providerId)]);
@@ -542,53 +464,6 @@ async function refreshCredentialBalance(credentialId: string) {
   }
 }
 
-async function detectVendor(providerId: string) {
-  if (detectVendorBusy.value[providerId]) return;
-  detectVendorBusy.value = { ...detectVendorBusy.value, [providerId]: true };
-  try {
-    const result = await api.providers.detectVendor(providerId);
-    // Reload credentials for this provider so vendor badges appear
-    const creds = await api.credentials.list(providerId);
-    credsByProvider.value = { ...credsByProvider.value, [providerId]: creds };
-    // Auto-refresh balance for all creds that now have a vendor
-    const vendored = creds.filter((c) => c.upstream_vendor);
-    await Promise.all(vendored.map((c) => refreshCredentialBalance(c.id)));
-    if (result.upstream_vendor) {
-      error.value = "";
-    } else {
-      error.value = `未能识别 ${providerId} 的供应商类型（无 NewAPI/Sub2API 特征）`;
-    }
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    const { [providerId]: _, ...rest } = detectVendorBusy.value;
-    detectVendorBusy.value = rest;
-  }
-}
-
-async function speedtestProvider(providerId: string) {
-  if (speedtestBusy.value[providerId]) return;
-  speedtestBusy.value = { ...speedtestBusy.value, [providerId]: true };
-  try {
-    const updated = await api.providers.probe(providerId);
-    replaceProviderInList(updated);
-    error.value = "";
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    const { [providerId]: _, ...rest } = speedtestBusy.value;
-    speedtestBusy.value = rest;
-  }
-}
-
-async function speedtestProviders(providerIds: string[]) {
-  await Promise.all(providerIds.map((providerId) => speedtestProvider(providerId)));
-}
-
-async function refreshProviderModelsForProviders(providerIds: string[]) {
-  await Promise.all(providerIds.map((providerId) => refreshProviderModels(providerId)));
-}
-
 function poolCred(providerId: string, credentialId: string): CredentialPoolStatus | undefined {
   return poolByProviderId.value[providerId]?.credentials.find(
     (x) => x.credential_id === credentialId,
@@ -616,7 +491,7 @@ const PROVIDER_TAB_OPTIONS: ProviderTabOption[] = [
     id: "common",
     label: "Common",
     shortLabel: "all",
-    icon: "i-lucide-compass",
+    icon: "i-[lucide--compass]",
     description: "",
   },
   ...CLIENT_TOOLS.map((tool) => ({
@@ -631,26 +506,18 @@ const PROVIDER_TAB_OPTIONS: ProviderTabOption[] = [
 function providerGroupName(provider: Provider): string {
   const trimmed = provider.group_name?.trim();
   if (trimmed) return trimmed;
-  return "Ungrouped";
+  return t("groups.ungrouped");
 }
 
 function providerGroupKey(provider: Provider): string {
   return providerGroupName(provider).toLowerCase();
 }
 
-function providerIdsFromSection(section: ProviderSectionView): string[] {
-  return section.providers.map((card) => card.provider.id);
-}
-
-function sectionSpeedtestBusy(section: ProviderSectionView): boolean {
-  return providerIdsFromSection(section).some((providerId) => !!speedtestBusy.value[providerId]);
-}
-
-function sectionModelRefreshBusy(section: ProviderSectionView): boolean {
-  return providerIdsFromSection(section).some((providerId) => !!modelRefreshBusy.value[providerId]);
-}
-
 const providerTabs = computed(() => PROVIDER_TAB_OPTIONS);
+const activeToolTab = computed<ClientToolInfo | null>(() => {
+  if (activeProviderTab.value === "common") return null;
+  return CLIENT_TOOLS.find((tool) => tool.id === activeProviderTab.value) ?? null;
+});
 
 const providerSections = computed<ProviderSectionView[]>(() =>
   buildProviderSections({
@@ -658,9 +525,19 @@ const providerSections = computed<ProviderSectionView[]>(() =>
     selectedTool: activeToolTab.value,
     healthMap: healthMap.value,
     poolByProviderId: poolByProviderId.value,
-    activeRequestCountsByProvider: activeRequestCountsByProvider.value,
-    liveTokensPerSecByProvider: liveTokensPerSecByProvider.value,
-    liveRequestMetrics: liveRequestMetrics.value,
+    text: {
+      bridge: t("section.bridge"),
+      credentialShort: t("section.credentialShort"),
+      models: t("section.models"),
+      native: t("section.native"),
+      noCredential: t("section.noCredential"),
+      notTested: t("section.notTested"),
+      fastest: (ms) => t("section.fastest", { ms }),
+      success: (pct) => t("section.success", { pct }),
+      first: (ms) => t("section.first", { ms }),
+      tokensPerSecond: (value) => t("section.tokensPerSecond", { value }),
+    },
+    fallbackGroupName: t("groups.ungrouped"),
   }),
 );
 const providerRollingStatById = computed(() => {
@@ -670,31 +547,7 @@ const providerRollingStatById = computed(() => {
   }
   return map;
 });
-const activeRequestCountsByProvider = computed(() => {
-  const counts = new Map<string, number>();
-  for (const providerId of Object.values(activeRequestProviderIds.value)) {
-    counts.set(providerId, (counts.get(providerId) ?? 0) + 1);
-  }
-  return counts;
-});
-const activeCredentialCountsByProvider = computed(() => {
-  const byProvider: Record<string, Record<string, number>> = {};
-  for (const attempt of Object.values(activeAttemptCredentials.value)) {
-    const current = byProvider[attempt.providerId] ?? {};
-    current[attempt.credentialId] = (current[attempt.credentialId] ?? 0) + 1;
-    byProvider[attempt.providerId] = current;
-  }
-  return byProvider;
-});
-const liveTokensPerSecByProvider = computed(() => {
-  const totals = new Map<string, number>();
-  for (const metric of Object.values(liveRequestMetrics.value)) {
-    const tps = metric.active_request_tokens_per_sec;
-    if (!Number.isFinite(tps ?? NaN) || !metric.provider_id) continue;
-    totals.set(metric.provider_id, (totals.get(metric.provider_id) ?? 0) + (tps ?? 0));
-  }
-  return totals;
-});
+const activeCredentialCountsByProvider = computed(() => ({}));
 
 function targetProviderIdFromRoute(): string | null {
   const raw = route.query.provider;
@@ -754,9 +607,9 @@ async function save(payload: ProviderInput, credentialAuthRef: string | null = n
     if (credentialAuthRef?.trim()) {
       await api.credentials.create(providerId, {
         ...emptyCredForm(),
-        label: "API Key",
+        label: t("credentials.defaultApiKeyLabel"),
         auth_ref: normalizeAuthRef(credentialAuthRef.trim()),
-        notes: "Created from provider wizard paste",
+        notes: t("credentials.createdFromWizard"),
       });
     }
     showForm.value = false;
@@ -822,17 +675,13 @@ async function resetProviderCircuit(providerId: string) {
 }
 
 async function remove(id: string) {
-  if (!confirm("Remove this provider?")) return;
+  if (!confirm(t("confirm.removeProvider"))) return;
   try {
     await api.providers.delete(id);
     await load();
   } catch (e) {
     error.value = String(e);
   }
-}
-
-function viewProviderLogs(providerId: string) {
-  void router.push({ path: "/ui/monitor", query: { ...route.query, provider_id: providerId } });
 }
 
 // Credential actions
@@ -894,7 +743,7 @@ async function doCredLogin() {
   credLoginNote.value = null;
   try {
     const res = await api.credentials.login(editCred.value.id, { username, password });
-    credLoginNote.value = res.ok ? "登录成功" : (res.note ?? "登录失败");
+    credLoginNote.value = res.ok ? t("login.success") : (res.note ?? t("login.failed"));
     if (res.ok) credLoginPassword.value = "";
   } catch (e) {
     credLoginNote.value = String(e);
@@ -938,7 +787,7 @@ async function saveCred() {
 }
 
 async function removeCred(cred: Credential) {
-  if (!confirm(`Remove credential "${cred.label}"?`)) return;
+  if (!confirm(t("confirm.removeCredential", { label: cred.label }))) return;
   try {
     await api.credentials.delete(cred.id);
     await loadCreds(cred.provider_id);
@@ -1003,13 +852,6 @@ watch(showForm, async (open) => {
 onMounted(() => {
   void loadAndScrollToTargetProvider();
 });
-onUnmounted(() => {
-  if (providersOverviewFallbackTimer) {
-    clearTimeout(providersOverviewFallbackTimer);
-    providersOverviewFallbackTimer = null;
-  }
-});
-
 watch(
   () => route.query.provider,
   () => {
@@ -1018,214 +860,75 @@ watch(
     });
   },
 );
-
-useWs((ev: unknown) => {
-  const e = ev as
-    | {
-        type?: string;
-        request_id?: string;
-        rolling_hours?: number;
-        attempt_id?: string;
-        provider_id?: string | null;
-        credential_id?: string | null;
-        request_id?: string;
-        id?: string;
-        providers?: Provider[];
-        health?: ProviderHealthSummary[];
-        pools?: ProviderAuthPoolSummary[];
-        credentials?: Record<string, Credential[]>;
-        codex_plans?: Record<string, ProviderCodexPlanItem[]>;
-      }
-    | ({ type?: string } & RequestRuntimeStats);
-  if (e.rolling_hours != null && e.rolling_hours !== GATEWAY_ROLLING_STAT_HOURS) return;
-  if (
-    e.type?.startsWith("providers-overview-") &&
-    e.request_id &&
-    providersOverviewStreamRequestId &&
-    e.request_id !== providersOverviewStreamRequestId
-  ) {
-    return;
-  }
-  if (e.type === "providers-overview-stream-started") {
-    loading.value = true;
-    error.value = "";
-    providers.value = [];
-    healthMap.value = {};
-    poolByProviderId.value = {};
-    credsByProvider.value = {};
-    loadingCreds.value = {};
-    resetCodexPlans();
-    return;
-  }
-  if (e.type === "providers-overview-providers-chunk" && e.providers) {
-    providers.value = e.providers;
-    loadingCreds.value = Object.fromEntries(e.providers.map((provider) => [provider.id, true]));
-    return;
-  }
-  if (e.type === "providers-overview-health-chunk" && e.health) {
-    const map: Record<string, ProviderHealthSummary> = {};
-    for (const body of e.health) {
-      if (!isProviderHealthSummary(body)) continue;
-      map[body.cumulative.provider_id] = body;
-    }
-    healthMap.value = map;
-    return;
-  }
-  if (e.type === "providers-overview-pools-chunk" && e.pools) {
-    poolByProviderId.value = Object.fromEntries(e.pools.map((pool) => [pool.provider_id, pool]));
-    return;
-  }
-  if (e.type === "providers-overview-credentials-chunk" && e.provider_id && e.credentials) {
-    credsByProvider.value = { ...credsByProvider.value, [e.provider_id]: e.credentials };
-    loadingCreds.value = { ...loadingCreds.value, [e.provider_id]: false };
-    return;
-  }
-  if (e.type === "providers-overview-codex-plans-chunk" && e.provider_id) {
-    const rows = (e as { codex_plans?: ProviderCodexPlanItem[] }).codex_plans ?? [];
-    applyCodexPlanRows(e.provider_id, rows);
-    return;
-  }
-  if (e.type === "providers-overview-stream-ended") {
-    if (providersOverviewFallbackTimer) {
-      clearTimeout(providersOverviewFallbackTimer);
-      providersOverviewFallbackTimer = null;
-    }
-    loadingCreds.value = Object.fromEntries(
-      providers.value.map((provider) => [provider.id, false]),
-    );
-    loading.value = false;
-    void runCodexWhamBackgroundRefresh();
-    return;
-  }
-  if (e.type === "providers-overview-changed") {
-    const overview = e as ProvidersOverview;
-    error.value = "";
-    applyProvidersOverview(overview);
-    return;
-  }
-  if (e.type === "upstream-attempt-started" && e.attempt_id && e.provider_id) {
-    if (e.credential_id) {
-      activeAttemptCredentials.value = {
-        ...activeAttemptCredentials.value,
-        [e.attempt_id]: { providerId: e.provider_id, credentialId: e.credential_id },
-      };
-    }
-    return;
-  }
-  if (e.type === "request-updated" && e.request_id && e.provider_id) {
-    activeRequestProviderIds.value = {
-      ...activeRequestProviderIds.value,
-      [e.request_id]: e.provider_id,
-    };
-    liveRequestMetrics.value = {
-      ...liveRequestMetrics.value,
-      [e.request_id]: {
-        request_id: e.request_id,
-        provider_id: e.provider_id,
-        upstream_first_byte_ms: e.upstream_first_byte_ms,
-        active_request_tokens_per_sec: e.active_request_tokens_per_sec,
-        active_upstream_decode_tps: e.active_upstream_decode_tps,
-        active_downstream_emit_tps: e.active_downstream_emit_tps,
-        updated_at: e.updated_at,
-      },
-    };
-    return;
-  }
-  if (e.type === "upstream-attempt-finished" && e.attempt_id) {
-    const { [e.attempt_id]: _, ...rest } = activeAttemptCredentials.value;
-    activeAttemptCredentials.value = rest;
-    return;
-  }
-  if (e.type === "log-appended" && e.id) {
-    const { [e.id]: _, ...reqRest } = activeRequestProviderIds.value;
-    activeRequestProviderIds.value = reqRest;
-    const { [e.id]: __, ...metricRest } = liveRequestMetrics.value;
-    liveRequestMetrics.value = metricRest;
-  }
-});
 </script>
 
 <template>
   <div class="mx-auto w-full max-w-[1040px]">
-    <div class="relative mb-4 rounded-xl border border-slate-200/90 bg-vp-surface shadow-sm">
-      <div
-        class="relative z-10 flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between"
+    <div class="mb-4 flex flex-wrap items-center justify-end gap-2">
+      <UiButton
+        type="button"
+        variant="outline"
+        class="min-h-11 sm:min-h-9"
+        :title="t('actions.localImport')"
+        :aria-label="t('actions.localImport')"
+        @click="showImportModal = true"
       >
-        <div class="min-w-0 flex-1">
-          <span :class="['text-xs uppercase', pageAccent.kicker]">Gateway</span>
-          <h1 :class="['text-2xl font-bold tracking-tight', pageAccent.heading]">Providers</h1>
-        </div>
-        <div class="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:w-auto">
-          <button
-            type="button"
-            class="btn-ghost flex min-h-11 items-center justify-center gap-2 px-3 py-2 text-sm rounded-lg border border-vp-border/80 sm:py-1.5"
-            title="Local import"
-            aria-label="Local import"
-            @click="showImportModal = true"
-          >
-            <VpIcon name="folder-input" size-class="size-4 shrink-0" />
-            <span class="hidden sm:inline">Import</span>
-          </button>
-          <button
-            type="button"
-            :class="[
-              'flex min-h-11 min-w-11 items-center justify-center gap-2 px-3 py-2 sm:py-1.5 rounded-lg text-sm font-medium',
-              pageAccent.btnPrimary,
-            ]"
-            aria-label="provider:add"
-            title="provider:add"
-            @click="startAdd"
-          >
-            <VpIcon name="plus" size-class="size-4 shrink-0 text-white" />
-            <span class="sr-only">provider:add</span>
-          </button>
-        </div>
-      </div>
+        <VpIcon name="folder-input" size-class="size-4 shrink-0" />
+        <span class="hidden sm:inline">{{ t("actions.import") }}</span>
+      </UiButton>
+      <UiButton
+        type="button"
+        class="min-h-11 min-w-11 sm:min-h-9"
+        :aria-label="t('actions.addProvider')"
+        :title="t('actions.addProvider')"
+        @click="startAdd"
+      >
+        <VpIcon name="plus" size-class="size-4 shrink-0 text-white" />
+        <span class="sr-only">{{ t("actions.addProvider") }}</span>
+      </UiButton>
     </div>
 
     <div
       v-if="error"
-      class="mb-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-2"
+      class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
     >
       {{ error }}
     </div>
 
-    <div v-if="loading" class="text-slate-500 text-sm">...</div>
+    <div v-if="loading" class="space-y-4">
+      <UiSkeleton class="h-28 w-full" />
+      <UiSkeleton class="h-36 w-full" />
+      <UiSkeleton class="h-36 w-full" />
+    </div>
     <div
       v-else-if="providers.length === 0"
-      class="font-mono text-slate-500 text-sm py-12 text-center"
-      title="empty"
-      aria-label="empty"
+      class="rounded-xl border border-dashed border-border bg-card py-12 text-center font-mono text-sm text-muted-foreground"
+      :title="t('states.empty')"
+      :aria-label="t('states.empty')"
     >
       ∅
     </div>
     <ProviderSections
       v-else
+      data-testid="providers-complete"
+      :data-provider-count="providers.length"
+      :data-credential-count="
+        Object.values(credsByProvider).reduce((sum, rows) => sum + rows.length, 0)
+      "
       :sections="providerSections"
       :health-map="healthMap"
       :creds-by-provider="credsByProvider"
       :loading-creds="loadingCreds"
       :toggle-busy="toggleBusy"
       :circuit-reset-busy="circuitResetBusy"
-      :speedtest-busy="speedtestBusy"
-      :model-refresh-busy="modelRefreshBusy"
       :cred-model-refresh-busy="credModelRefreshBusy"
       :cred-balance-refresh-busy="credBalanceRefreshBusy"
       :cred-toggle-busy="credToggleBusy"
       :pool-by-provider-id="poolByProviderId"
       :plan-snap-by-cred="planSnapByCred"
       :active-credential-counts-by-provider="activeCredentialCountsByProvider"
-      :active-request-counts-by-provider="activeRequestCountsByProvider"
-      :live-tokens-per-sec-by-provider="liveTokensPerSecByProvider"
       :provider-rolling-stat-by-id="providerRollingStatById"
-      :detect-vendor-busy="detectVendorBusy"
       :highlighted-provider-id="highlightedProviderId"
-      @speedtest-providers="speedtestProviders"
-      @refresh-provider-models-for-providers="refreshProviderModelsForProviders"
-      @sync-creds="reloadProviderCreds"
-      @detect-vendor="detectVendor"
-      @speedtest-provider="speedtestProvider"
-      @refresh-models="refreshProviderModels"
       @refresh-cred-models="refreshCredentialModels"
       @refresh-cred-balance="refreshCredentialBalance"
       @toggle-provider="toggleProviderEnabled"
@@ -1236,7 +939,6 @@ useWs((ev: unknown) => {
       @toggle-cred="toggleCredentialEnabled"
       @edit-cred="startEditCred"
       @delete-cred="removeCred"
-      @view-logs="viewProviderLogs"
     />
 
     <ProviderSmartModal
@@ -1298,3 +1000,108 @@ useWs((ev: unknown) => {
     />
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "actions": {
+      "addProvider": "Add provider",
+      "import": "Import",
+      "localImport": "Local import"
+    },
+    "errors": {
+      "vendorUnknown": "Could not detect provider type for {providerId} (no NewAPI/Sub2API signature)."
+    },
+    "login": {
+      "failed": "Login failed",
+      "success": "Login successful"
+    },
+    "confirm": {
+      "removeCredential": "Remove credential \"{label}\"?",
+      "removeProvider": "Remove this provider?"
+    },
+    "credentials": {
+      "createdFromWizard": "Created from provider wizard paste",
+      "defaultApiKeyLabel": "API Key"
+    },
+    "page": {
+      "kicker": "Gateway",
+      "title": "Providers"
+    },
+    "states": {
+      "empty": "empty"
+    },
+    "authJson": {
+      "dropSingleJson": "Drop a single .json file.",
+      "readFileFailed": "Could not read file.",
+      "requiresAccessToken": "ChatGPT OAuth requires tokens.access_token in JSON.",
+      "unknownMode": "Unknown auth_mode \"{mode}\".",
+      "unrecognized": "Unrecognized JSON: need OPENAI_API_KEY, or tokens.access_token, or auth_mode \"chatgpt\"."
+    },
+    "groups": { "all": "all", "common": "Common", "ungrouped": "Ungrouped" },
+    "section": {
+      "bridge": "bridge",
+      "credentialShort": "cred",
+      "fastest": "{ms}ms best",
+      "first": "{ms}ms first",
+      "models": "models",
+      "native": "native",
+      "noCredential": "no cred",
+      "notTested": "not tested",
+      "success": "{pct}% ok",
+      "tokensPerSecond": "{value} tok/s"
+    },
+    "speed": { "notTested": "Not tested", "tested": "Tested" }
+  },
+  "zh-CN": {
+    "actions": {
+      "addProvider": "添加供应商",
+      "import": "导入",
+      "localImport": "本地导入"
+    },
+    "errors": {
+      "vendorUnknown": "未能识别 {providerId} 的供应商类型（无 NewAPI/Sub2API 特征）。"
+    },
+    "login": {
+      "failed": "登录失败",
+      "success": "登录成功"
+    },
+    "confirm": {
+      "removeCredential": "移除凭证「{label}」？",
+      "removeProvider": "移除此供应商？"
+    },
+    "credentials": {
+      "createdFromWizard": "由供应商向导粘贴创建",
+      "defaultApiKeyLabel": "API Key"
+    },
+    "page": {
+      "kicker": "网关",
+      "title": "供应商"
+    },
+    "states": {
+      "empty": "空状态"
+    },
+    "authJson": {
+      "dropSingleJson": "请只拖入一个 .json 文件。",
+      "readFileFailed": "无法读取文件。",
+      "requiresAccessToken": "ChatGPT OAuth 需要 JSON 中包含 tokens.access_token。",
+      "unknownMode": "未知 auth_mode \"{mode}\"。",
+      "unrecognized": "无法识别 JSON：需要 OPENAI_API_KEY、tokens.access_token，或 auth_mode \"chatgpt\"。"
+    },
+    "groups": { "all": "全部", "common": "通用", "ungrouped": "未分组" },
+    "section": {
+      "bridge": "桥接",
+      "credentialShort": "凭证",
+      "fastest": "最快 {ms}ms",
+      "first": "首响 {ms}ms",
+      "models": "模型",
+      "native": "原生",
+      "noCredential": "无凭证",
+      "notTested": "未测试",
+      "success": "成功率 {pct}%",
+      "tokensPerSecond": "{value} tok/s"
+    },
+    "speed": { "notTested": "未测试", "tested": "已测试" }
+  }
+}
+</i18n>

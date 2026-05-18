@@ -7,10 +7,8 @@ export const router = createRouter({
   routes: [
     { path: "/", component: LanderPage },
     { path: "/providers", redirect: "/ui/providers" },
-    { path: "/statistics", redirect: "/ui/statistics" },
-    { path: "/usage", redirect: "/ui/statistics" },
-    { path: "/logs", redirect: "/ui/monitor" },
-    { path: "/monitor", redirect: "/ui/monitor" },
+    { path: "/logs", redirect: "/ui/overview" },
+    { path: "/monitor", redirect: "/ui/overview" },
     { path: "/settings", redirect: "/ui/settings" },
     { path: "/overview", redirect: "/ui/overview" },
     { path: "/routes", redirect: "/ui/providers" },
@@ -32,18 +30,8 @@ export const router = createRouter({
           component: () => import("./dashboard/pages/Providers.vue"),
         },
         { path: "routes", redirect: "/ui/providers" },
-        {
-          path: "statistics",
-          name: "statistics",
-          component: () => import("./dashboard/pages/Usage.vue"),
-        },
-        { path: "usage", redirect: "/ui/statistics" },
-        {
-          path: "monitor",
-          name: "monitor",
-          component: () => import("./dashboard/pages/Monitor.vue"),
-        },
-        { path: "logs", redirect: "/ui/monitor" },
+        { path: "monitor", redirect: "/ui/overview" },
+        { path: "logs", redirect: "/ui/overview" },
         {
           path: "settings",
           name: "settings",

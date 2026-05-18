@@ -1,8 +1,9 @@
 use anyhow::Result;
 use vibe_core::paths;
+use vibe_i18n::text_env;
 
 pub async fn run() -> Result<()> {
-    println!("=== vibe doctor ===\n");
+    println!("=== {} ===\n", text_env("cli-doctor-title"));
 
     // 1. pid / process
     let pid_path = paths::pid_path()?;

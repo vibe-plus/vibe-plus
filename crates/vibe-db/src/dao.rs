@@ -207,6 +207,17 @@ pub struct CredentialRollingStat {
     pub avg_latency_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DashboardRollingTotals {
+    pub requests: i64,
+    pub successes: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub output_tokens_per_sec: f64,
+    pub decode_output_tokens_per_sec: f64,
+    pub avg_latency_ms: i64,
+}
+
 impl Db {
     // --- providers ----------------------------------------------------------
 
@@ -810,6 +821,49 @@ impl Db {
         })
     }
 
+    pub fn dashboard_rolling_totals(&self, hours: i64) -> Result<DashboardRollingTotals> {
+        let since = now_secs() - hours * 3600;
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT count(*) as total,
+                        COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0) as ok,
+                        COALESCE(sum(input_tokens), 0) as input_tokens,
+                        COALESCE(sum(output_tokens), 0) as output_tokens,
+                        COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms > 0 THEN output_tokens ELSE 0 END), 0) as ok_output_tokens,
+                        COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms > 0 THEN latency_ms ELSE 0 END), 0) as ok_sum_latency_ms,
+                        COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms IS NOT NULL AND first_token_ms IS NOT NULL AND latency_ms > first_token_ms THEN output_tokens ELSE 0 END), 0) as ok_decode_output_tokens,
+                        COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms IS NOT NULL AND first_token_ms IS NOT NULL AND latency_ms > first_token_ms THEN (latency_ms - first_token_ms) ELSE 0 END), 0) as ok_sum_decode_ms,
+                        COALESCE(avg(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), 0) as avg_latency_ms
+                 FROM request_logs
+                 WHERE started_at >= ?1",
+            )?;
+            Ok(stmt.query_row(params![since], |r| {
+                let ok_output_tokens: i64 = r.get(4)?;
+                let ok_sum_latency_ms: i64 = r.get(5)?;
+                let ok_decode_output_tokens: i64 = r.get(6)?;
+                let ok_sum_decode_ms: i64 = r.get(7)?;
+                let avg_latency_ms: f64 = r.get(8)?;
+                Ok(DashboardRollingTotals {
+                    requests: r.get(0)?,
+                    successes: r.get(1)?,
+                    input_tokens: r.get(2)?,
+                    output_tokens: r.get(3)?,
+                    output_tokens_per_sec: if ok_sum_latency_ms > 0 {
+                        ok_output_tokens as f64 * 1000.0 / ok_sum_latency_ms as f64
+                    } else {
+                        0.0
+                    },
+                    decode_output_tokens_per_sec: if ok_sum_decode_ms > 0 {
+                        ok_decode_output_tokens as f64 * 1000.0 / ok_sum_decode_ms as f64
+                    } else {
+                        0.0
+                    },
+                    avg_latency_ms: avg_latency_ms.round() as i64,
+                })
+            })?)
+        })
+    }
+
     /// Filtered log list — supports optional provider_id, status bucket, model, time range.
     pub fn log_list_filtered(
         &self,
@@ -1031,8 +1085,17 @@ impl Db {
         };
         self.with(|c| {
             c.execute(
-                "INSERT INTO app_logs (ts, level, category, message, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![ev.ts, level, ev.category, ev.message, ev.detail],
+                "INSERT INTO app_logs (ts, level, category, message, detail, event_type, payload_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    ev.ts,
+                    level,
+                    ev.category,
+                    ev.message,
+                    ev.detail,
+                    ev.event_type,
+                    serde_json::to_string(&ev.payload).unwrap_or_else(|_| "{}".to_string())
+                ],
             )?;
             Ok(())
         })
@@ -1044,7 +1107,8 @@ impl Db {
                 .map(|t| format!("WHERE ts >= {t}"))
                 .unwrap_or_default();
             let mut stmt = c.prepare(&format!(
-                "SELECT ts, level, category, message, detail FROM app_logs {since_clause}
+                "SELECT ts, level, category, message, detail, event_type, payload_json
+                 FROM app_logs {since_clause}
                  ORDER BY ts DESC, id DESC LIMIT ?1"
             ))?;
             let rows = stmt.query_map(params![limit], |r| {
@@ -1055,11 +1119,13 @@ impl Db {
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             })?;
             let mut out = Vec::new();
             for row in rows {
-                let (ts, level_str, category, message, detail) = row?;
+                let (ts, level_str, category, message, detail, event_type, payload_json) = row?;
                 let level = match level_str.as_str() {
                     "warn" => AppLogLevel::Warn,
                     "error" => AppLogLevel::Error,
@@ -1070,6 +1136,8 @@ impl Db {
                     ts,
                     level,
                     category,
+                    event_type,
+                    payload: serde_json::from_str(&payload_json).unwrap_or(serde_json::Value::Null),
                     message,
                     detail,
                 });
@@ -1119,6 +1187,7 @@ impl Db {
                         COALESCE(avg(l.latency_ms), 0) as avg_lat,
                         COALESCE(sum(l.input_tokens), 0),
                         COALESCE(sum(l.output_tokens), 0),
+                        COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms > 0 THEN l.output_tokens ELSE 0 END), 0) as ok_output_tokens,
                         COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms > 0 THEN l.latency_ms ELSE 0 END), 0) as ok_sum_latency_ms,
                         COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms IS NOT NULL AND l.first_token_ms IS NOT NULL AND l.latency_ms > l.first_token_ms THEN l.output_tokens ELSE 0 END), 0) as ok_decode_out_tokens,
                         COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms IS NOT NULL AND l.first_token_ms IS NOT NULL AND l.latency_ms > l.first_token_ms THEN (l.latency_ms - l.first_token_ms) ELSE 0 END), 0) as ok_sum_decode_ms,
@@ -1136,9 +1205,10 @@ impl Db {
                 let ok: i64 = r.get(3)?;
                 let err: i64 = r.get(4)?;
                 let avg_lat: f64 = r.get(5)?;
-                let ok_sum_latency_ms: i64 = r.get(8)?;
-                let ok_decode_out_tokens: i64 = r.get(9)?;
-                let ok_sum_decode_ms: i64 = r.get(10)?;
+                let ok_output_tokens: i64 = r.get(8)?;
+                let ok_sum_latency_ms: i64 = r.get(9)?;
+                let ok_decode_out_tokens: i64 = r.get(10)?;
+                let ok_sum_decode_ms: i64 = r.get(11)?;
                 let output_tokens: i64 = r.get(7)?;
                 Ok(vibe_protocol::ProviderStat {
                     provider_id: r.get(0)?,
@@ -1151,7 +1221,7 @@ impl Db {
                     input_tokens: r.get(6)?,
                     output_tokens,
                     output_tokens_per_sec: if ok_sum_latency_ms > 0 {
-                        output_tokens as f64 * 1000.0 / ok_sum_latency_ms as f64
+                        ok_output_tokens as f64 * 1000.0 / ok_sum_latency_ms as f64
                     } else {
                         0.0
                     },
@@ -1160,10 +1230,10 @@ impl Db {
                     } else {
                         0.0
                     },
-                    err_429: r.get(11)?,
-                    err_503: r.get(12)?,
-                    err_4xx_other: r.get(13)?,
-                    err_5xx_other: r.get(14)?,
+                    err_429: r.get(12)?,
+                    err_503: r.get(13)?,
+                    err_4xx_other: r.get(14)?,
+                    err_5xx_other: r.get(15)?,
                 })
             })?;
             let mut out = Vec::new();
@@ -1189,6 +1259,7 @@ impl Db {
                         COALESCE(avg(l.latency_ms), 0) as avg_lat,
                         COALESCE(sum(l.input_tokens), 0),
                         COALESCE(sum(l.output_tokens), 0),
+                        COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms > 0 THEN l.output_tokens ELSE 0 END), 0) as ok_output_tokens,
                         COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms > 0 THEN l.latency_ms ELSE 0 END), 0) as ok_sum_latency_ms,
                         COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms IS NOT NULL AND l.first_token_ms IS NOT NULL AND l.latency_ms > l.first_token_ms THEN l.output_tokens ELSE 0 END), 0) as ok_decode_out_tokens,
                         COALESCE(sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.latency_ms IS NOT NULL AND l.first_token_ms IS NOT NULL AND l.latency_ms > l.first_token_ms THEN (l.latency_ms - l.first_token_ms) ELSE 0 END), 0) as ok_sum_decode_ms,
@@ -1206,9 +1277,10 @@ impl Db {
                 let ok: i64 = r.get(3)?;
                 let err: i64 = r.get(4)?;
                 let avg_lat: f64 = r.get(5)?;
-                let ok_sum_latency_ms: i64 = r.get(8)?;
-                let ok_decode_out_tokens: i64 = r.get(9)?;
-                let ok_sum_decode_ms: i64 = r.get(10)?;
+                let ok_output_tokens: i64 = r.get(8)?;
+                let ok_sum_latency_ms: i64 = r.get(9)?;
+                let ok_decode_out_tokens: i64 = r.get(10)?;
+                let ok_sum_decode_ms: i64 = r.get(11)?;
                 let output_tokens: i64 = r.get(7)?;
                 Ok(vibe_protocol::ProviderStat {
                     provider_id: r.get(0)?,
@@ -1221,7 +1293,7 @@ impl Db {
                     input_tokens: r.get(6)?,
                     output_tokens,
                     output_tokens_per_sec: if ok_sum_latency_ms > 0 {
-                        output_tokens as f64 * 1000.0 / ok_sum_latency_ms as f64
+                        ok_output_tokens as f64 * 1000.0 / ok_sum_latency_ms as f64
                     } else {
                         0.0
                     },
@@ -1230,10 +1302,10 @@ impl Db {
                     } else {
                         0.0
                     },
-                    err_429: r.get(11)?,
-                    err_503: r.get(12)?,
-                    err_4xx_other: r.get(13)?,
-                    err_5xx_other: r.get(14)?,
+                    err_429: r.get(12)?,
+                    err_503: r.get(13)?,
+                    err_4xx_other: r.get(14)?,
+                    err_5xx_other: r.get(15)?,
                 })
             })?;
             Ok(rows.next().transpose()?)
@@ -1329,9 +1401,9 @@ impl Db {
                         sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as ok,
                         sum(CASE WHEN l.status_code IS NULL OR l.status_code >= 400 THEN 1 ELSE 0 END) as err,
                         COALESCE(avg(l.latency_ms), 0) as avg_lat
-                 FROM request_logs l
-                 WHERE l.started_at >= ?1
-                   AND l.credential_id IS NOT NULL
+                 FROM request_logs l INDEXED BY idx_request_logs_cred_time
+                 WHERE l.credential_id IS NOT NULL
+                   AND l.started_at >= ?1
                  GROUP BY l.credential_id",
             )?;
             let rows = stmt.query_map(params![since], |r| {
@@ -1609,7 +1681,8 @@ impl Db {
          oauth_cached_email, oauth_cached_subject, oauth_cached_plan_slug,
          remote_models_json, remote_models_fetched_at, balance_json, usage_json, balance_fetched_at,
          upstream_vendor, upstream_username, upstream_session, upstream_session_expires_at,
-         upstream_group, price_multiplier, windows_json";
+         upstream_group, price_multiplier, windows_json,
+         disabled_reason, disabled_at";
     // Col indices (0-based):
     // 0  id, 1  provider_id, 2  label, 3  auth_ref, 4  plan_type, 5  notes,
     // 6  enabled, 7  priority,
@@ -1622,7 +1695,8 @@ impl Db {
     // 26 remote_models_json, 27 remote_models_fetched_at,
     // 28 balance_json, 29 usage_json, 30 balance_fetched_at,
     // 31 upstream_vendor, 32 upstream_username, 33 upstream_session,
-    // 34 upstream_session_expires_at, 35 upstream_group, 36 price_multiplier, 37 windows_json
+    // 34 upstream_session_expires_at, 35 upstream_group, 36 price_multiplier, 37 windows_json,
+    // 38 disabled_reason, 39 disabled_at
 
     const LOG_COLS_LIST: &'static str =
         "id, started_at, app, provider_id, requested_model, upstream_model,
@@ -2008,10 +2082,25 @@ impl Db {
     ) -> Result<vibe_protocol::Credential> {
         let now = now_secs();
         self.with(|c| {
-            let n = c.execute(
-                "UPDATE credentials SET enabled=?2, updated_at=?3 WHERE id=?1",
-                params![id, enabled as i32, now],
-            )?;
+            // Re-enabling clears the auto-disable bookkeeping so the audit fields
+            // only ever reflect the *current* disable, not all historical ones.
+            let n = if enabled {
+                c.execute(
+                    "UPDATE credentials
+                        SET enabled = 1,
+                            disabled_reason = NULL,
+                            disabled_at = NULL,
+                            consecutive_failures = 0,
+                            updated_at = ?2
+                      WHERE id = ?1",
+                    params![id, now],
+                )?
+            } else {
+                c.execute(
+                    "UPDATE credentials SET enabled = 0, updated_at = ?2 WHERE id = ?1",
+                    params![id, now],
+                )?
+            };
             if n == 0 {
                 anyhow::bail!("credential {id} not found");
             }
@@ -2019,6 +2108,27 @@ impl Db {
         })?;
         self.credential_get(id)?
             .context("updated credential missing on read-back")
+    }
+
+    /// Auto-disable a credential after a fatal upstream error (e.g. 401/403).
+    /// Sets `enabled = 0` plus `disabled_reason` / `disabled_at`. Idempotent —
+    /// if the credential is already disabled the reason is overwritten with the
+    /// latest one. Returns `Ok(false)` if the credential id was not found.
+    pub fn credential_disable_with_reason(&self, id: &str, reason: &str) -> Result<bool> {
+        let now = now_secs();
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE credentials
+                    SET enabled = 0,
+                        disabled_reason = ?2,
+                        disabled_at = ?3,
+                        last_error = ?2,
+                        updated_at = ?3
+                  WHERE id = ?1",
+                params![id, reason, now],
+            )?;
+            Ok(n > 0)
+        })
     }
 
     /// Update rate-limit counters extracted from upstream response headers.
@@ -2225,6 +2335,8 @@ fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Crede
         upstream_group: r.get(35)?,
         price_multiplier: r.get::<_, Option<f64>>(36)?.unwrap_or(1.0),
         windows,
+        disabled_reason: r.get(38)?,
+        disabled_at: r.get(39)?,
     })
 }
 
@@ -2811,5 +2923,59 @@ mod tests {
         db.credential_delete(&cred.id).unwrap();
         assert!(db.credential_get(&cred.id).unwrap().is_none());
         assert!(db.credential_delete(&cred.id).is_err());
+    }
+
+    #[test]
+    fn credential_disable_with_reason_persists_and_re_enable_clears() {
+        let db = Db::memory().unwrap();
+        let provider = db.provider_insert(sample_input()).unwrap();
+        let cred = db
+            .credential_insert(&provider.id, sample_credential_input("auth-fail"), None)
+            .unwrap();
+        // Pre-fill consecutive_failures so we can prove re-enable resets it.
+        db.credential_record_failure(&cred.id, Some("some prior blip"))
+            .unwrap();
+
+        // Disable with a structured reason.
+        assert!(db
+            .credential_disable_with_reason(&cred.id, "HTTP 401 from upstream-foo")
+            .unwrap());
+        let disabled = db.credential_get(&cred.id).unwrap().unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(
+            disabled.disabled_reason.as_deref(),
+            Some("HTTP 401 from upstream-foo")
+        );
+        assert!(disabled.disabled_at.is_some());
+        // last_error should also reflect the reason so the existing UI fields surface it.
+        assert_eq!(
+            disabled.last_error.as_deref(),
+            Some("HTTP 401 from upstream-foo")
+        );
+
+        // Idempotent overwrite: second disable replaces the reason and bumps disabled_at.
+        let first_at = disabled.disabled_at.unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(db
+            .credential_disable_with_reason(&cred.id, "HTTP 403 from upstream-foo")
+            .unwrap());
+        let redisabled = db.credential_get(&cred.id).unwrap().unwrap();
+        assert_eq!(
+            redisabled.disabled_reason.as_deref(),
+            Some("HTTP 403 from upstream-foo")
+        );
+        assert!(redisabled.disabled_at.unwrap() >= first_at);
+
+        // Re-enable clears reason, timestamp, and the failure counter.
+        let reenabled = db.credential_set_enabled(&cred.id, true).unwrap();
+        assert!(reenabled.enabled);
+        assert!(reenabled.disabled_reason.is_none());
+        assert!(reenabled.disabled_at.is_none());
+        assert_eq!(reenabled.consecutive_failures, 0);
+
+        // Unknown id is not an error — returns Ok(false).
+        assert!(!db
+            .credential_disable_with_reason("does-not-exist", "noop")
+            .unwrap());
     }
 }

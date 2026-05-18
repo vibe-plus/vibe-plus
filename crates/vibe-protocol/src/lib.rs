@@ -4,6 +4,7 @@
 //! round-trips between Rust HTTP handlers, the SQLite layer, and the Vue UI.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use ts_rs::TS;
 
@@ -328,51 +329,6 @@ pub struct ProviderBalanceSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(
     export,
-    export_to = "../packages/protocol/types/RemoteProviderCapabilities.ts"
-)]
-pub struct RemoteProviderCapabilities {
-    pub can_fetch_branding: bool,
-    pub can_fetch_models: bool,
-    pub can_fetch_balance: bool,
-    pub can_fetch_usage: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/RemoteDetectedProtocol.ts"
-)]
-pub struct RemoteDetectedProtocol {
-    pub kind: String,
-    pub label: String,
-    pub base_url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/RemoteProviderPreview.ts"
-)]
-pub struct RemoteProviderPreview {
-    pub detected_kind: String,
-    pub detected_base_url: String,
-    #[serde(default)]
-    pub detected_protocols: Vec<RemoteDetectedProtocol>,
-    pub display_name: String,
-    pub avatar_url: Option<String>,
-    pub note: String,
-    pub passthrough_mode: bool,
-    pub remote_models: Vec<String>,
-    pub model_aliases: Vec<ModelAlias>,
-    pub balance: Option<ProviderBalanceSnapshot>,
-    pub usage: Option<ProviderBalanceSnapshot>,
-    pub capabilities: RemoteProviderCapabilities,
-    pub fetched_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
     export_to = "../packages/protocol/types/ProviderSpeedtestResult.ts"
 )]
 pub struct ProviderSpeedtestResult {
@@ -583,114 +539,22 @@ pub struct AppLogEvent {
     /// Unix timestamp (seconds).
     pub ts: i64,
     pub level: AppLogLevel,
+    /// Stable event type slug, e.g. "credential.circuit.opened".
+    #[serde(default = "default_app_log_event_type")]
+    pub event_type: String,
+    /// Versioned event payload. Renderers must prefer this snapshot over live DB rows.
+    #[serde(default)]
+    pub payload: JsonValue,
     /// Short category slug: "provider", "credential", "circuit", "system", …
     pub category: String,
+    /// Legacy fallback message for old rows or unknown event renderers.
     pub message: String,
     #[serde(default)]
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/WsEvent.ts")]
-#[serde(tag = "type", rename_all = "kebab-case")]
-pub enum WsEvent {
-    Hello { version: String },
-    AppLog(AppLogEvent),
-    StatusChanged(Status),
-    DashboardStatsChanged(DashboardStats),
-    RequestStarted(RequestActivity),
-    RequestUpdated(RequestRuntimeStats),
-    UpstreamAttemptStarted(UpstreamAttemptActivity),
-    UpstreamAttemptUpdated(RequestRuntimeStats),
-    UpstreamAttemptFinished(UpstreamAttemptLog),
-    LogAppended(RequestLog),
-    ProvidersOverviewChanged(ProvidersOverview),
-    ProvidersOverviewStreamStarted(ProvidersOverviewStreamStarted),
-    ProvidersOverviewProvidersChunk(ProvidersOverviewProvidersChunk),
-    ProvidersOverviewHealthChunk(ProvidersOverviewHealthChunk),
-    ProvidersOverviewPoolsChunk(ProvidersOverviewPoolsChunk),
-    ProvidersOverviewCredentialsChunk(ProvidersOverviewCredentialsChunk),
-    ProvidersOverviewCodexPlansChunk(ProvidersOverviewCodexPlansChunk),
-    ProvidersOverviewStreamEnded(ProvidersOverviewStreamEnded),
-    ClientStatusChanged(ClientStatus),
-    CodexAppStatusChanged(CodexAppStatus),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/ProvidersOverviewStreamStarted.ts"
-)]
-pub struct ProvidersOverviewStreamStarted {
-    pub request_id: String,
-    pub rolling_hours: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/ProvidersOverviewProvidersChunk.ts"
-)]
-pub struct ProvidersOverviewProvidersChunk {
-    pub request_id: String,
-    pub rolling_hours: i64,
-    pub providers: Vec<Provider>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/ProvidersOverviewHealthChunk.ts"
-)]
-pub struct ProvidersOverviewHealthChunk {
-    pub request_id: String,
-    pub rolling_hours: i64,
-    pub health: Vec<ProviderHealthSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/ProvidersOverviewPoolsChunk.ts"
-)]
-pub struct ProvidersOverviewPoolsChunk {
-    pub request_id: String,
-    pub rolling_hours: i64,
-    pub pools: Vec<ProviderAuthPoolSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/ProvidersOverviewCredentialsChunk.ts"
-)]
-pub struct ProvidersOverviewCredentialsChunk {
-    pub request_id: String,
-    pub rolling_hours: i64,
-    pub provider_id: String,
-    pub credentials: Vec<Credential>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/ProvidersOverviewCodexPlansChunk.ts"
-)]
-pub struct ProvidersOverviewCodexPlansChunk {
-    pub request_id: String,
-    pub rolling_hours: i64,
-    pub provider_id: String,
-    pub codex_plans: Vec<ProviderCodexPlanItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/ProvidersOverviewStreamEnded.ts"
-)]
-pub struct ProvidersOverviewStreamEnded {
-    pub request_id: String,
-    pub rolling_hours: i64,
+fn default_app_log_event_type() -> String {
+    "legacy.message".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -717,47 +581,6 @@ pub struct ClientTakeoverResult {
     pub config_path: String,
     pub backup_path: Option<String>,
     pub status: ClientStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/CodexAppProcess.ts")]
-pub struct CodexAppProcess {
-    pub pid: u32,
-    pub role: String,
-    pub command: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/CodexAppStatus.ts")]
-pub struct CodexAppStatus {
-    pub app_path: String,
-    pub installed: bool,
-    pub running: bool,
-    pub main_pid: Option<u32>,
-    pub process_count: usize,
-    pub processes: Vec<CodexAppProcess>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/CodexAppActionResult.ts"
-)]
-pub struct CodexAppActionResult {
-    pub action: String,
-    pub status: CodexAppStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../packages/protocol/types/RequestActivity.ts")]
-pub struct RequestActivity {
-    pub id: String,
-    pub started_at: i64,
-    pub app: Option<String>,
-    pub wire: Option<String>,
-    pub route_prefix: Option<String>,
-    pub provider_id: Option<String>,
-    pub requested_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -791,54 +614,6 @@ pub enum UpstreamAttemptOutcome {
     /// A loser in a race fanout — request was sent but cancelled because
     /// another credential won. Body may or may not have started streaming.
     RaceAborted,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/UpstreamAttemptActivity.ts"
-)]
-pub struct UpstreamAttemptActivity {
-    pub attempt_id: String,
-    pub request_id: String,
-    pub attempt_index: i32,
-    pub started_at: i64,
-    pub phase: UpstreamAttemptPhase,
-    pub provider_id: Option<String>,
-    pub credential_id: Option<String>,
-    pub wire: Option<String>,
-    pub route_prefix: Option<String>,
-    pub requested_model: Option<String>,
-    pub upstream_model: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/RequestRuntimeStats.ts"
-)]
-pub struct RequestRuntimeStats {
-    pub request_id: String,
-    pub attempt_id: Option<String>,
-    pub provider_id: Option<String>,
-    pub active_request_tokens_per_sec: Option<f64>,
-    pub active_upstream_decode_tps: Option<f64>,
-    pub active_downstream_emit_tps: Option<f64>,
-    #[serde(default)]
-    pub active_output_tokens_per_sec: Option<f64>,
-    #[serde(default)]
-    pub active_upstream_bytes_per_sec: f64,
-    #[serde(default)]
-    pub active_downstream_bytes_per_sec: f64,
-    #[serde(default)]
-    pub active_flow_bytes_per_sec: f64,
-    pub output_tokens_so_far: i64,
-    pub upstream_bytes_so_far: i64,
-    pub client_bytes_so_far: i64,
-    pub upstream_first_byte_ms: Option<i64>,
-    pub client_first_write_ms: Option<i64>,
-    pub attempt_scoped: bool,
-    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -898,6 +673,65 @@ pub struct UpstreamAttemptLog {
     pub response_body: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/RealtimeRequest.ts")]
+pub struct RealtimeRequest {
+    pub id: String,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub app: Option<String>,
+    pub provider_id: Option<String>,
+    pub credential_id: Option<String>,
+    pub requested_model: Option<String>,
+    pub upstream_model: Option<String>,
+    pub wire: Option<String>,
+    pub route_prefix: Option<String>,
+    pub client_transport: Option<String>,
+    pub phase: String,
+    pub status_code: Option<i32>,
+    pub error: Option<String>,
+    pub active_output_tokens_per_sec: Option<f64>,
+    pub active_cost_usd_per_hour: Option<f64>,
+    pub active_upstream_bytes_per_sec: f64,
+    pub active_downstream_bytes_per_sec: f64,
+    pub output_tokens_so_far: i64,
+    pub upstream_bytes_so_far: i64,
+    pub client_bytes_so_far: i64,
+    pub upstream_first_byte_ms: Option<i64>,
+    pub client_first_write_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/RealtimeProvider.ts")]
+pub struct RealtimeProvider {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub active_requests: usize,
+    pub active_output_tokens_per_sec: f64,
+    pub active_cost_usd_per_hour: Option<f64>,
+    pub active_upstream_bytes_per_sec: f64,
+    pub active_downstream_bytes_per_sec: f64,
+    pub output_tokens_so_far: i64,
+    pub upstream_bytes_so_far: i64,
+    pub client_bytes_so_far: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/RealtimeSnapshot.ts")]
+pub struct RealtimeSnapshot {
+    pub now: i64,
+    pub active_requests: Vec<RealtimeRequest>,
+    pub recent_requests: Vec<RealtimeRequest>,
+    pub providers: Vec<RealtimeProvider>,
+    pub active_count: usize,
+    pub active_output_tokens_per_sec: f64,
+    pub active_cost_usd_per_hour: Option<f64>,
+    pub active_upstream_bytes_per_sec: f64,
+    pub active_downstream_bytes_per_sec: f64,
+    pub codex_ws_active: usize,
+    pub codex_last_transport: Option<String>,
+}
+
 /// Paginated request log envelope returned by `GET /_vp/logs`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/LogPage.ts")]
@@ -938,15 +772,6 @@ pub struct ProviderInput {
     pub supports_websocket: Option<bool>,
     pub passthrough_mode: bool,
     pub model_aliases: Vec<ModelAlias>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(
-    export,
-    export_to = "../packages/protocol/types/ProviderSpeedtestInput.ts"
-)]
-pub struct ProviderSpeedtestInput {
-    pub timeout_secs: Option<u64>,
 }
 
 /// Live health record for a provider — returned by `GET /_vp/providers/:id/health`.
@@ -1249,6 +1074,13 @@ pub struct Credential {
     /// Rolling-window usage snapshots fetched from the upstream platform.
     #[serde(default)]
     pub windows: Vec<UsageWindow>,
+    /// Why this credential was auto-disabled (e.g. "HTTP 401 from <provider>").
+    /// Cleared when an operator re-enables the credential.
+    #[serde(default)]
+    pub disabled_reason: Option<String>,
+    /// Unix seconds when this credential was auto-disabled.
+    #[serde(default)]
+    pub disabled_at: Option<i64>,
 }
 
 fn default_price_multiplier() -> f64 {

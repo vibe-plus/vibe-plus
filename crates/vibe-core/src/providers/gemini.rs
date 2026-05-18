@@ -8,7 +8,7 @@
 //! If `auth_ref` resolves to a key, it is appended as `?key=`.
 
 use super::{Adapter, Wire};
-use crate::usage::Usage;
+use crate::usage::{estimate_output_tokens, Usage};
 use anyhow::Result;
 use reqwest::{Client, RequestBuilder};
 use vibe_protocol::Provider;
@@ -68,6 +68,21 @@ impl Adapter for GeminiAdapter {
                 }
                 if let Some(n) = meta.get("candidatesTokenCount").and_then(|x| x.as_i64()) {
                     acc.output_tokens = n;
+                    return;
+                }
+            }
+            if let Some(candidates) = v.get("candidates").and_then(|x| x.as_array()) {
+                for candidate in candidates {
+                    if let Some(parts) = candidate
+                        .pointer("/content/parts")
+                        .and_then(|x| x.as_array())
+                    {
+                        for part in parts {
+                            if let Some(text) = part.get("text").and_then(|x| x.as_str()) {
+                                acc.output_tokens += estimate_output_tokens(text);
+                            }
+                        }
+                    }
                 }
             }
         }

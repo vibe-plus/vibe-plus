@@ -2,9 +2,9 @@
 export function frameworkIconFromBaseUrl(baseUrl: string | null | undefined): string | null {
   if (!baseUrl) return null;
   const lower = baseUrl.toLowerCase();
-  if (lower.includes("sub2api")) return "i-lucide-shuffle";
+  if (lower.includes("sub2api")) return "i-[lucide--shuffle]";
   if (lower.includes("newapi") || lower.includes("new-api") || lower.includes("freeapi")) {
-    return "i-lucide-layers";
+    return "i-[lucide--layers]";
   }
   return null;
 }

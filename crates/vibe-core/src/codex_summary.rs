@@ -205,11 +205,10 @@ impl SummaryAccumulator {
                 }
             }
             self.emitted = true;
-            // Persist turn cost and get cumulative thread cost (after slot reserved).
-            if let Some(turn_cost) = metrics.cost_usd {
-                metrics.thread_cost_usd = self.persist_thread_cost(turn_cost);
-            }
-            // Re-render with thread cost included.
+            // Σusd = turn-total cost (sum of all N tool-call requests this turn).
+            // Always >= ~usd (per-request cost). Fills in after slot reserved.
+            metrics.thread_cost_usd = self.turn_total_cost();
+            // Re-render with turn total included.
             let text = render_summary(&self.cfg, self.client, metrics).unwrap_or(text);
 
             let append_text = format_summary_append(&self.last_text, &text);
@@ -331,23 +330,26 @@ impl SummaryAccumulator {
     }
 
     /// Build SummaryMetrics (no side effects — call before slot reserve).
-    /// Uses AppState-accumulated turn IO when available so that all tool-call
-    /// requests in the same turn contribute to the cost, not just the final one.
+    ///
+    /// `cost_usd`  = cost of **this one request** (consistent with the `in` display).
+    /// `thread_cost_usd` is left None here; the caller fills it in after the
+    /// summary slot is reserved.
     fn build_metrics(&self, latency_ms: i64) -> SummaryMetrics {
-        // Read aggregated (input_sum, output_sum) across ALL requests this turn.
-        let (agg_input, agg_output) = match (&self.state, &self.turn_id) {
+        // `out` display = accumulated generation across all tool-call iterations.
+        let (_agg_input, agg_output) = match (&self.state, &self.turn_id) {
             (Some(state), Some(turn_id)) => state.get_codex_turn_io(turn_id),
             _ => (0, 0),
         };
-        // Use AppState aggregates if available; fall back to local sums.
-        let cost_input = agg_input.max(self.turn_input_sum).max(self.usage.input_tokens);
-        let cost_output = agg_output.max(self.turn_output_sum).max(self.usage.output_tokens);
-        // For display: `in` = context window size (MAX of input = last request's value),
-        // `out` = total generation across tool-call loop (SUM = agg_output).
-        let display_output = agg_output.max(self.turn_output_sum).max(self.usage.output_tokens);
-        let cost_usage = Usage {
-            input_tokens: cost_input,
-            output_tokens: cost_output,
+        let display_output = agg_output
+            .max(self.turn_output_sum)
+            .max(self.usage.output_tokens);
+        // Per-request cost: uses only this request's token counts so it is
+        // always consistent with the displayed `in` value.
+        let request_cost_usage = Usage {
+            input_tokens: self.usage.input_tokens,
+            output_tokens: self.usage.output_tokens,
+            cache_read_tokens: self.usage.cache_read_tokens,
+            cache_creation_tokens: self.usage.cache_creation_tokens,
             ..Usage::default()
         };
         SummaryMetrics {
@@ -356,16 +358,37 @@ impl SummaryAccumulator {
             cache_tokens: self.usage.cache_read_tokens + self.usage.cache_creation_tokens,
             latency_ms: Some(latency_ms.max(0)),
             first_token_ms: self.first_token_ms,
-            cost_usd: cost_usage.cost_usd(&self.upstream_model),
+            cost_usd: request_cost_usage.cost_usd(&self.upstream_model),
             thread_cost_usd: None,
         }
     }
 
-    /// Persist turn cost and return cumulative thread cost (call after slot reserve).
-    fn persist_thread_cost(&self, turn_cost: f64) -> Option<f64> {
-        let state = self.state.as_ref()?;
-        let thread_id = self.thread_id.as_deref()?;
-        Some(state.add_codex_thread_cost(thread_id, turn_cost))
+    /// Compute the turn-total cost (sum across all N tool-call requests in this turn)
+    /// and persist it to the in-memory thread accumulator.
+    /// Returns `Some(turn_total)` — always >= the per-request cost.
+    fn turn_total_cost(&self) -> Option<f64> {
+        let (agg_input, agg_output) = match (&self.state, &self.turn_id) {
+            (Some(state), Some(turn_id)) => state.get_codex_turn_io(turn_id),
+            _ => (0, 0),
+        };
+        // Fall back to local sums if AppState hasn't accumulated anything yet.
+        let total_input = agg_input
+            .max(self.turn_input_sum)
+            .max(self.usage.input_tokens);
+        let total_output = agg_output
+            .max(self.turn_output_sum)
+            .max(self.usage.output_tokens);
+        let total_usage = Usage {
+            input_tokens: total_input,
+            output_tokens: total_output,
+            ..Usage::default()
+        };
+        let cost = total_usage.cost_usd(&self.upstream_model)?;
+        // Also persist to the thread-level accumulator for future cross-turn tracking.
+        if let (Some(state), Some(thread_id)) = (&self.state, self.thread_id.as_deref()) {
+            state.add_codex_thread_cost(thread_id, cost);
+        }
+        Some(cost)
     }
 
     fn capture_text_frame(&mut self, frame_json: &str) {
@@ -518,6 +541,9 @@ impl SummaryAccumulator {
         }
         let mut metrics = self.build_metrics(latency_ms);
         let _ = render_summary(&self.cfg, self.client, metrics)?;
+        if !self.has_message_summary_target(frame_json) {
+            return None;
+        }
         if let Some(state) = &self.state {
             if !reserve_summary_slot(state, self.turn_id.as_deref(), self.client) {
                 self.emitted = true;
@@ -525,9 +551,7 @@ impl SummaryAccumulator {
             }
         }
         self.emitted = true;
-        if let Some(turn_cost) = metrics.cost_usd {
-            metrics.thread_cost_usd = self.persist_thread_cost(turn_cost);
-        }
+        metrics.thread_cost_usd = self.turn_total_cost();
         let text = render_summary(&self.cfg, self.client, metrics)?;
         append_summary_to_completed_frame(frame_json, &text)
     }
@@ -666,6 +690,42 @@ fn thread_id_from_metadata_value_inner(v: &Value) -> Option<String> {
             .map(str::to_owned),
         _ => None,
     }
+}
+
+/// Extract `turn_id` from the `x-codex-turn-metadata` HTTP header (JSON object).
+pub fn turn_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    let s = headers.get("x-codex-turn-metadata")?.to_str().ok()?;
+    serde_json::from_str::<Value>(s)
+        .ok()?
+        .get("turn_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Extract `thread_id` from HTTP headers — first tries the direct `thread-id` /
+/// `thread_id` header, then falls back to the `x-codex-turn-metadata` JSON object.
+pub fn thread_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    if let Some(id) = headers
+        .get("thread-id")
+        .or_else(|| headers.get("thread_id"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+    {
+        return Some(id);
+    }
+    let s = headers.get("x-codex-turn-metadata")?.to_str().ok()?;
+    serde_json::from_str::<Value>(s)
+        .ok()?
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Extract `thread_source` from the `x-codex-turn-metadata` HTTP header.
+pub fn thread_source_from_headers(headers: &HeaderMap) -> Option<CodexThreadSource> {
+    let s = headers.get("x-codex-turn-metadata")?.to_str().ok()?;
+    let v: Value = serde_json::from_str(s).ok()?;
+    thread_source_from_metadata_value_inner(&v)
 }
 
 pub fn summary_slot_key(turn_id: Option<&str>, client: CodexClientKind) -> String {
@@ -1133,7 +1193,7 @@ fn metric_label(overrides: &CodexSummaryLabelOverrides, key: &str) -> String {
         "thread_cost" => overrides
             .thread_cost
             .clone()
-            .unwrap_or_else(|| "∑usd".to_string()),
+            .unwrap_or_else(|| "Σusd".to_string()),
         _ => key.to_string(),
     }
 }
@@ -1408,6 +1468,49 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&body).unwrap();
         assert_eq!(turn_id_from_request(&bytes).as_deref(), Some("turn-123"));
+    }
+
+    #[test]
+    fn extracts_turn_id_and_thread_id_from_headers() {
+        let meta = serde_json::json!({
+            "turn_id": "turn-abc",
+            "thread_id": "thread-xyz",
+            "thread_source": "user",
+            "session_id": "sess-111",
+            "turn_started_at_unix_ms": 1700000000000_u64
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_str(&meta.to_string()).unwrap(),
+        );
+        assert_eq!(turn_id_from_headers(&headers).as_deref(), Some("turn-abc"));
+        assert_eq!(
+            thread_id_from_headers(&headers).as_deref(),
+            Some("thread-xyz")
+        );
+        assert_eq!(
+            thread_source_from_headers(&headers),
+            Some(CodexThreadSource::User)
+        );
+    }
+
+    #[test]
+    fn thread_id_from_headers_prefers_direct_header() {
+        let meta = serde_json::json!({
+            "turn_id": "turn-abc",
+            "thread_id": "thread-from-meta",
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_str(&meta.to_string()).unwrap(),
+        );
+        headers.insert("thread-id", HeaderValue::from_static("thread-direct"));
+        assert_eq!(
+            thread_id_from_headers(&headers).as_deref(),
+            Some("thread-direct")
+        );
     }
 
     #[test]

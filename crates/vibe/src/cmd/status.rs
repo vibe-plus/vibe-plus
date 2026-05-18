@@ -1,10 +1,11 @@
 use anyhow::Result;
 use vibe_core::paths;
+use vibe_i18n::text_env;
 
 pub async fn run() -> Result<()> {
     let pid_path = paths::pid_path()?;
     if !pid_path.exists() {
-        println!("vibe is not running.");
+        println!("{}", text_env("cli-stop-not-running"));
         return Ok(());
     }
     let base_url = super::configured_base_url()?;

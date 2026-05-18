@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { api, type LocalCandidate, type ProviderKind, type Provider } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderLogo from "../../../components/provider-logo.vue";
+
+const { t } = useI18n();
 import type { WorkspaceView } from "../../../utils/workspace-view.ts";
 
 const props = defineProps<{
@@ -162,13 +165,13 @@ const pendingCount = computed(
           </span>
           <div class="min-w-0 flex-1">
             <h2 id="provider-import-title" class="text-base font-semibold text-vp-text">
-              Local import
+              {{ t("title") }}
             </h2>
           </div>
           <button
             type="button"
             class="vp-icon-btn shrink-0"
-            aria-label="Close"
+            :aria-label="t('actions.close')"
             @click="emit('close')"
           >
             <VpIcon name="x" size-class="size-5" />
@@ -183,7 +186,7 @@ const pendingCount = computed(
             class="flex items-center justify-center gap-2 py-10 text-sm text-slate-500"
           >
             <VpIcon name="loader-2" size-class="size-4 animate-spin" />
-            Scanning local tools…
+            {{ t("scan.scanning") }}
           </div>
 
           <!-- Scan error -->
@@ -191,14 +194,14 @@ const pendingCount = computed(
             v-else-if="scanState === 'error'"
             class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
           >
-            <p class="font-medium">Scan failed</p>
+            <p class="font-medium">{{ t("scan.failed") }}</p>
             <p class="mt-1 text-xs font-mono">{{ scanError }}</p>
             <button
               type="button"
               class="mt-2 text-xs text-red-600 underline hover:no-underline"
               @click="scan"
             >
-              Retry
+              {{ t("actions.retry") }}
             </button>
           </div>
 
@@ -207,9 +210,9 @@ const pendingCount = computed(
             <div v-if="showFilterChips" class="mb-3 flex gap-1.5">
               <button
                 v-for="chip in [
-                  { id: 'all', label: 'All' },
-                  { id: 'M', label: 'Messages' },
-                  { id: 'R', label: 'Responses' },
+                  { id: 'all', label: t('filters.all') },
+                  { id: 'M', label: t('filters.messages') },
+                  { id: 'R', label: t('filters.responses') },
                 ] as const"
                 :key="chip.id"
                 type="button"
@@ -231,9 +234,9 @@ const pendingCount = computed(
               class="flex flex-col items-center justify-center gap-2 py-10 text-sm text-slate-500"
             >
               <VpIcon name="archive" size-class="size-8 text-slate-300" />
-              <p>No importable local tools found</p>
+              <p>{{ t("empty.title") }}</p>
               <p class="text-xs text-slate-400">
-                Supports Codex CLI (~/.codex), Claude (~/.claude), and more
+                {{ t("empty.description") }}
               </p>
             </div>
 
@@ -276,7 +279,7 @@ const pendingCount = computed(
                       v-if="c.proxy_managed"
                       class="rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-medium text-violet-700"
                     >
-                      Vibe 管理
+                      {{ t("badges.vibeManaged") }}
                     </span>
                     <span
                       v-else
@@ -287,14 +290,14 @@ const pendingCount = computed(
                       "
                       class="rounded-full border px-1.5 py-0.5 text-[10px] font-medium"
                     >
-                      {{ c.token_ok ? "Token OK" : "Token missing" }}
+                      {{ c.token_ok ? t("badges.tokenOk") : t("badges.tokenMissing") }}
                     </span>
                     <!-- Already imported badge -->
                     <span
                       v-if="isAlreadyImported(c)"
                       class="rounded-full border border-slate-200 bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500"
                     >
-                      已导入
+                      {{ t("badges.imported") }}
                     </span>
                   </div>
                   <p class="mt-1 truncate font-mono text-[11px] text-slate-400">
@@ -305,7 +308,7 @@ const pendingCount = computed(
                     class="mt-1.5 flex flex-wrap gap-1"
                   >
                     <span class="text-[11px] text-slate-500">
-                      +{{ c.extra_credentials.length }} extra account(s)
+                      {{ t("badges.extraAccounts", { count: c.extra_credentials.length }) }}
                     </span>
                   </div>
                 </div>
@@ -315,7 +318,7 @@ const pendingCount = computed(
                   type="button"
                   class="shrink-0 rounded-lg bg-violet-600 p-2.5 text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
                   :disabled="importingSet.has(c.client) || importAllBusy"
-                  :title="importingSet.has(c.client) ? 'Importing…' : 'Import'"
+                  :title="importingSet.has(c.client) ? t('actions.importing') : t('actions.import')"
                   @click="importOne(c.client)"
                 >
                   <VpIcon
@@ -327,7 +330,7 @@ const pendingCount = computed(
                 <span
                   v-else
                   class="shrink-0 grid size-9 place-items-center rounded-lg bg-slate-100 text-slate-400"
-                  title="已导入"
+                  :title="t('badges.imported')"
                 >
                   <VpIcon name="check" size-class="size-4" />
                 </span>
@@ -345,7 +348,7 @@ const pendingCount = computed(
             class="btn-ghost inline-flex items-center gap-1.5 px-3 py-2 text-sm"
             @click="emit('close')"
           >
-            Cancel
+            {{ t("actions.cancel") }}
           </button>
           <button
             v-if="pendingCount > 0"
@@ -359,10 +362,77 @@ const pendingCount = computed(
               size-class="size-4"
               :spin="importAllBusy"
             />
-            Import all ({{ pendingCount }})
+            {{ t("actions.importAll", { count: pendingCount }) }}
           </button>
         </div>
       </div>
     </div>
   </Teleport>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "actions": {
+      "cancel": "Cancel",
+      "close": "Close",
+      "import": "Import",
+      "importAll": "Import all ({count})",
+      "importing": "Importing…",
+      "retry": "Retry"
+    },
+    "badges": {
+      "extraAccounts": "+{count} extra account(s)",
+      "imported": "Imported",
+      "tokenMissing": "Token missing",
+      "tokenOk": "Token OK",
+      "vibeManaged": "Vibe managed"
+    },
+    "empty": {
+      "description": "Supports Codex CLI (~/.codex), Claude (~/.claude), and more",
+      "title": "No importable local tools found"
+    },
+    "filters": {
+      "all": "All",
+      "messages": "Messages",
+      "responses": "Responses"
+    },
+    "scan": {
+      "failed": "Scan failed",
+      "scanning": "Scanning local tools…"
+    },
+    "title": "Local import"
+  },
+  "zh-CN": {
+    "actions": {
+      "cancel": "取消",
+      "close": "关闭",
+      "import": "导入",
+      "importAll": "全部导入（{count}）",
+      "importing": "导入中…",
+      "retry": "重试"
+    },
+    "badges": {
+      "extraAccounts": "+{count} 个额外账户",
+      "imported": "已导入",
+      "tokenMissing": "缺少 Token",
+      "tokenOk": "Token 正常",
+      "vibeManaged": "Vibe 管理"
+    },
+    "empty": {
+      "description": "支持 Codex CLI（~/.codex）、Claude（~/.claude）等本地工具",
+      "title": "未发现可导入的本地工具"
+    },
+    "filters": {
+      "all": "全部",
+      "messages": "消息",
+      "responses": "响应"
+    },
+    "scan": {
+      "failed": "扫描失败",
+      "scanning": "正在扫描本地工具…"
+    },
+    "title": "本地导入"
+  }
+}
+</i18n>

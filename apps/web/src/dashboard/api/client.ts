@@ -5,9 +5,10 @@ function resolvePort(): number {
     const n = parseInt(envRaw, 10);
     if (Number.isInteger(n) && n > 0 && n < 65536) return n;
   }
-  const params = new URLSearchParams(window.location.search);
+  const location = globalThis.window?.location;
+  const params = new URLSearchParams(location?.search ?? "");
   const raw =
-    params.get("port") ?? new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("port");
+    params.get("port") ?? new URLSearchParams(location?.hash.split("?")[1] ?? "").get("port");
   const n = raw ? parseInt(raw, 10) : NaN;
   return Number.isInteger(n) && n > 0 && n < 65536 ? n : 15917;
 }
@@ -15,8 +16,12 @@ function resolvePort(): number {
 export const PORT = resolvePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 
+export function apiUrl(path: string, base = BASE): string {
+  return base + path;
+}
+
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + path, {
+  const res = await fetch(apiUrl(path), {
     headers: { "content-type": "application/json" },
     ...options,
   });
@@ -31,7 +36,6 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export type ProviderKind = "anthropic" | "openai-chat" | "openai-responses" | "gemini-native";
-export type ForwardStrategy = "rotate" | "race" | "fallback";
 
 export interface ModelAlias {
   alias: string;
@@ -89,32 +93,6 @@ export interface ProviderInput {
   model_aliases: ModelAlias[];
 }
 
-export interface ProviderSyncPreview {
-  provider: Provider;
-  display_name: string;
-  avatar_url: string | null;
-  balance: {
-    currency: string;
-    balance: string | null;
-    remaining: string | null;
-    used: string | null;
-    total: string | null;
-    period: string | null;
-    note: string | null;
-  } | null;
-  usage: {
-    currency: string;
-    balance: string | null;
-    remaining: string | null;
-    used: string | null;
-    total: string | null;
-    period: string | null;
-    note: string | null;
-  } | null;
-  supported_protocols: string[];
-  note: string;
-}
-
 export interface ProvidersOverview {
   rolling_hours: number;
   providers: Provider[];
@@ -123,184 +101,24 @@ export interface ProvidersOverview {
   credentials: Record<string, Credential[]>;
   codex_plans: Record<string, ProviderCodexPlanItem[]>;
 }
-export interface RequestLog {
-  id: string;
-  started_at: number;
-  app: string | null;
-  provider_id: string | null;
-  requested_model: string | null;
-  upstream_model: string | null;
-  status_code: number | null;
-  error: string | null;
-  latency_ms: number | null;
-  first_token_ms: number | null;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_creation_tokens: number;
-  estimated_cost_usd: string;
-  wire?: string | null;
-  route_prefix?: string | null;
-  credential_id?: string | null;
-  cb_key?: string | null;
-  upstream_http_status?: number | null;
-  upstream_error_preview?: string | null;
-  dedupe_key?: string | null;
-  client_transport?: string | null;
-  request_headers?: string | null;
-  /** Present on `GET /_vp/logs/:id`; omitted from list endpoint to save bandwidth. */
-  request_body?: string | null;
-  response_body?: string | null;
-  /** Codex WS and similar: frames actually sent to the client after the gateway converts upstream Chat into Responses (multi-line JSON). */
-  client_response_body?: string | null;
-  stream_kind?: string | null;
-  stream_terminal_seen?: boolean | null;
-  stream_end_reason?: string | null;
-  stream_error_detail?: string | null;
-  upstream_first_byte_ms?: number | null;
-  client_first_write_ms?: number | null;
-  last_upstream_event_ms?: number | null;
-  last_client_write_ms?: number | null;
-  upstream_chunk_count?: number;
-  upstream_bytes?: number;
-  client_chunk_count?: number;
-  client_bytes?: number;
-  sse_event_count?: number;
-  sse_data_count?: number;
-  sse_comment_count?: number;
-  sse_keepalive_count?: number;
-  sse_done_count?: number;
-  parse_error_count?: number;
-  first_keepalive_ms?: number | null;
-  last_keepalive_ms?: number | null;
-  max_gap_between_upstream_events_ms?: number | null;
-  max_gap_between_data_events_ms?: number | null;
-  keepalive_after_last_data_count?: number;
-  last_data_event_ms?: number | null;
-  bridge_mode?: string | null;
-  status_injected?: boolean;
-  terminal_injected?: boolean;
-  upstream_terminal_type?: string | null;
-}
-export interface LogPage {
-  items: RequestLog[];
-  total: number;
-  limit: number;
-  offset: number;
-  has_more: boolean;
-}
-
 export type AppLogLevel = "debug" | "info" | "warn" | "error";
+
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
 export interface AppLogEvent {
   ts: number;
   level: AppLogLevel;
+  event_type?: string;
+  payload?: JsonValue;
   category: string;
   message: string;
   detail: string | null;
-}
-export type UpstreamAttemptPhase =
-  | "connecting"
-  | "streaming"
-  | "completed"
-  | "failed"
-  | "abandoned";
-export type UpstreamAttemptOutcome =
-  | "success"
-  | "retryable-error"
-  | "client-error"
-  | "rate-limit"
-  | "transport-error"
-  | "fallback-abandon"
-  | "circuit-skip";
-
-export interface RequestRuntimeStats {
-  request_id: string;
-  attempt_id: string | null;
-  provider_id: string | null;
-  active_request_tokens_per_sec: number | null;
-  active_upstream_decode_tps: number | null;
-  active_downstream_emit_tps: number | null;
-  active_output_tokens_per_sec?: number | null;
-  active_upstream_bytes_per_sec?: number;
-  active_downstream_bytes_per_sec?: number;
-  active_flow_bytes_per_sec?: number;
-  output_tokens_so_far: number;
-  upstream_bytes_so_far: number;
-  client_bytes_so_far: number;
-  upstream_first_byte_ms: number | null;
-  client_first_write_ms: number | null;
-  attempt_scoped: boolean;
-  updated_at: number;
-}
-
-export interface UpstreamAttemptActivity {
-  attempt_id: string;
-  request_id: string;
-  attempt_index: number;
-  started_at: number;
-  phase: UpstreamAttemptPhase;
-  provider_id: string | null;
-  credential_id: string | null;
-  wire: string | null;
-  route_prefix: string | null;
-  requested_model: string | null;
-  upstream_model: string | null;
-}
-
-export interface UpstreamAttemptLog {
-  attempt_id: string;
-  request_id: string;
-  attempt_index: number;
-  started_at: number;
-  ended_at: number | null;
-  provider_id: string | null;
-  credential_id: string | null;
-  wire: string | null;
-  route_prefix: string | null;
-  requested_model: string | null;
-  upstream_model: string | null;
-  phase: UpstreamAttemptPhase;
-  outcome: UpstreamAttemptOutcome;
-  status_code: number | null;
-  upstream_http_status: number | null;
-  error_summary: string | null;
-  latency_ms: number | null;
-  first_token_ms: number | null;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_creation_tokens: number;
-  upstream_first_byte_ms: number | null;
-  client_first_write_ms: number | null;
-  last_upstream_event_ms: number | null;
-  last_client_write_ms: number | null;
-  upstream_chunk_count: number;
-  upstream_bytes: number;
-  client_chunk_count: number;
-  client_bytes: number;
-  sse_event_count: number;
-  sse_data_count: number;
-  sse_comment_count: number;
-  sse_keepalive_count: number;
-  sse_done_count: number;
-  parse_error_count: number;
-  first_keepalive_ms: number | null;
-  last_keepalive_ms: number | null;
-  max_gap_between_upstream_events_ms: number | null;
-  max_gap_between_data_events_ms: number | null;
-  keepalive_after_last_data_count: number;
-  last_data_event_ms: number | null;
-  bridge_mode: string | null;
-  status_injected: boolean;
-  terminal_injected: boolean;
-  upstream_terminal_type: string | null;
-  active_upstream_decode_tps_peak: number | null;
-  active_downstream_emit_tps_peak: number | null;
-  request_headers?: string | null;
-  request_body?: string | null;
-  response_headers?: string | null;
-  response_body?: string | null;
 }
 export interface WebCompatibility {
   api: number;
@@ -337,100 +155,6 @@ export interface ClientTakeoverResult {
   config_path: string;
   backup_path: string | null;
   status: ClientStatus;
-}
-
-export interface VibeConfig {
-  server: {
-    host: string;
-    port: number;
-  };
-  failover: {
-    failure_threshold: number;
-    success_threshold: number;
-    open_timeout_secs: number;
-    inject_cache: boolean;
-  };
-  log: {
-    bodies: boolean;
-    redact_sensitive_headers: boolean;
-  };
-  codex?: {
-    route_status_enabled: boolean;
-    summary: CodexSummaryConfig;
-  };
-  claude?: {
-    native: ClaudeNativeConfig;
-    summary: CodexSummaryConfig;
-    routing: ClaudeRoutingConfig;
-    fallback: ClaudeFallbackConfig;
-    request: ClaudeRequestConfig;
-    status_line: ClaudeStatusLineConfig;
-  };
-}
-
-export type ClaudeNativeEffort = "default" | "max";
-
-export interface ClaudeNativeConfig {
-  manage_settings_json: boolean;
-  proxy_env: boolean;
-  clear_model_overrides_on_takeover: boolean;
-  write_model_overrides_on_takeover: boolean;
-  default_model: string | null;
-  small_fast_model: string | null;
-  haiku_model: string | null;
-  sonnet_model: string | null;
-  opus_model: string | null;
-  max_output_tokens: number | null;
-  disable_nonessential_traffic: boolean;
-  enable_tool_search: boolean;
-  experimental_agent_teams: boolean;
-  effort: ClaudeNativeEffort;
-  disable_auto_updater: boolean;
-  hide_attribution: boolean;
-}
-
-export interface ClaudeRoutingConfig {
-  enabled: boolean;
-  default_model: string;
-  background_model: string;
-  think_model: string;
-  long_context_model: string;
-  long_context_threshold_tokens: number;
-  web_search_model: string;
-  image_model: string;
-  route_haiku_to_background: boolean;
-  enable_subagent_model_tag: boolean;
-}
-
-export interface ClaudeFallbackConfig {
-  enabled: boolean;
-  default: string[];
-  background: string[];
-  think: string[];
-  long_context: string[];
-  web_search: string[];
-  image: string[];
-}
-
-export type ClaudeThinkingPolicy = "preserve" | "remove" | "force_enabled";
-
-export interface ClaudeRequestConfig {
-  api_timeout_ms: number;
-  max_tokens_cap: number | null;
-  default_max_tokens: number | null;
-  disable_web_search: boolean;
-  thinking_policy: ClaudeThinkingPolicy;
-  thinking_budget_tokens: number | null;
-}
-
-export type ClaudeStatusLineStyle = "compact" | "detailed";
-
-export interface ClaudeStatusLineConfig {
-  enabled: boolean;
-  style: ClaudeStatusLineStyle;
-  show_provider: boolean;
-  show_model: boolean;
-  show_usage: boolean;
 }
 
 export type CodexSummaryClientKind = "app" | "cli" | "unknown";
@@ -474,6 +198,56 @@ export interface CodexSummaryConfig {
   clients: Record<CodexSummaryClientKind, CodexSummaryClientConfig>;
 }
 
+export interface RealtimeRequest {
+  id: string;
+  started_at: number;
+  updated_at: number;
+  app: string | null;
+  provider_id: string | null;
+  credential_id: string | null;
+  requested_model: string | null;
+  upstream_model: string | null;
+  wire: string | null;
+  route_prefix: string | null;
+  client_transport: string | null;
+  phase: string;
+  status_code: number | null;
+  error: string | null;
+  active_output_tokens_per_sec: number | null;
+  active_cost_usd_per_hour: number | null;
+  active_upstream_bytes_per_sec: number;
+  active_downstream_bytes_per_sec: number;
+  output_tokens_so_far: number;
+  upstream_bytes_so_far: number;
+  client_bytes_so_far: number;
+  upstream_first_byte_ms: number | null;
+  client_first_write_ms: number | null;
+}
+export interface RealtimeProvider {
+  provider_id: string;
+  provider_name: string;
+  active_requests: number;
+  active_output_tokens_per_sec: number;
+  active_cost_usd_per_hour: number | null;
+  active_upstream_bytes_per_sec: number;
+  active_downstream_bytes_per_sec: number;
+  output_tokens_so_far: number;
+  upstream_bytes_so_far: number;
+  client_bytes_so_far: number;
+}
+export interface RealtimeSnapshot {
+  now: number;
+  active_requests: RealtimeRequest[];
+  recent_requests: RealtimeRequest[];
+  providers: RealtimeProvider[];
+  active_count: number;
+  active_output_tokens_per_sec: number;
+  active_cost_usd_per_hour: number | null;
+  active_upstream_bytes_per_sec: number;
+  active_downstream_bytes_per_sec: number;
+  codex_ws_active: number;
+  codex_last_transport: string | null;
+}
 export interface UsageSummary {
   range: string;
   requests: number;
@@ -499,7 +273,7 @@ export interface ProviderHealth {
   updated_at: number;
 }
 
-/** `GET /_vp/providers/:id/health` — cumulative DB health + optional rolling window from `request_logs`. */
+/** `GET /_vp/providers/:id/health` — cumulative DB health and credential/provider counters. */
 export interface ProviderHealthSummary {
   cumulative: ProviderHealth;
   rolling_hours: number;
@@ -809,14 +583,6 @@ export interface CcSwitchDeeplinkImport {
   url: string;
 }
 
-export interface LogFilters {
-  limit?: number;
-  offset?: number;
-  since?: number;
-  provider_id?: string;
-  status?: "ok" | "error";
-}
-
 export type ToolConfigId = "codex" | "claude";
 
 export interface ToolConfigRaw {
@@ -908,14 +674,6 @@ export interface CodexConfigSettings {
 export const api = {
   ping: () => req<{ ok: boolean }>("/health"),
   status: () => req<Status>("/status"),
-  config: {
-    get: () => req<VibeConfig>("/_vp/config"),
-    save: (input: VibeConfig) =>
-      req<VibeConfig>("/_vp/config", {
-        method: "PUT",
-        body: JSON.stringify(input),
-      }),
-  },
   providers: {
     list: () => req<Provider[]>("/_vp/providers"),
     overview: (hours = 24) => req<ProvidersOverview>(`/_vp/providers/overview?hours=${hours}`),
@@ -940,28 +698,8 @@ export const api = {
       req<ProviderHealth>(`/_vp/providers/${id}/circuit/reset`, {
         method: "POST",
       }),
-    speedtest: (id: string, timeoutSecs?: number) =>
-      req<Provider>(`/_vp/providers/${id}/speedtest`, {
-        method: "POST",
-        body: JSON.stringify({ timeout_secs: timeoutSecs ?? null }),
-      }),
-    probe: (id: string, timeoutSecs?: number) =>
-      req<Provider>(`/_vp/providers/${id}/probe`, {
-        method: "POST",
-        body: JSON.stringify({ timeout_secs: timeoutSecs ?? null }),
-      }),
-    detectVendor: (id: string) =>
-      req<{ upstream_vendor: string | null; updated_credentials: number; base_url: string }>(
-        `/_vp/providers/${id}/detect-vendor`,
-        { method: "POST" },
-      ),
     refreshModels: (id: string) =>
       req<Provider>(`/_vp/providers/${id}/models/refresh`, { method: "POST" }),
-    sync: (id: string, scope: "all" | "brand" | "protocol" | "models" | "usage") =>
-      req<ProviderSyncPreview>(`/_vp/providers/${id}/sync`, {
-        method: "POST",
-        body: JSON.stringify({ scope }),
-      }),
     scanLocal: () => req<LocalCandidate[]>("/_vp/providers/import-local"),
     importLocal: (clients: string[]) =>
       req<Provider[]>("/_vp/providers/import-local", {
@@ -1019,25 +757,6 @@ export const api = {
       }),
     groups: (id: string) => req<UpstreamGroupInfo[]>(`/_vp/credentials/${id}/groups`),
   },
-  logs: {
-    list: (f: LogFilters = {}) => {
-      const p = new URLSearchParams();
-      if (f.limit) p.set("limit", String(f.limit));
-      if (f.offset) p.set("offset", String(f.offset));
-      if (f.since) p.set("since", String(f.since));
-      if (f.provider_id) p.set("provider_id", f.provider_id);
-      if (f.status) p.set("status", f.status);
-      return req<LogPage>(`/_vp/logs?${p}`);
-    },
-    get: (id: string) => req<RequestLog>(`/_vp/logs/${encodeURIComponent(id)}`),
-    attempts: (id: string) =>
-      req<UpstreamAttemptLog[]>(`/_vp/logs/${encodeURIComponent(id)}/attempts`),
-  },
-  attempts: {
-    list: (limit = 100, offset = 0) =>
-      req<UpstreamAttemptLog[]>(`/_vp/attempts?limit=${limit}&offset=${offset}`),
-    get: (id: string) => req<UpstreamAttemptLog>(`/_vp/attempts/${encodeURIComponent(id)}`),
-  },
   appLogs: {
     list: (limit = 200, since?: number) =>
       req<AppLogEvent[]>(
@@ -1046,6 +765,7 @@ export const api = {
   },
   usage: (hours = 24) => req<UsageSummary>(`/_vp/usage/summary?hours=${hours}`),
   stats: (hours = 24) => req<DashboardStats>(`/_vp/stats/dashboard?hours=${hours}`),
+  realtime: () => req<RealtimeSnapshot>("/_vp/realtime"),
   clients: {
     status: (client: string) =>
       req<ClientStatus>(`/_vp/clients/${encodeURIComponent(client)}/status`),

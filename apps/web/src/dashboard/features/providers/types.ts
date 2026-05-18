@@ -1,16 +1,6 @@
 import type { Provider } from "../../api/client.ts";
 import type { ClientToolId, ProtocolSupportInfo } from "../../utils/client-tools.ts";
 
-export type LiveRequestMetric = {
-  request_id: string;
-  provider_id: string;
-  upstream_first_byte_ms: number | null;
-  active_request_tokens_per_sec: number | null;
-  active_upstream_decode_tps: number | null;
-  active_downstream_emit_tps: number | null;
-  updated_at: number;
-};
-
 export type ProviderGroupKey = "native" | "bridged" | "other";
 
 export interface ProviderTabOption {
@@ -55,7 +45,6 @@ export interface ProviderSectionSummary {
   availableCredentials: number;
   enabledCredentials: number;
   blockedCredentials: number;
-  activeRequests: number;
   fastestLatencyMs: number | null;
   remoteModels: number;
   testedEndpoints: number;

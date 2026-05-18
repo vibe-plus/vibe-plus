@@ -27,6 +27,7 @@ tray-icon = { workspace = true }
 wry = { workspace = true }
 vibe-core = { workspace = true }
 vibe-db = { workspace = true }
+vibe-i18n = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

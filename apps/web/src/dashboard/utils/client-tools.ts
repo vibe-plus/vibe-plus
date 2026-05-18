@@ -34,7 +34,7 @@ export const CLIENT_TOOLS: readonly ClientToolInfo[] = [
     id: "codex",
     label: "Codex CLI",
     shortLabel: "Codex",
-    icon: "i-lucide-terminal",
+    icon: "i-[lucide--terminal]",
     pathPrefix: "/codex/v1",
     consumesKinds: ["openai-responses", "openai-chat"],
     /** Preferred path: OAuth uses the gateway credential pool; CLI only connects locally. */
@@ -44,7 +44,7 @@ export const CLIENT_TOOLS: readonly ClientToolInfo[] = [
     id: "claude-code",
     label: "Claude Code",
     shortLabel: "Claude",
-    icon: "i-lucide-sparkles",
+    icon: "i-[lucide--sparkles]",
     /** Same as `vibe takeover claude`: BASE_URL points to /claude, and the SDK then requests /v1/messages. */
     pathPrefix: "/claude",
     consumesKinds: ["anthropic"],
@@ -56,7 +56,7 @@ export const CLIENT_TOOLS: readonly ClientToolInfo[] = [
     id: "opencode",
     label: "OpenCode",
     shortLabel: "OpenCode",
-    icon: "i-lucide-package",
+    icon: "i-[lucide--package]",
     pathPrefix: "/opencode/v1",
     consumesKinds: ["openai-chat", "openai-responses"],
     setupHint: "baseURL -> /opencode/v1",

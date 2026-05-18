@@ -722,7 +722,17 @@ async fn send_prepare_error(socket: &mut WebSocket, state: &AppState, err: Prepa
             forward::persist_request_log(state, log);
             let _ = send_text(socket, &payload).await;
         }
-        PreparedForwardError::Exhausted {
+        PreparedForwardError::NoUsableCredentials {
+            log_id,
+            started_at,
+            started_instant,
+            app,
+            requested_model,
+            log_ctx,
+            request_snapshot,
+            message,
+        }
+        | PreparedForwardError::Exhausted {
             log_id,
             started_at,
             started_instant,
@@ -838,6 +848,10 @@ fn update_usage_and_terminal(frame_json: &str, usage: &mut Usage) -> bool {
             .and_then(|x| x.as_i64())
         {
             usage.cache_read_tokens = n;
+        }
+    } else if typ.is_some_and(|t| t.ends_with(".delta")) {
+        if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+            usage.output_tokens += crate::usage::estimate_output_tokens(delta);
         }
     }
     matches!(

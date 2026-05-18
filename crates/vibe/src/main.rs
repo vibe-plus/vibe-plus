@@ -2,7 +2,8 @@ mod cmd;
 mod npm_registry;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use vibe_i18n::text_env;
 
 #[derive(Parser)]
 #[command(
@@ -43,7 +44,10 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cmd = Cli::command();
+    cmd = cmd.about(cli_about());
+    let cli =
+        Cli::from_arg_matches(&cmd.get_matches()).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     init_tracing();
     match cli.command {
         None => cmd::up::run().await,
@@ -58,6 +62,10 @@ async fn main() -> Result<()> {
         Some(Command::Update) => cmd::update::run(),
         Some(Command::Ui) => cmd::ui::run().await,
     }
+}
+
+fn cli_about() -> String {
+    text_env("cli-about")
 }
 
 fn init_tracing() {

@@ -1,0 +1,13 @@
+[package]
+name = "vibe-i18n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Shared Fluent-based localization helpers for Vibe Plus Rust crates."
+
+[dependencies]
+fluent-templates = { workspace = true }
+unic-langid = { workspace = true }
+once_cell = { workspace = true }

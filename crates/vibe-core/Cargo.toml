@@ -10,6 +10,7 @@ description = "Local API gateway core: server, providers, router, transforms."
 [dependencies]
 vibe-protocol = { workspace = true }
 vibe-db = { workspace = true }
+vibe-i18n = { workspace = true }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -43,7 +44,6 @@ tracing-subscriber = { workspace = true }
 base64 = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
-scraper = "0.24"
 
 [dev-dependencies]
 tempfile = "3.27.0"

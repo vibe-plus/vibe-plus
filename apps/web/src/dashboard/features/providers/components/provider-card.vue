@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import type {
   Credential,
@@ -9,14 +10,12 @@ import type {
 } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderLogo from "../../../components/provider-logo.vue";
-import UsageRing from "../../../components/UsageRing.vue";
-import {
-  credentialPlanTierHint,
-  credentialPrimaryAccountLabel,
-  mergedPoolStatus,
-  primaryPlanPercent,
-} from "../../../utils/providers-display.ts";
-import { protocolLabelsForProvider } from "../../../utils/protocol-label.ts";
+
+const { t } = useI18n();
+import CredentialRow from "./provider-credential-row.vue";
+import UiBadge from "../../../components/ui/badge.vue";
+import UiButton from "../../../components/ui/button.vue";
+import { credentialPlanTierHint, primaryPlanPercent } from "../../../utils/providers-display.ts";
 import { brandHintFromHost } from "../../../utils/brand-hint.ts";
 
 type ProviderGroupKey = "native" | "bridged" | "other";
@@ -52,23 +51,16 @@ const props = defineProps<{
   loadingCreds: boolean;
   toggleProviderBusy: boolean;
   circuitResetBusy: boolean;
-  speedtestBusy: boolean;
-  modelRefreshBusy: boolean;
   credModelRefreshBusy: Record<string, boolean>;
   credBalanceRefreshBusy: Record<string, boolean>;
   credToggleBusy: Record<string, boolean>;
   poolRows: CredentialPoolStatus[];
   planSnapByCred: Record<string, CredentialPlanSnapshot | null>;
   activeCredentialCounts: Record<string, number>;
-  activeRequestCount?: number;
   tokensPerSec?: number | null;
-  detectVendorBusy?: boolean;
 }>();
 
 const emit = defineEmits<{
-  "sync-creds": [providerId: string];
-  "speedtest-provider": [providerId: string];
-  "refresh-models": [providerId: string];
   "refresh-cred-models": [credentialId: string];
   "refresh-cred-balance": [credentialId: string];
   "toggle-provider": [provider: Provider];
@@ -79,8 +71,6 @@ const emit = defineEmits<{
   "toggle-cred": [credential: Credential];
   "edit-cred": [credential: Credential];
   "delete-cred": [credential: Credential];
-  "view-logs": [providerId: string];
-  "detect-vendor": [providerId: string];
 }>();
 
 const MAX_VISIBLE_CREDS = 8;
@@ -144,49 +134,42 @@ watch(
   { deep: true },
 );
 
-const providerProtocolLabels = computed(() => protocolLabelsForProvider(props.card.provider));
+const providerProtocolLabels = computed(() => {
+  const protos =
+    props.card.provider.protocols && props.card.provider.protocols.length > 0
+      ? props.card.provider.protocols
+      : [{ kind: props.card.provider.kind }];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const proto of protos) {
+    const label = protocolLabel(proto.kind);
+    if (seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
+  }
+  return out;
+});
+
+function protocolLabel(kind: string): string {
+  switch (kind) {
+    case "anthropic":
+      return t("protocol.messages");
+    case "openai-chat":
+    case "openai-compat":
+      return t("protocol.chat");
+    case "openai-responses":
+      return t("protocol.responses");
+    case "gemini-native":
+      return t("protocol.generate");
+    default:
+      return kind || t("protocol.unknown");
+  }
+}
 
 const providerBrandHint = computed(
   () =>
     brandHintFromHost(props.card.provider.host) ?? brandHintFromHost(props.card.provider.base_url),
 );
-
-function credentialModelLabel(credential: Credential): string {
-  const n = credential.remote_models?.length ?? 0;
-  return n > 0 ? `${n} models` : "no models";
-}
-
-function credentialBalanceLabel(credential: Credential): string {
-  const snap = credential.balance;
-  if (!snap?.balance && !snap?.remaining) return "";
-  const amount = snap.remaining ?? snap.balance;
-  if (!amount) return "";
-  return `${snap.currency} ${amount}`;
-}
-
-function balancePct(credential: Credential): number | null {
-  const snap = credential.balance;
-  if (!snap?.remaining || !snap?.total) return null;
-  const rem = parseFloat(snap.remaining);
-  const total = parseFloat(snap.total);
-  if (!total || isNaN(rem) || isNaN(total)) return null;
-  return Math.round(((total - rem) / total) * 100);
-}
-
-function balanceCenterText(credential: Credential): string | undefined {
-  const snap = credential.balance;
-  if (!snap?.remaining) return undefined;
-  const v = parseFloat(snap.remaining);
-  if (isNaN(v)) return snap.remaining;
-  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
-  return v.toFixed(v < 10 ? 2 : 0);
-}
-
-function statusDotClass(tone: "ok" | "warn" | "bad"): string {
-  if (tone === "ok") return "bg-emerald-500";
-  if (tone === "bad") return "bg-red-500";
-  return "bg-amber-500";
-}
 
 function poolRowFor(credentialId: string): CredentialPoolStatus | undefined {
   return props.poolRows.find((row) => row.credential_id === credentialId);
@@ -207,32 +190,32 @@ function formatCooldown(totalSeconds: number | null | undefined): string {
 }
 
 function circuitCooldownText(totalSeconds: number | null | undefined): string {
-  if (totalSeconds == null) return "Circuit open";
-  if (totalSeconds <= 0) return "Pending probe";
-  return `${formatCooldown(totalSeconds)} until retry`;
+  if (totalSeconds == null) return t("circuit.open");
+  if (totalSeconds <= 0) return t("circuit.pendingProbe");
+  return t("circuit.untilRetry", { duration: formatCooldown(totalSeconds) });
 }
 
 function modelInventoryLabel(provider: Provider): string {
-  if (remoteModelCount.value > 0) return `${remoteModelCount.value} models`;
-  if (aliasCount.value > 0) return `${aliasCount.value} aliases`;
-  return provider.passthrough_mode ? "passthrough" : "empty";
+  if (remoteModelCount.value > 0) return t("inventory.models", { count: remoteModelCount.value });
+  if (aliasCount.value > 0) return t("inventory.aliases", { count: aliasCount.value });
+  return provider.passthrough_mode ? t("inventory.passthrough") : t("inventory.empty");
 }
 
 function websocketLabel(provider: Provider): string {
-  if (provider.supports_websocket === true) return "upstream WS";
-  if (provider.supports_websocket === false) return "no upstream WS";
+  if (provider.supports_websocket === true) return t("websocket.upstream");
+  if (provider.supports_websocket === false) return t("websocket.none");
   if (
     provider.kind === "openai-responses" &&
     provider.base_url.includes("chatgpt.com/backend-api/codex")
   ) {
-    return "official WS";
+    return t("websocket.official");
   }
-  return "client WS → HTTP";
+  return t("websocket.clientToHttp");
 }
 
 function speedtestLabel(provider: Provider): string {
   const result = provider.last_speedtest;
-  if (!result) return "untested";
+  if (!result) return t("speed.untested");
   if (result.error) return result.error;
   const latency = result.latency_ms == null ? "—" : `${result.latency_ms}ms`;
   const status = result.status == null ? "" : ` · HTTP ${result.status}`;
@@ -241,10 +224,10 @@ function speedtestLabel(provider: Provider): string {
 
 function endpointModeLabel(provider: Provider): string {
   if (provider.base_url.includes("127.0.0.1") || provider.base_url.includes("localhost")) {
-    return "local proxy";
+    return t("endpoint.localProxy");
   }
-  if (provider.passthrough_mode) return "transparent relay";
-  return "mapped gateway";
+  if (provider.passthrough_mode) return t("endpoint.transparentRelay");
+  return t("endpoint.mappedGateway");
 }
 
 const visibleBadges = computed(() =>
@@ -252,11 +235,23 @@ const visibleBadges = computed(() =>
 );
 
 const protocolSummary = computed(() => {
-  if (!visibleBadges.value.length) return "No direct tool support";
+  if (!visibleBadges.value.length) return t("support.none");
   return visibleBadges.value
-    .map((badge) => `${badge.toolLabel} ${badge.support.label}`)
+    .map((badge) => `${badge.toolLabel} ${supportModeLabel(badge.support.mode)}`)
     .join(" / ");
 });
+
+function supportModeLabel(mode: ProtocolSupportInfo["mode"]): string {
+  if (mode === "native") return t("support.native");
+  if (mode === "bridged") return t("support.bridge");
+  return t("support.unsupported");
+}
+
+function groupLabel(group: ProviderGroupKey): string {
+  if (group === "native") return t("groups.native");
+  if (group === "bridged") return t("groups.bridged");
+  return t("groups.other");
+}
 
 const providerPool = computed(() => ({
   available: props.poolRows.filter(
@@ -274,28 +269,28 @@ const providerPool = computed(() => ({
 }));
 
 const providerStateClass = computed(() => {
-  if (!providerEnabled.value) return "provider-state--disabled";
-  if (providerCircuitState.value !== "closed") return "provider-state--blocked";
-  if ((props.activeRequestCount ?? 0) > 0) return "provider-state--live";
-  return "provider-state--idle";
+  if (!providerEnabled.value) return "bg-slate-100 text-slate-600";
+  if (providerCircuitState.value !== "closed") return "bg-amber-100 text-amber-800";
+  return "bg-sky-100 text-sky-700";
 });
 
 const providerStateBadge = computed(() => {
-  if (!providerEnabled.value) return { icon: "pause", label: "disabled" };
+  if (!providerEnabled.value) return { icon: "pause", label: t("state.disabled") };
   if (providerCircuitState.value !== "closed") {
     return { icon: "clock", label: circuitCooldownText(providerPool.value.cooldownMax) };
   }
-  if ((props.activeRequestCount ?? 0) > 0)
-    return { icon: "activity", label: `${props.activeRequestCount}` };
-  return { icon: "circle", label: "idle" };
+  return { icon: "circle", label: t("state.idle") };
 });
 const providerStateText = computed(() => providerStateBadge.value.label);
 
 const credentialSummary = computed(() => {
-  const pieces = [`${providerPool.value.available} available`];
-  if (providerPool.value.open) pieces.push(`${providerPool.value.open} open`);
-  if (providerPool.value.disabled) pieces.push(`${providerPool.value.disabled} disabled`);
-  if (providerPool.value.halfOpen) pieces.push(`${providerPool.value.halfOpen} probing`);
+  const pieces = [t("credentials.available", { count: providerPool.value.available })];
+  if (providerPool.value.open)
+    pieces.push(t("credentials.open", { count: providerPool.value.open }));
+  if (providerPool.value.disabled)
+    pieces.push(t("credentials.disabled", { count: providerPool.value.disabled }));
+  if (providerPool.value.halfOpen)
+    pieces.push(t("credentials.probing", { count: providerPool.value.halfOpen }));
   if (providerPool.value.cooldownMax != null && providerPool.value.open) {
     pieces.push(circuitCooldownText(providerPool.value.cooldownMax));
   }
@@ -305,7 +300,7 @@ const credentialSummary = computed(() => {
 function credentialLine(credential: Credential): string {
   const parts = [];
   const activeCount = activeCredentialCount(credential.id);
-  if (activeCount) parts.push(`Active ${activeCount}`);
+  if (activeCount) parts.push(t("credentialDetail.active", { count: activeCount }));
   const tier = credentialPlanTierHint(credential);
   if (tier) parts.push(tier);
   const plan = planLabel(credential.id);
@@ -313,15 +308,17 @@ function credentialLine(credential: Credential): string {
   const secondary = secondaryPlanLabel(credential.id);
   if (secondary && secondary !== plan) parts.push(secondary);
   const reset = planResetHint(credential.id);
-  if (reset) parts.push(reset.replace(/^R /, "Reset "));
+  if (reset) parts.push(t("credentialDetail.reset", { duration: reset.replace(/^R /, "") }));
   if (!credential.enabled) {
     const disabledPool = poolRowFor(credential.id);
     const reason = disabledPool?.last_error ?? credential.last_error;
-    parts.push(reason ? `Disabled · ${reason}` : "Disabled");
+    parts.push(reason ? t("credentialDetail.disabledWithReason", { reason }) : t("state.disabled"));
   }
   const pool = poolRowFor(credential.id);
   if (pool?.circuit_open)
-    parts.push(`Open ${circuitCooldownText(pool.circuit_open_remaining_secs)}`);
+    parts.push(
+      t("credentialDetail.open", { detail: circuitCooldownText(pool.circuit_open_remaining_secs) }),
+    );
   if (pool?.is_rate_limited) parts.push(rateLimitResetLabel(pool));
   return parts.join(" · ");
 }
@@ -331,9 +328,9 @@ function rateLimitResetLabel(pool: CredentialPoolStatus | undefined): string {
   const resets = [pool.rl_requests_reset_at, pool.rl_tokens_reset_at].filter(
     (value): value is number => typeof value === "number" && value > 0,
   );
-  if (!resets.length) return "Rate limited";
+  if (!resets.length) return t("credentialDetail.rateLimited");
   const left = Math.max(0, Math.min(...resets) - nowTs.value);
-  return `Rate limited for ${formatShortDuration(left)}`;
+  return t("credentialDetail.rateLimitedFor", { duration: formatShortDuration(left) });
 }
 
 function credentialTrafficUnits(credential: Credential): number {
@@ -371,13 +368,17 @@ function credentialProgressClass(credential: Credential): string {
 
 function credentialStatusText(credential: Credential): string {
   const pool = poolRowFor(credential.id);
-  if (!credential.enabled) return "Disabled";
-  if (pool?.circuit_open) return `Open ${circuitCooldownText(pool.circuit_open_remaining_secs)}`;
+  if (!credential.enabled) return t("state.disabled");
+  if (pool?.circuit_open)
+    return t("credentialDetail.open", {
+      detail: circuitCooldownText(pool.circuit_open_remaining_secs),
+    });
   if (pool?.is_rate_limited) return rateLimitResetLabel(pool);
   const activeCount = activeCredentialCount(credential.id);
-  if (activeCount) return `Active ${activeCount}`;
-  if (pool?.rolling_requests) return `${pool.rolling_requests.toLocaleString()} req`;
-  return "Standby";
+  if (activeCount) return t("credentialDetail.active", { count: activeCount });
+  if (pool?.rolling_requests)
+    return t("credentialDetail.requests", { count: pool.rolling_requests.toLocaleString() });
+  return t("credentialDetail.standby");
 }
 
 function credentialStatusClass(credential: Credential): string {
@@ -396,8 +397,8 @@ function credentialTrafficText(credential: Credential): string {
     const ok = pool.rolling_requests
       ? Math.round((pool.rolling_successes / Math.max(1, pool.rolling_requests)) * 100)
       : 0;
-    parts.push(`${pool.rolling_requests.toLocaleString()} req`);
-    parts.push(`${ok}% ok`);
+    parts.push(t("credentialDetail.requests", { count: pool.rolling_requests.toLocaleString() }));
+    parts.push(t("credentialDetail.success", { pct: ok }));
     if (pool.rolling_avg_latency_ms != null)
       parts.push(`${Math.round(pool.rolling_avg_latency_ms)}ms`);
   }
@@ -407,7 +408,7 @@ function credentialTrafficText(credential: Credential): string {
 }
 
 function formatShortDuration(totalSeconds: number): string {
-  if (totalSeconds <= 0) return "now";
+  if (totalSeconds <= 0) return t("time.now");
   const mins = Math.floor(totalSeconds / 60);
   if (mins < 60) return `${mins}m`;
   const hours = Math.floor(mins / 60);
@@ -466,379 +467,318 @@ onUnmounted(() => {
 
 <template>
   <div
-    class="group card-base min-w-0 overflow-hidden rounded-lg"
-    :class="[
-      !card.provider.enabled ? 'opacity-55' : '',
-      (activeRequestCount ?? 0) > 0 ? 'ring-1 ring-emerald-300' : '',
-    ]"
+    class="group overflow-hidden rounded-xl border border-border bg-card/95 shadow-sm transition-all duration-200"
+    :class="[!card.provider.enabled ? 'opacity-60 grayscale-[0.1]' : '']"
   >
-    <div class="px-3 py-2.5 sm:px-3.5">
-      <div class="flex items-start gap-2.5">
-        <button
-          type="button"
-          class="shrink-0 rounded-lg transition-transform hover:scale-105 cursor-pointer"
-          :title="card.provider.enabled ? 'off' : 'on'"
-          :aria-label="card.provider.enabled ? 'off' : 'on'"
-          :disabled="toggleProviderBusy"
-          @click="emit('toggle-provider', card.provider)"
-        >
-          <ProviderLogo
-            :kind="card.provider.kind"
-            :avatar-url="card.provider.avatar_url ?? null"
-            :provider-name="card.title"
-            :host-hint="card.provider.host ?? card.provider.base_url"
-            :base-url="card.provider.base_url"
-            :brand-hint="providerBrandHint"
-            :enabled="providerEnabled"
-            :circuit-state="providerCircuitState"
-            :active-request-count="activeRequestCount ?? 0"
-            :tokens-per-sec="tokensPerSec"
-            size-class="size-8"
-            icon-size-class="size-5"
-          />
-        </button>
-        <div class="min-w-0 flex-1">
-          <div class="flex min-w-0 items-center gap-2">
-            <span class="truncate text-lg font-semibold text-slate-900">{{ card.title }}</span>
-            <span class="shrink-0 text-xs font-medium" :class="providerStateClass">
-              {{ providerStateText }}
-            </span>
+    <div class="relative overflow-hidden">
+      <div
+        class="absolute inset-x-0 top-0 h-1"
+        :class="
+          providerEnabled
+            ? 'bg-[linear-gradient(90deg,var(--vp-primary),color-mix(in_srgb,var(--vp-primary)_55%,white))]'
+            : 'bg-border'
+        "
+      />
+      <div class="px-4 py-4 sm:px-5">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div class="min-w-0 flex-1">
+            <div class="flex min-w-0 items-center gap-3">
+              <button
+                type="button"
+                class="shrink-0 rounded-xl transition-transform duration-200 hover:scale-[1.02]"
+                :title="card.provider.enabled ? t('actions.off') : t('actions.on')"
+                :aria-label="card.provider.enabled ? t('actions.off') : t('actions.on')"
+                :disabled="toggleProviderBusy"
+                @click="emit('toggle-provider', card.provider)"
+              >
+                <ProviderLogo
+                  :kind="card.provider.kind"
+                  :avatar-url="card.provider.avatar_url ?? null"
+                  :provider-name="card.title"
+                  :host-hint="card.provider.host ?? card.provider.base_url"
+                  :base-url="card.provider.base_url"
+                  :brand-hint="providerBrandHint"
+                  :enabled="providerEnabled"
+                  :circuit-state="providerCircuitState"
+                  :tokens-per-sec="tokensPerSec"
+                  size-class="size-10"
+                  icon-size-class="size-6"
+                />
+              </button>
+
+              <div class="min-w-0 flex-1">
+                <div class="flex min-w-0 flex-wrap items-center gap-2">
+                  <h3 class="truncate text-base font-semibold text-foreground sm:text-lg">
+                    {{ card.title }}
+                  </h3>
+                  <span
+                    class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
+                    :class="providerStateClass"
+                  >
+                    {{ providerStateText }}
+                  </span>
+                  <UiBadge v-if="tokensPerSec" variant="secondary">
+                    {{ tokensPerSec.toFixed(1) }} tok/s
+                  </UiBadge>
+                </div>
+
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                  <UiBadge v-for="label in providerProtocolLabels" :key="label" variant="outline">
+                    {{ label }}
+                  </UiBadge>
+                </div>
+
+                <p class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span>{{ protocolSummary }}</span>
+                  <span class="hidden sm:inline">·</span>
+                  <span>{{ modelInventoryLabel(card.provider) }}</span>
+                  <span class="hidden sm:inline">·</span>
+                  <span>{{ speedtestLabel(card.provider) }}</span>
+                </p>
+              </div>
+            </div>
           </div>
-          <p
-            class="mt-0.5 flex flex-wrap gap-1 truncate text-[11px] uppercase tracking-wide text-slate-500"
-          >
-            <span
-              v-for="label in providerProtocolLabels"
-              :key="label"
-              class="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-medium normal-case"
+
+          <div class="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
+            <UiButton
+              size="sm"
+              variant="outline"
+              :disabled="circuitResetBusy"
+              @click="emit('reset-circuit', card.provider.id)"
             >
-              {{ label }}
-            </span>
-          </p>
+              <VpIcon name="rotate-ccw" size-class="size-4" />
+              {{ t("actions.reset") }}
+            </UiButton>
+            <UiButton size="sm" variant="outline" @click="emit('edit-provider', card.provider)">
+              <VpIcon name="pencil" size-class="size-4" />
+              {{ t("actions.edit") }}
+            </UiButton>
+            <UiButton
+              size="sm"
+              variant="destructive"
+              @click="emit('delete-provider', card.provider.id)"
+            >
+              <VpIcon name="trash-2" size-class="size-4" />
+              {{ t("actions.delete") }}
+            </UiButton>
+          </div>
         </div>
 
-        <div
-          class="flex shrink-0 items-center gap-1 opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
-        >
-          <button
-            v-if="providerCircuitState !== 'closed'"
-            type="button"
-            class="inline-flex size-7 items-center justify-center rounded-md border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100 disabled:opacity-50"
-            :disabled="circuitResetBusy"
-            title="reset"
-            aria-label="reset"
-            @click="emit('reset-circuit', card.provider.id)"
+        <div class="mt-4 grid gap-2 md:grid-cols-2">
+          <div
+            class="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
           >
-            <VpIcon name="rotate-ccw" size-class="size-3.5" />
-          </button>
-          <button
-            type="button"
-            class="inline-flex size-7 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
-            title="endpoint speedtest"
-            aria-label="endpoint speedtest"
-            :disabled="speedtestBusy"
-            @click="emit('speedtest-provider', card.provider.id)"
+            <div class="flex items-center justify-between gap-2">
+              <span>{{ t("sections.credentials") }}</span>
+              <UiButton
+                size="sm"
+                variant="ghost"
+                class="h-8 px-2"
+                @click="emit('add-cred', card.provider.id)"
+              >
+                <VpIcon name="plus" size-class="size-4" /> {{ t("actions.add") }}
+              </UiButton>
+            </div>
+            <p class="mt-1 text-sm text-foreground">{{ credentialSummary }}</p>
+          </div>
+          <div
+            class="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
           >
-            <VpIcon name="activity" size-class="size-3.5" :spin="speedtestBusy" />
-          </button>
-          <button
-            type="button"
-            class="inline-flex size-7 items-center justify-center rounded-md border border-sky-200 bg-sky-50 text-sky-800 hover:bg-sky-100 disabled:opacity-50"
-            title="refresh remote models"
-            aria-label="refresh remote models"
-            :disabled="modelRefreshBusy"
-            @click="emit('refresh-models', card.provider.id)"
-          >
-            <VpIcon name="book-open" size-class="size-3.5" :spin="modelRefreshBusy" />
-          </button>
-          <button
-            type="button"
-            class="inline-flex size-7 items-center justify-center rounded-md border border-vp-border/80 text-slate-600 hover:bg-slate-50"
-            title="sync"
-            aria-label="sync"
-            @click="emit('sync-creds', card.provider.id)"
-          >
-            <VpIcon name="refresh-cw" size-class="size-3.5" :spin="loadingCreds" />
-          </button>
-          <button
-            type="button"
-            class="inline-flex size-7 items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-40"
-            title="自动识别供应商类型"
-            aria-label="detect vendor"
-            :disabled="detectVendorBusy"
-            @click="emit('detect-vendor', card.provider.id)"
-          >
-            <VpIcon name="scan-search" size-class="size-3.5" :spin="detectVendorBusy" />
-          </button>
-          <button
-            type="button"
-            class="inline-flex size-7 items-center justify-center rounded-md border border-vp-border/80 text-slate-600 hover:bg-slate-50"
-            title="edit"
-            aria-label="edit"
-            @click="emit('edit-provider', card.provider)"
-          >
-            <VpIcon name="pencil" size-class="size-3.5" />
-          </button>
-          <button
-            type="button"
-            class="inline-flex size-7 items-center justify-center rounded-md border border-vp-border/80 text-slate-600 hover:bg-slate-50"
-            title="view logs"
-            aria-label="view logs"
-            @click="emit('view-logs', card.provider.id)"
-          >
-            <VpIcon name="file-text" size-class="size-3.5" />
-          </button>
-          <button
-            type="button"
-            class="inline-flex size-7 items-center justify-center rounded-md border border-red-200 text-red-600 hover:bg-red-50"
-            title="delete"
-            aria-label="delete"
-            @click="emit('delete-provider', card.provider.id)"
-          >
-            <VpIcon name="trash-2" size-class="size-3.5" />
-          </button>
-        </div>
-      </div>
-
-      <div class="mt-2 space-y-1 rounded-md border border-slate-100 bg-white/70 p-2 text-[11px]">
-        <div class="flex min-w-0 items-center gap-2">
-          <span class="shrink-0 text-slate-500" title="Sort basis" aria-label="Sort basis">
-            <VpIcon name="activity" size-class="size-3.5" />
-          </span>
-          <span class="min-w-0 truncate text-slate-600" :title="card.sortReason">
-            {{ card.sortReason || `score ${Math.round(card.qualityScore)}` }}
-          </span>
-        </div>
-        <div class="flex min-w-0 items-center gap-2">
-          <span
-            class="shrink-0 text-slate-500"
-            title="Connection capability"
-            aria-label="Connection capability"
-          >
-            <VpIcon name="plug" size-class="size-3.5" />
-          </span>
-          <span class="min-w-0 truncate text-slate-500" :title="card.provider.base_url">
-            endpoint · {{ endpointModeLabel(card.provider) }} · {{ protocolSummary }} ·
-            {{ modelInventoryLabel(card.provider) }} · {{ speedtestLabel(card.provider) }} ·
-            {{ websocketLabel(card.provider) }} · {{ card.provider.base_url }}
-          </span>
+            <div class="flex items-center justify-between gap-2">
+              <span>{{ t("sections.routing") }}</span>
+              <span class="text-right text-foreground">{{
+                card.sortReason || `score ${Math.round(card.qualityScore)}`
+              }}</span>
+            </div>
+            <p class="mt-1 text-sm text-foreground">{{ card.provider.base_url }}</p>
+            <p class="mt-1 text-xs text-muted-foreground">
+              {{ websocketLabel(card.provider) }} · {{ endpointModeLabel(card.provider) }}
+            </p>
+          </div>
         </div>
       </div>
     </div>
 
-    <div class="border-t border-slate-100 bg-slate-50/70 px-3 py-2 sm:px-3.5">
-      <div class="mb-1.5 flex items-center justify-between gap-2">
-        <div class="min-w-0">
-          <span class="sr-only">credentials</span>
-          <p class="flex min-w-0 items-center gap-1.5 text-[11px] text-slate-500">
-            <VpIcon name="key" size-class="size-3.5" />
-            {{ credentialSummary }}
-          </p>
+    <div class="border-t border-border bg-muted/20 px-4 py-3 sm:px-5">
+      <div class="flex items-center justify-between gap-3">
+        <div class="text-xs text-muted-foreground">
+          {{ t("credentials.shown", { count: visibleCreds.length }) }}
+          <span v-if="hiddenCredCount"
+            >· {{ t("credentials.hidden", { count: hiddenCredCount }) }}</span
+          >
         </div>
-        <button
-          type="button"
-          class="inline-flex size-7 items-center justify-center rounded-md bg-teal-600 text-white hover:bg-teal-700"
-          title="credential:add"
-          aria-label="credential:add"
-          @click="emit('add-cred', card.provider.id)"
-        >
-          <VpIcon name="key" size-class="size-3" />
-        </button>
+        <div class="text-xs text-muted-foreground">
+          {{ groupLabel(card.group) }} ·
+          {{ t("routing.routeHints", { count: card.badges.length }) }}
+        </div>
       </div>
 
-      <div v-if="loadingCreds" class="text-[11px] text-slate-500">...</div>
-      <div
-        v-else-if="creds.length === 0"
-        class="font-mono text-[11px] text-slate-500"
-        title="empty"
-        aria-label="empty"
-      >
-        ∅
-      </div>
-      <div v-else class="space-y-1">
+      <div class="mt-3 space-y-2">
+        <div v-if="loadingCreds" class="space-y-2">
+          <div class="h-10 rounded-lg bg-muted animate-pulse" v-for="i in 2" :key="i" />
+        </div>
         <div
-          v-for="credential in visibleCreds"
-          :key="credential.id"
-          class="group/cred relative flex min-h-12 min-w-0 items-center gap-2 overflow-hidden rounded-md border border-slate-200 bg-white px-2 py-1.5 pr-3"
-          :class="!credential.enabled ? 'opacity-55' : ''"
+          v-else-if="creds.length === 0"
+          class="rounded-lg border border-dashed border-border px-3 py-4 text-sm text-muted-foreground"
         >
-          <div
-            class="pointer-events-none absolute inset-y-0 left-0 z-0 overflow-hidden rounded-l-md bg-slate-100/90"
-            :style="{ width: `${credentialTrafficWidth(credential)}%` }"
-          >
-            <div
-              class="h-full transition-all duration-500"
-              :class="credentialProgressClass(credential)"
-              :style="{ width: '100%' }"
-            />
-          </div>
-          <button
-            type="button"
-            class="relative z-10 inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-200 bg-slate-50 cursor-pointer"
-            :title="credential.enabled ? 'off' : 'on'"
-            :aria-label="credential.enabled ? 'off' : 'on'"
-            :disabled="!!credToggleBusy[credential.id]"
-            @click="emit('toggle-cred', credential)"
-          >
-            <span
-              class="relative inline-flex h-2.5 w-2.5 items-center justify-center rounded-full border border-slate-300"
-            >
-              <span
-                v-if="providerEnabled && credential.enabled"
-                class="absolute inline-flex h-2 w-2 animate-ping rounded-full opacity-70"
-                :class="poolRowFor(credential.id)?.circuit_open ? 'bg-red-500' : 'bg-emerald-500'"
-              />
-              <span
-                class="relative h-1.5 w-1.5 rounded-full"
-                :class="
-                  poolRowFor(credential.id)?.circuit_open
-                    ? 'bg-red-500'
-                    : statusDotClass(mergedPoolStatus(credential, poolRowFor(credential.id)).tone)
-                "
-              />
-            </span>
-          </button>
-
-          <div class="relative z-10 min-w-0 flex-1">
-            <div class="flex min-w-0 items-center gap-2">
-              <span class="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-800">
-                {{ credentialPrimaryAccountLabel(credential) }}
-              </span>
-              <span
-                class="shrink-0 text-[10px] font-medium"
-                :class="credentialStatusClass(credential)"
-              >
-                {{ credentialStatusText(credential) }}
-              </span>
-            </div>
-            <p
-              v-if="credentialTrafficText(credential)"
-              class="mt-0.5 truncate text-[10px] text-slate-500"
-              :title="credentialTrafficText(credential)"
-            >
-              {{ credentialTrafficText(credential) }}
-            </p>
-            <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500">
-              <span class="font-mono">{{ credentialModelLabel(credential) }}</span>
-              <span v-if="credentialBalanceLabel(credential)" class="text-emerald-700">
-                {{ credentialBalanceLabel(credential) }}
-              </span>
-              <span
-                v-if="credential.upstream_vendor"
-                class="rounded px-1 py-0.5 font-medium"
-                :class="{
-                  'bg-blue-50 text-blue-700': credential.upstream_vendor === 'new-api',
-                  'bg-purple-50 text-purple-700': credential.upstream_vendor === 'sub2-api',
-                  'bg-orange-50 text-orange-700': credential.upstream_vendor === 'anthropic-payg',
-                  'bg-teal-50 text-teal-700': credential.upstream_vendor === 'anthropic-plan',
-                  'bg-slate-100 text-slate-600': ![
-                    'new-api',
-                    'sub2-api',
-                    'anthropic-payg',
-                    'anthropic-plan',
-                  ].includes(credential.upstream_vendor),
-                }"
-              >
-                {{
-                  {
-                    "new-api": "NewAPI",
-                    "sub2-api": "Sub2API",
-                    "anthropic-payg": "PAYG",
-                    "anthropic-plan": "Plan",
-                  }[credential.upstream_vendor] ?? credential.upstream_vendor
-                }}
-              </span>
-            </p>
-            <!-- Usage rings: window-based (Sub2API) or balance (NewAPI/generic) -->
-            <div v-if="credential.windows?.length" class="mt-1.5 flex items-end gap-3 flex-wrap">
-              <UsageRing
-                v-for="w in credential.windows"
-                :key="w.label"
-                :pct="w.used_pct"
-                :label="w.label"
-                :size="46"
-                :stroke-width="4"
-              />
-            </div>
-            <!-- Single balance ring when no windows but balance known -->
-            <div
-              v-else-if="credential.balance?.remaining && credential.balance?.total"
-              class="mt-1.5"
-            >
-              <UsageRing
-                :pct="balancePct(credential)"
-                :label="credential.balance.currency"
-                :center-text="balanceCenterText(credential)"
-                :size="46"
-                :stroke-width="4"
-              />
-            </div>
-          </div>
-
-          <div
-            class="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-1 rounded-md bg-white/95 p-0.5 opacity-0 pointer-events-none shadow-sm transition-opacity group-hover/cred:opacity-100 group-hover/cred:pointer-events-auto group-focus-within/cred:opacity-100 group-focus-within/cred:pointer-events-auto"
-          >
-            <button
-              type="button"
-              class="inline-flex size-6 items-center justify-center rounded border border-sky-200 bg-sky-50 text-sky-800 hover:bg-sky-100 disabled:opacity-50"
-              :title="credentialModelLabel(credential)"
-              :disabled="!!credModelRefreshBusy[credential.id]"
-              @click.stop="emit('refresh-cred-models', credential.id)"
-            >
-              <VpIcon
-                name="book-open"
-                size-class="size-3"
-                :spin="!!credModelRefreshBusy[credential.id]"
-              />
-            </button>
-            <button
-              type="button"
-              class="inline-flex size-6 items-center justify-center rounded border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
-              title="refresh balance"
-              :disabled="!!credBalanceRefreshBusy[credential.id]"
-              @click.stop="emit('refresh-cred-balance', credential.id)"
-            >
-              <VpIcon
-                name="pie-chart"
-                size-class="size-3"
-                :spin="!!credBalanceRefreshBusy[credential.id]"
-              />
-            </button>
-            <button
-              v-if="poolRowFor(credential.id)?.circuit_open"
-              type="button"
-              class="inline-flex size-6 items-center justify-center rounded border border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
-              title="reset"
-              aria-label="reset"
-              @click="emit('reset-circuit', credential.provider_id)"
-            >
-              <VpIcon name="rotate-ccw" size-class="size-3" />
-            </button>
-            <button
-              type="button"
-              class="inline-flex size-6 items-center justify-center rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
-              title="edit"
-              aria-label="edit"
-              @click="emit('edit-cred', credential)"
-            >
-              <VpIcon name="pencil" size-class="size-3" />
-            </button>
-            <button
-              type="button"
-              class="inline-flex size-6 items-center justify-center rounded border border-red-200 text-red-600 hover:bg-red-50"
-              title="delete"
-              aria-label="delete"
-              @click="emit('delete-cred', credential)"
-            >
-              <VpIcon name="trash-2" size-class="size-3" />
-            </button>
-          </div>
+          {{ t("credentials.empty") }}
         </div>
-
-        <div v-if="hiddenCredCount > 0" class="text-[11px] text-slate-500">
-          Plus {{ hiddenCredCount }} lower-priority credentials
-        </div>
+        <template v-else>
+          <CredentialRow
+            v-for="credential in visibleCreds"
+            :key="credential.id"
+            :credential="credential"
+            :pool-row="poolRowFor(credential.id)"
+            :plan-snap="props.planSnapByCred[credential.id] ?? null"
+            :peer-creds="creds"
+            @edit="emit('edit-cred', $event)"
+            @delete="emit('delete-cred', $event)"
+          />
+        </template>
       </div>
     </div>
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "actions": {
+      "add": "Add",
+      "delete": "Delete",
+      "edit": "Edit",
+      "off": "off",
+      "on": "on",
+      "reset": "Reset"
+    },
+    "circuit": {
+      "open": "Circuit open",
+      "pendingProbe": "Pending probe",
+      "untilRetry": "{duration} until retry"
+    },
+    "credentialDetail": {
+      "active": "Active {count}",
+      "disabledWithReason": "Disabled · {reason}",
+      "open": "Open {detail}",
+      "rateLimited": "Rate limited",
+      "rateLimitedFor": "Rate limited for {duration}",
+      "requests": "{count} req",
+      "reset": "Reset {duration}",
+      "standby": "Standby",
+      "success": "{pct}% ok"
+    },
+    "credentials": {
+      "available": "{count} available",
+      "disabled": "{count} disabled",
+      "empty": "No credentials yet.",
+      "hidden": "{count} more hidden",
+      "open": "{count} open",
+      "probing": "{count} probing",
+      "shown": "{count} shown"
+    },
+    "endpoint": {
+      "localProxy": "local proxy",
+      "mappedGateway": "mapped gateway",
+      "transparentRelay": "transparent relay"
+    },
+    "groups": { "bridged": "bridged", "native": "native", "other": "other" },
+    "inventory": {
+      "aliases": "{count} aliases",
+      "empty": "empty",
+      "models": "{count} models",
+      "passthrough": "passthrough"
+    },
+    "protocol": {
+      "chat": "Chat",
+      "generate": "Generate",
+      "messages": "Messages",
+      "responses": "Responses",
+      "unknown": "Unknown"
+    },
+    "routing": { "routeHints": "{count} route hints" },
+    "sections": { "credentials": "Credentials", "routing": "Routing" },
+    "speed": { "untested": "untested" },
+    "state": { "disabled": "disabled", "idle": "idle" },
+    "support": {
+      "bridge": "bridge",
+      "native": "native",
+      "none": "No direct tool support",
+      "unsupported": "unsupported"
+    },
+    "time": { "now": "now" },
+    "websocket": {
+      "clientToHttp": "client WS → HTTP",
+      "none": "no upstream WS",
+      "official": "official WS",
+      "upstream": "upstream WS"
+    }
+  },
+  "zh-CN": {
+    "actions": {
+      "add": "添加",
+      "delete": "删除",
+      "edit": "编辑",
+      "off": "关闭",
+      "on": "开启",
+      "reset": "重置"
+    },
+    "circuit": { "open": "熔断中", "pendingProbe": "等待探测", "untilRetry": "{duration} 后重试" },
+    "credentialDetail": {
+      "active": "活跃 {count}",
+      "disabledWithReason": "已禁用 · {reason}",
+      "open": "熔断 {detail}",
+      "rateLimited": "限流中",
+      "rateLimitedFor": "限流剩余 {duration}",
+      "requests": "{count} 请求",
+      "reset": "重置 {duration}",
+      "standby": "待命",
+      "success": "成功率 {pct}%"
+    },
+    "credentials": {
+      "available": "{count} 可用",
+      "disabled": "{count} 已禁用",
+      "empty": "暂无凭证。",
+      "hidden": "另有 {count} 个已隐藏",
+      "open": "{count} 熔断",
+      "probing": "{count} 探测中",
+      "shown": "显示 {count} 个"
+    },
+    "endpoint": {
+      "localProxy": "本地代理",
+      "mappedGateway": "映射网关",
+      "transparentRelay": "透明转发"
+    },
+    "groups": { "bridged": "桥接", "native": "原生", "other": "其他" },
+    "inventory": {
+      "aliases": "{count} 个别名",
+      "empty": "空",
+      "models": "{count} 个模型",
+      "passthrough": "透传"
+    },
+    "protocol": {
+      "chat": "聊天",
+      "generate": "生成",
+      "messages": "消息",
+      "responses": "响应",
+      "unknown": "未知"
+    },
+    "routing": { "routeHints": "{count} 条路由提示" },
+    "sections": { "credentials": "凭证", "routing": "路由" },
+    "speed": { "untested": "未测试" },
+    "state": { "disabled": "已禁用", "idle": "空闲" },
+    "support": {
+      "bridge": "桥接",
+      "native": "原生",
+      "none": "无直接工具支持",
+      "unsupported": "不支持"
+    },
+    "time": { "now": "现在" },
+    "websocket": {
+      "clientToHttp": "客户端 WS → HTTP",
+      "none": "无上游 WS",
+      "official": "官方 WS",
+      "upstream": "上游 WS"
+    }
+  }
+}
+</i18n>

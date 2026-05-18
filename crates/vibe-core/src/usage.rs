@@ -8,6 +8,20 @@ pub struct Usage {
     pub cache_creation_tokens: i64,
 }
 
+/// Lightweight realtime token estimate used before providers send final usage.
+/// It is intentionally conservative: exact provider usage overwrites it once available.
+pub fn estimate_output_tokens(text: &str) -> i64 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let chars = trimmed.chars().count() as f64;
+    let words = trimmed.split_whitespace().count() as f64;
+    let by_chars = (chars / 4.0).ceil();
+    let by_words = (words * 1.3).ceil();
+    by_chars.max(by_words).max(1.0) as i64
+}
+
 struct ModelPricing {
     /// USD per million input tokens
     input_per_m: f64,
@@ -85,6 +99,11 @@ fn model_pricing(model: &str) -> Option<ModelPricing> {
         input_per_m: inp,
         output_per_m: out,
     })
+}
+
+/// Return output-token USD cost for one token, or None for unknown models.
+pub fn output_cost_usd_per_token(model: &str) -> Option<f64> {
+    model_pricing(model).map(|p| p.output_per_m / 1_000_000.0)
 }
 
 impl Usage {

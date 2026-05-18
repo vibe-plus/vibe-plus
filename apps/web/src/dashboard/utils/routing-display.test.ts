@@ -11,11 +11,7 @@ import {
   hostFromUrlOrHost,
 } from "./provider-visual.ts";
 import { protocolLabel, protocolLabelsForProvider } from "./protocol-label.ts";
-import {
-  logMatchesWorkspaceView,
-  providerMatchesWorkspaceView,
-  workspaceViewFromQuery,
-} from "./workspace-view.ts";
+import { providerMatchesWorkspaceView, workspaceViewFromQuery } from "./workspace-view.ts";
 
 describe("routing/display pure helpers", () => {
   test("detects brand hints from host segments and fuzzy host names", () => {
@@ -35,9 +31,9 @@ describe("routing/display pure helpers", () => {
 
   test("parses visual provider hints from urls and hostnames", () => {
     expect(frameworkIconFromBaseUrl("https://relay.example.com/new-api/v1")).toBe(
-      "i-lucide-layers",
+      "i-[lucide--layers]",
     );
-    expect(frameworkIconFromBaseUrl("https://sub2api.example.com/v1")).toBe("i-lucide-shuffle");
+    expect(frameworkIconFromBaseUrl("https://sub2api.example.com/v1")).toBe("i-[lucide--shuffle]");
     expect(hostFromUrlOrHost(" https://www.example.com:8443/v1 ")).toBe("www.example.com");
     expect(hostFromUrlOrHost("www.example.com:8443/v1")).toBe("example.com");
     expect(faviconUrlForHost("www.example.com")).toBe(
@@ -57,27 +53,14 @@ describe("routing/display pure helpers", () => {
     ).toEqual(["Chat", "Responses"]);
   });
 
-  test("matches providers and logs to workspace views by provider, route, app, and wire fallback", () => {
+  test("matches providers to workspace views", () => {
     const codexProvider = { id: "p-codex", kind: "openai-responses" } as any;
     const claudeProvider = { id: "p-claude", kind: "anthropic" } as any;
-    const providerById = new Map([
-      ["p-codex", codexProvider],
-      ["p-claude", claudeProvider],
-    ]);
 
     expect(workspaceViewFromQuery(["claude"])).toBe("claude");
     expect(workspaceViewFromQuery("bad")).toBe("overview");
     expect(providerMatchesWorkspaceView(codexProvider, "codex")).toBe(true);
     expect(providerMatchesWorkspaceView(claudeProvider, "codex")).toBe(false);
-    expect(
-      logMatchesWorkspaceView({ provider_id: "p-claude" } as any, "claude", providerById),
-    ).toBe(true);
-    expect(
-      logMatchesWorkspaceView({ route_prefix: "/codex/v1" } as any, "codex", providerById),
-    ).toBe(true);
-    expect(logMatchesWorkspaceView({ wire: "anthropic" } as any, "claude", providerById)).toBe(
-      true,
-    );
-    expect(logMatchesWorkspaceView({ app: "Codex CLI" } as any, "codex", providerById)).toBe(true);
+    expect(providerMatchesWorkspaceView(claudeProvider, "claude")).toBe(true);
   });
 });

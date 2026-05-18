@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, shallowRef } from "vue";
+import { useI18n } from "vue-i18n";
 import { api, type ClientStatus } from "../api/client.ts";
-import { useWs } from "../composables/useProxy.ts";
 import VpIcon from "./vp-icon.vue";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   client: "claude" | "codex" | "opencode";
@@ -23,9 +25,9 @@ let trafficTimer: number | null = null;
 const takenOver = computed(() => status.value?.taken_over ?? false);
 const busy = computed(() => loading.value || saving.value);
 const activeLabel = computed(() => {
-  if (props.client === "codex") return "Codexing";
-  if (props.client === "claude") return "Clauding";
-  return "Routing";
+  if (props.client === "codex") return t("active.codex");
+  if (props.client === "claude") return t("active.claude");
+  return t("active.default");
 });
 const animatedActiveChars = computed(() => {
   const chars = Array.from(activeLabel.value);
@@ -38,17 +40,22 @@ const animatedActiveChars = computed(() => {
   }));
 });
 const stateLabel = computed(() => {
-  if (error.value) return "Error";
+  if (error.value) return t("state.error");
   if (!status.value) return "...";
-  return takenOver.value ? activeLabel.value : "Direct";
+  return takenOver.value ? activeLabel.value : t("state.direct");
 });
 const titleText = computed(() => {
   if (error.value) return error.value;
-  if (!status.value) return `Checking ${props.title}`;
+  if (!status.value) return t("title.checking", { title: props.title });
   const target = takenOver.value
     ? status.value.expected_base_url
-    : (status.value.configured_base_url ?? "not configured");
-  return `${props.title}: ${stateLabel.value}. Click to ${takenOver.value ? "restore" : "take over"}. ${target}`;
+    : (status.value.configured_base_url ?? t("state.notConfigured"));
+  return t("title.action", {
+    title: props.title,
+    state: stateLabel.value,
+    action: takenOver.value ? t("actions.restore") : t("actions.takeOver"),
+    target,
+  });
 });
 
 async function refresh() {
@@ -58,7 +65,7 @@ async function refresh() {
     status.value = await api.clients.status(props.client);
     emit("status", status.value.taken_over);
   } catch (err) {
-    error.value = (err as Error).message || "Could not read takeover status";
+    error.value = (err as Error).message || t("errors.readStatus");
     emit("status", null);
   } finally {
     loading.value = false;
@@ -75,7 +82,7 @@ async function setTakeover(next: boolean) {
     status.value = result.status;
     emit("status", status.value.taken_over);
   } catch (err) {
-    error.value = (err as Error).message || "Could not update takeover";
+    error.value = (err as Error).message || t("errors.updateTakeover");
     await refresh();
   } finally {
     saving.value = false;
@@ -99,16 +106,6 @@ onBeforeUnmount(() => {
     window.clearInterval(trafficTimer);
     trafficTimer = null;
   }
-});
-
-useWs((event: unknown) => {
-  const ev = event as { type?: string } & ClientStatus;
-  if (ev.type !== "client-status-changed" || ev.client !== props.client) return;
-  const next = { ...ev };
-  delete (next as { type?: string }).type;
-  status.value = next;
-  error.value = null;
-  emit("status", next.taken_over);
 });
 </script>
 
@@ -161,3 +158,31 @@ useWs((event: unknown) => {
     </span>
   </button>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "actions": { "restore": "restore", "takeOver": "take over" },
+    "active": { "claude": "Clauding", "codex": "Codexing", "default": "Routing" },
+    "errors": {
+      "readStatus": "Could not read takeover status",
+      "updateTakeover": "Could not update takeover"
+    },
+    "state": { "direct": "Direct", "error": "Error", "notConfigured": "not configured" },
+    "title": {
+      "action": "{title}: {state}. Click to {action}. {target}",
+      "checking": "Checking {title}"
+    }
+  },
+  "zh-CN": {
+    "actions": { "restore": "恢复", "takeOver": "接管" },
+    "active": { "claude": "Clauding", "codex": "Codexing", "default": "路由中" },
+    "errors": { "readStatus": "无法读取接管状态", "updateTakeover": "无法更新接管状态" },
+    "state": { "direct": "直连", "error": "错误", "notConfigured": "未配置" },
+    "title": {
+      "action": "{title}：{state}。点击以{action}。{target}",
+      "checking": "正在检查 {title}"
+    }
+  }
+}
+</i18n>
