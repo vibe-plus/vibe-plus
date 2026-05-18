@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   check:
     name: Check release version
@@ -21,7 +18,7 @@ jobs:
       should_release: ${{ steps.gate.outputs.should_release }}
       version: ${{ steps.gate.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Validate tag and workspace versions
         if: github.ref_type == 'tag'
@@ -46,9 +43,10 @@ jobs:
           echo "CLI/Gateway release version: $VERSION"
           echo "Web package version is independent: $WEB_VERSION"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
+          package-manager-cache: false
 
       # Skip build/publish when @vibe-plus/cli@VERSION is already on npm (e.g. re-pushed tag).
       - name: Compare with npm registry
@@ -91,7 +89,7 @@ jobs:
             npm_plat: win32-x64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -120,7 +118,7 @@ jobs:
           copy target\${{ matrix.target }}\release\vibe.exe stage\bin\vibe.exe
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: vibe-${{ matrix.npm_plat }}
           path: stage/
@@ -134,16 +132,17 @@ jobs:
     env:
       VERSION: ${{ needs.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts/
 
@@ -226,7 +225,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/**/*
           generate_release_notes: true
