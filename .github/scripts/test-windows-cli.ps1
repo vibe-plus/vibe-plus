@@ -123,8 +123,7 @@ Write-Host "Testing Windows CLI binary: $ExePath"
 Invoke-Vibe -FilePath $ExePath -Arguments @("--help") -Expected "local API gateway" | Out-Null
 Invoke-Vibe -FilePath $ExePath -Arguments @("--version") -Expected "vibe" | Out-Null
 Invoke-Vibe -FilePath $ExePath -Arguments @("status") -Expected "vibe is not running" | Out-Null
-Invoke-Vibe -FilePath $ExePath -Arguments @("config", "path") -Expected "vibe" | Out-Null
-Invoke-Vibe -FilePath $ExePath -Arguments @("autostart", "status") -Expected "unsupported" | Out-Null
+Invoke-Vibe -FilePath $ExePath -Arguments @("doctor") -Expected "vibe doctor" | Out-Null
 
 $smokePort = Get-FreeTcpPort
 $vibeServer = $null
