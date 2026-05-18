@@ -205,11 +205,10 @@ impl SummaryAccumulator {
                 }
             }
             self.emitted = true;
-            // Persist turn cost and get cumulative thread cost (after slot reserved).
-            if let Some(turn_cost) = metrics.cost_usd {
-                metrics.thread_cost_usd = self.persist_thread_cost(turn_cost);
-            }
-            // Re-render with thread cost included.
+            // Σusd = turn-total cost (sum of all N tool-call requests this turn).
+            // Always >= ~usd (per-request cost). Fills in after slot reserved.
+            metrics.thread_cost_usd = self.turn_total_cost();
+            // Re-render with turn total included.
             let text = render_summary(&self.cfg, self.client, metrics).unwrap_or(text);
 
             let append_text = format_summary_append(&self.last_text, &text);
@@ -331,29 +330,26 @@ impl SummaryAccumulator {
     }
 
     /// Build SummaryMetrics (no side effects — call before slot reserve).
-    /// Uses AppState-accumulated turn IO when available so that all tool-call
-    /// requests in the same turn contribute to the cost, not just the final one.
+    ///
+    /// `cost_usd`  = cost of **this one request** (consistent with the `in` display).
+    /// `thread_cost_usd` is left None here; the caller fills it in after the
+    /// summary slot is reserved.
     fn build_metrics(&self, latency_ms: i64) -> SummaryMetrics {
-        // Read aggregated (input_sum, output_sum) across ALL requests this turn.
-        let (agg_input, agg_output) = match (&self.state, &self.turn_id) {
+        // `out` display = accumulated generation across all tool-call iterations.
+        let (_agg_input, agg_output) = match (&self.state, &self.turn_id) {
             (Some(state), Some(turn_id)) => state.get_codex_turn_io(turn_id),
             _ => (0, 0),
         };
-        // Use AppState aggregates if available; fall back to local sums.
-        let cost_input = agg_input
-            .max(self.turn_input_sum)
-            .max(self.usage.input_tokens);
-        let cost_output = agg_output
-            .max(self.turn_output_sum)
-            .max(self.usage.output_tokens);
-        // For display: `in` = context window size (MAX of input = last request's value),
-        // `out` = total generation across tool-call loop (SUM = agg_output).
         let display_output = agg_output
             .max(self.turn_output_sum)
             .max(self.usage.output_tokens);
-        let cost_usage = Usage {
-            input_tokens: cost_input,
-            output_tokens: cost_output,
+        // Per-request cost: uses only this request's token counts so it is
+        // always consistent with the displayed `in` value.
+        let request_cost_usage = Usage {
+            input_tokens: self.usage.input_tokens,
+            output_tokens: self.usage.output_tokens,
+            cache_read_tokens: self.usage.cache_read_tokens,
+            cache_creation_tokens: self.usage.cache_creation_tokens,
             ..Usage::default()
         };
         SummaryMetrics {
@@ -362,26 +358,37 @@ impl SummaryAccumulator {
             cache_tokens: self.usage.cache_read_tokens + self.usage.cache_creation_tokens,
             latency_ms: Some(latency_ms.max(0)),
             first_token_ms: self.first_token_ms,
-            cost_usd: cost_usage.cost_usd(&self.upstream_model),
+            cost_usd: request_cost_usage.cost_usd(&self.upstream_model),
             thread_cost_usd: None,
         }
     }
 
-    /// Return cumulative conversation cost. Prefer Codex's own durable rollout
-    /// counters (`~/.codex/sessions/**/*.jsonl`) so restarting Vibe does not
-    /// reset Σusd. Fall back to the in-memory accumulator when no rollout file
-    /// can be found (older/non-Codex clients).
-    fn persist_thread_cost(&self, turn_cost: f64) -> Option<f64> {
-        if let Some(thread_id) = self.thread_id.as_deref() {
-            if let Some(cost) = crate::codex_session_usage::usage_for_session_id(thread_id)
-                .and_then(|usage| usage.total_cost_usd)
-            {
-                return Some(cost);
-            }
+    /// Compute the turn-total cost (sum across all N tool-call requests in this turn)
+    /// and persist it to the in-memory thread accumulator.
+    /// Returns `Some(turn_total)` — always >= the per-request cost.
+    fn turn_total_cost(&self) -> Option<f64> {
+        let (agg_input, agg_output) = match (&self.state, &self.turn_id) {
+            (Some(state), Some(turn_id)) => state.get_codex_turn_io(turn_id),
+            _ => (0, 0),
+        };
+        // Fall back to local sums if AppState hasn't accumulated anything yet.
+        let total_input = agg_input
+            .max(self.turn_input_sum)
+            .max(self.usage.input_tokens);
+        let total_output = agg_output
+            .max(self.turn_output_sum)
+            .max(self.usage.output_tokens);
+        let total_usage = Usage {
+            input_tokens: total_input,
+            output_tokens: total_output,
+            ..Usage::default()
+        };
+        let cost = total_usage.cost_usd(&self.upstream_model)?;
+        // Also persist to the thread-level accumulator for future cross-turn tracking.
+        if let (Some(state), Some(thread_id)) = (&self.state, self.thread_id.as_deref()) {
+            state.add_codex_thread_cost(thread_id, cost);
         }
-        let state = self.state.as_ref()?;
-        let thread_id = self.thread_id.as_deref()?;
-        Some(state.add_codex_thread_cost(thread_id, turn_cost))
+        Some(cost)
     }
 
     fn capture_text_frame(&mut self, frame_json: &str) {
@@ -544,9 +551,7 @@ impl SummaryAccumulator {
             }
         }
         self.emitted = true;
-        if let Some(turn_cost) = metrics.cost_usd {
-            metrics.thread_cost_usd = self.persist_thread_cost(turn_cost);
-        }
+        metrics.thread_cost_usd = self.turn_total_cost();
         let text = render_summary(&self.cfg, self.client, metrics)?;
         append_summary_to_completed_frame(frame_json, &text)
     }

@@ -496,6 +496,8 @@ mod tests {
             upstream_group: None,
             price_multiplier: 1.0,
             windows: Vec::new(),
+            disabled_reason: None,
+            disabled_at: None,
         }
     }
 

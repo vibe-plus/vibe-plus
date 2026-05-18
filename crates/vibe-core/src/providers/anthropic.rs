@@ -1,7 +1,7 @@
 //! Anthropic Messages API adapter.
 
 use super::{Adapter, Wire};
-use crate::usage::Usage;
+use crate::usage::{estimate_output_tokens, Usage};
 use anyhow::Result;
 use reqwest::{Client, RequestBuilder};
 use vibe_protocol::Provider;
@@ -93,6 +93,11 @@ impl Adapter for AnthropicAdapter {
                 "message_delta" => {
                     if let Some(n) = v.pointer("/usage/output_tokens").and_then(|x| x.as_i64()) {
                         acc.output_tokens = n;
+                    }
+                }
+                "content_block_delta" => {
+                    if let Some(text) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
+                        acc.output_tokens += estimate_output_tokens(text);
                     }
                 }
                 _ => {}

@@ -4,6 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use vibe_core::{config::Config, paths, state::AppState};
 use vibe_db::Db;
+use vibe_i18n::text_env;
 
 use super::gateway;
 
@@ -25,7 +26,7 @@ pub struct StartArgs {
 pub async fn run(args: StartArgs) -> Result<()> {
     let base_url = gateway::local_base_url(args.port);
     if gateway::is_responsive(&base_url).await {
-        println!("vibe is already running.");
+        println!("{}", text_env("cli-start-already-running"));
         println!("  endpoint: {base_url}");
         return Ok(());
     }
@@ -68,7 +69,7 @@ pub fn spawn_background(port: u16) -> Result<()> {
             .spawn()?;
     }
 
-    println!("vibe started in background.");
+    println!("{}", text_env("cli-start-started-background"));
     println!("  endpoint: {}", gateway::local_base_url(port));
     Ok(())
 }

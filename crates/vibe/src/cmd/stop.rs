@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::process::Command;
 use std::time::Duration;
 use vibe_core::paths;
+use vibe_i18n::text_env;
 
 use super::{configured_port, gateway};
 
@@ -20,7 +21,7 @@ pub async fn run() -> Result<()> {
         .flatten();
 
     if pid.is_none() && !gateway::is_responsive(&base_url).await {
-        println!("vibe is not running.");
+        println!("{}", text_env("cli-stop-not-running"));
         return Ok(());
     }
 
@@ -46,7 +47,7 @@ pub async fn run() -> Result<()> {
     } else if let Some(pid) = pid {
         println!("vibe stopped (pid {pid}).");
     } else {
-        println!("vibe stopped.");
+        println!("{}", text_env("cli-stop-stopped"));
     }
 
     Ok(())

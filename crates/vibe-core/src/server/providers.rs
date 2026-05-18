@@ -16,6 +16,18 @@ pub(super) async fn create_provider(
     Json(input): Json<ProviderInput>,
 ) -> Result<Json<Provider>, AppError> {
     let p = run_blocking(state.clone(), move |s| s.db.provider_insert(input)).await?;
+    emit_app_event(
+        &state,
+        AppLogLevel::Info,
+        "provider",
+        "provider.created",
+        serde_json::json!({
+            "schema": 1,
+            "provider": { "id": p.id, "name": p.name, "enabled": p.enabled },
+        }),
+        format!("Provider added: {}", p.name),
+        None,
+    );
     Ok(Json(p))
 }
 
@@ -24,6 +36,11 @@ pub(super) async fn update_provider(
     Path(id): Path<String>,
     Json(input): Json<ProviderInput>,
 ) -> Result<Json<Provider>, AppError> {
+    let previous = run_blocking(state.clone(), {
+        let id = id.clone();
+        move |s| s.db.provider_get(&id)
+    })
+    .await?;
     let id_for_update = id.clone();
     let p = run_blocking(state.clone(), move |s| {
         s.db.provider_update(&id_for_update, input)
@@ -43,6 +60,32 @@ pub(super) async fn update_provider(
     for cid in cred_ids {
         state.cb.reset(&cid);
     }
+    let event_type = match previous.as_ref().map(|old| old.enabled) {
+        Some(true) if !p.enabled => "provider.disabled",
+        Some(false) if p.enabled => "provider.enabled",
+        _ => "provider.updated",
+    };
+    let message = match event_type {
+        "provider.disabled" => format!("Provider disabled: {}", p.name),
+        "provider.enabled" => format!("Provider enabled: {}", p.name),
+        _ => format!("Provider updated: {}", p.name),
+    };
+    emit_app_event(
+        &state,
+        if event_type == "provider.disabled" {
+            AppLogLevel::Warn
+        } else {
+            AppLogLevel::Info
+        },
+        "provider",
+        event_type,
+        serde_json::json!({
+            "schema": 1,
+            "provider": { "id": p.id, "name": p.name, "enabled": p.enabled },
+        }),
+        message,
+        None,
+    );
     Ok(Json(p))
 }
 
@@ -50,7 +93,29 @@ pub(super) async fn delete_provider(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    run_blocking(state.clone(), move |s| s.db.provider_delete(&id)).await?;
+    let previous = run_blocking(state.clone(), {
+        let id = id.clone();
+        move |s| s.db.provider_get(&id)
+    })
+    .await?;
+    run_blocking(state.clone(), {
+        let id = id.clone();
+        move |s| s.db.provider_delete(&id)
+    })
+    .await?;
+    let provider_name = previous.as_ref().map(|p| p.name.as_str()).unwrap_or(&id);
+    emit_app_event(
+        &state,
+        AppLogLevel::Warn,
+        "provider",
+        "provider.deleted",
+        serde_json::json!({
+            "schema": 1,
+            "provider": { "id": id, "name": provider_name },
+        }),
+        format!("Provider deleted: {provider_name}"),
+        None,
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

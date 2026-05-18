@@ -4,6 +4,7 @@
 //! round-trips between Rust HTTP handlers, the SQLite layer, and the Vue UI.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use ts_rs::TS;
 
@@ -538,11 +539,22 @@ pub struct AppLogEvent {
     /// Unix timestamp (seconds).
     pub ts: i64,
     pub level: AppLogLevel,
+    /// Stable event type slug, e.g. "credential.circuit.opened".
+    #[serde(default = "default_app_log_event_type")]
+    pub event_type: String,
+    /// Versioned event payload. Renderers must prefer this snapshot over live DB rows.
+    #[serde(default)]
+    pub payload: JsonValue,
     /// Short category slug: "provider", "credential", "circuit", "system", …
     pub category: String,
+    /// Legacy fallback message for old rows or unknown event renderers.
     pub message: String,
     #[serde(default)]
     pub detail: Option<String>,
+}
+
+fn default_app_log_event_type() -> String {
+    "legacy.message".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -659,6 +671,65 @@ pub struct UpstreamAttemptLog {
     pub request_body: Option<String>,
     pub response_headers: Option<String>,
     pub response_body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/RealtimeRequest.ts")]
+pub struct RealtimeRequest {
+    pub id: String,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub app: Option<String>,
+    pub provider_id: Option<String>,
+    pub credential_id: Option<String>,
+    pub requested_model: Option<String>,
+    pub upstream_model: Option<String>,
+    pub wire: Option<String>,
+    pub route_prefix: Option<String>,
+    pub client_transport: Option<String>,
+    pub phase: String,
+    pub status_code: Option<i32>,
+    pub error: Option<String>,
+    pub active_output_tokens_per_sec: Option<f64>,
+    pub active_cost_usd_per_hour: Option<f64>,
+    pub active_upstream_bytes_per_sec: f64,
+    pub active_downstream_bytes_per_sec: f64,
+    pub output_tokens_so_far: i64,
+    pub upstream_bytes_so_far: i64,
+    pub client_bytes_so_far: i64,
+    pub upstream_first_byte_ms: Option<i64>,
+    pub client_first_write_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/RealtimeProvider.ts")]
+pub struct RealtimeProvider {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub active_requests: usize,
+    pub active_output_tokens_per_sec: f64,
+    pub active_cost_usd_per_hour: Option<f64>,
+    pub active_upstream_bytes_per_sec: f64,
+    pub active_downstream_bytes_per_sec: f64,
+    pub output_tokens_so_far: i64,
+    pub upstream_bytes_so_far: i64,
+    pub client_bytes_so_far: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/RealtimeSnapshot.ts")]
+pub struct RealtimeSnapshot {
+    pub now: i64,
+    pub active_requests: Vec<RealtimeRequest>,
+    pub recent_requests: Vec<RealtimeRequest>,
+    pub providers: Vec<RealtimeProvider>,
+    pub active_count: usize,
+    pub active_output_tokens_per_sec: f64,
+    pub active_cost_usd_per_hour: Option<f64>,
+    pub active_upstream_bytes_per_sec: f64,
+    pub active_downstream_bytes_per_sec: f64,
+    pub codex_ws_active: usize,
+    pub codex_last_transport: Option<String>,
 }
 
 /// Paginated request log envelope returned by `GET /_vp/logs`.
@@ -1003,6 +1074,13 @@ pub struct Credential {
     /// Rolling-window usage snapshots fetched from the upstream platform.
     #[serde(default)]
     pub windows: Vec<UsageWindow>,
+    /// Why this credential was auto-disabled (e.g. "HTTP 401 from <provider>").
+    /// Cleared when an operator re-enables the credential.
+    #[serde(default)]
+    pub disabled_reason: Option<String>,
+    /// Unix seconds when this credential was auto-disabled.
+    #[serde(default)]
+    pub disabled_at: Option<i64>,
 }
 
 fn default_price_multiplier() -> f64 {

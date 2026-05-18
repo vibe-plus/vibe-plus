@@ -1,5 +1,5 @@
-use crate::stream_trace::StreamTraceStats;
 use super::*;
+use crate::stream_trace::StreamTraceStats;
 
 pub(super) struct CodexWsActiveGuard {
     state: AppState,

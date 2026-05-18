@@ -31,8 +31,20 @@ pub(super) async fn build_providers_overview(
         let credentials = s.db.credential_list_all()?;
         let rolling_provider_stats = s.db.per_provider_stats(hours)?;
         let rolling_credential_stats = s.db.credential_stats_all(hours)?;
-        let plan_credential_ids = credentials.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
-        let plan_snapshots = s.db.plan_snapshot_latest_map(&plan_credential_ids)?;
+        let plan_credential_ids = credentials
+            .iter()
+            .filter(|c| {
+                providers.iter().any(|p| {
+                    p.id == c.provider_id && crate::router::provider_is_chatgpt_codex_official(p)
+                })
+            })
+            .map(|c| c.id.clone())
+            .collect::<Vec<_>>();
+        let plan_snapshots = if plan_credential_ids.is_empty() {
+            HashMap::new()
+        } else {
+            s.db.plan_snapshot_latest_map(&plan_credential_ids)?
+        };
         Ok::<_, anyhow::Error>((
             providers,
             health_rows,
@@ -162,12 +174,34 @@ pub(super) fn now_secs() -> i64 {
 }
 
 pub(super) fn emit_app_log(state: &AppState, level: AppLogLevel, category: &str, message: String) {
+    emit_app_event(
+        state,
+        level,
+        category,
+        "legacy.message",
+        serde_json::json!({ "message": message }),
+        message,
+        None,
+    );
+}
+
+pub(super) fn emit_app_event(
+    state: &AppState,
+    level: AppLogLevel,
+    category: &str,
+    event_type: &str,
+    payload: serde_json::Value,
+    message: String,
+    detail: Option<String>,
+) {
     let ev = AppLogEvent {
         ts: now_secs(),
         level,
+        event_type: event_type.to_string(),
+        payload,
         category: category.to_string(),
         message,
-        detail: None,
+        detail,
     };
     state.app_logs.push(ev);
 }
@@ -514,11 +548,18 @@ pub(super) async fn create_credential(
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
-    emit_app_log(
+    emit_app_event(
         &state,
         AppLogLevel::Info,
         "credential",
+        "credential.created",
+        serde_json::json!({
+            "schema": 1,
+            "credential": { "id": c.id, "label": c.label },
+            "provider": { "id": c.provider_id },
+        }),
         format!("Credential added: {label}"),
+        None,
     );
     Ok(Json(c))
 }
@@ -549,11 +590,18 @@ pub(super) async fn update_credential(
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
-    emit_app_log(
+    emit_app_event(
         &state,
         AppLogLevel::Info,
         "credential",
+        "credential.updated",
+        serde_json::json!({
+            "schema": 1,
+            "credential": { "id": c.id, "label": c.label },
+            "provider": { "id": c.provider_id },
+        }),
         format!("Credential updated: {label}"),
+        None,
     );
     Ok(Json(c))
 }
@@ -738,11 +786,17 @@ pub(super) async fn delete_credential(
 ) -> Result<StatusCode, AppError> {
     let id_clone = id.clone();
     run_blocking(state.clone(), move |s| s.db.credential_delete(&id_clone)).await?;
-    emit_app_log(
+    emit_app_event(
         &state,
         AppLogLevel::Warn,
         "credential",
+        "credential.deleted",
+        serde_json::json!({
+            "schema": 1,
+            "credential": { "id": id },
+        }),
         format!("Credential deleted: {id}"),
+        None,
     );
     Ok(StatusCode::NO_CONTENT)
 }
@@ -757,11 +811,18 @@ pub(super) async fn enable_credential(
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
-    emit_app_log(
+    emit_app_event(
         &state,
         AppLogLevel::Info,
         "credential",
+        "credential.enabled",
+        serde_json::json!({
+            "schema": 1,
+            "credential": { "id": c.id, "label": c.label },
+            "provider": { "id": c.provider_id },
+        }),
         format!("Credential enabled: {}", c.label),
+        None,
     );
     Ok(Json(c))
 }
@@ -776,11 +837,18 @@ pub(super) async fn disable_credential(
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
-    emit_app_log(
+    emit_app_event(
         &state,
         AppLogLevel::Warn,
         "credential",
+        "credential.disabled",
+        serde_json::json!({
+            "schema": 1,
+            "credential": { "id": c.id, "label": c.label },
+            "provider": { "id": c.provider_id },
+        }),
         format!("Credential disabled: {}", c.label),
+        None,
     );
     Ok(Json(c))
 }
@@ -856,12 +924,28 @@ pub(super) async fn build_dashboard_stats(
     state: AppState,
     hours: i64,
 ) -> anyhow::Result<DashboardStats> {
-    let requests_last_24h = run_blocking(state, |s| {
-        Ok(s.db
-            .health_list()?
-            .iter()
-            .map(|h| h.total_requests)
-            .sum::<i64>())
+    let (
+        window_totals,
+        last_hour_totals,
+        last_24h_totals,
+        (_, p95_latency_ms),
+        top_models,
+        per_provider,
+    ) = run_blocking(state, move |s| {
+        let window_totals = s.db.dashboard_rolling_totals(hours)?;
+        let last_hour_totals = s.db.dashboard_rolling_totals(1)?;
+        let last_24h_totals = s.db.dashboard_rolling_totals(24)?;
+        let latency = s.db.latency_percentiles(hours)?;
+        let top_models = s.db.top_models(hours, 6)?;
+        let per_provider = s.db.per_provider_stats(hours)?;
+        Ok::<_, anyhow::Error>((
+            window_totals,
+            last_hour_totals,
+            last_24h_totals,
+            latency,
+            top_models,
+            per_provider,
+        ))
     })
     .await?;
 
@@ -878,20 +962,28 @@ pub(super) async fn build_dashboard_stats(
     Ok(DashboardStats {
         window_hours: hours,
         window_label,
-        requests_in_window: 0,
-        success_rate_in_window: 1.0,
-        input_tokens_in_window: 0,
-        output_tokens_in_window: 0,
-        output_tokens_per_sec_in_window: 0.0,
-        decode_output_tokens_per_sec_in_window: 0.0,
-        requests_last_hour: 0,
-        requests_last_24h,
-        success_rate_last_hour: 1.0,
-        avg_latency_ms: 0,
-        p95_latency_ms: 0,
-        input_tokens_last_24h: 0,
-        output_tokens_last_24h: 0,
-        top_models: Vec::new(),
-        per_provider: Vec::new(),
+        requests_in_window: window_totals.requests,
+        success_rate_in_window: success_rate(window_totals.successes, window_totals.requests),
+        input_tokens_in_window: window_totals.input_tokens,
+        output_tokens_in_window: window_totals.output_tokens,
+        output_tokens_per_sec_in_window: window_totals.output_tokens_per_sec,
+        decode_output_tokens_per_sec_in_window: window_totals.decode_output_tokens_per_sec,
+        requests_last_hour: last_hour_totals.requests,
+        requests_last_24h: last_24h_totals.requests,
+        success_rate_last_hour: success_rate(last_hour_totals.successes, last_hour_totals.requests),
+        avg_latency_ms: window_totals.avg_latency_ms,
+        p95_latency_ms,
+        input_tokens_last_24h: last_24h_totals.input_tokens,
+        output_tokens_last_24h: last_24h_totals.output_tokens,
+        top_models,
+        per_provider,
     })
+}
+
+fn success_rate(successes: i64, requests: i64) -> f64 {
+    if requests > 0 {
+        successes as f64 / requests as f64
+    } else {
+        1.0
+    }
 }

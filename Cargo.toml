@@ -5,6 +5,7 @@ members = [
   "crates/vibe",
   "crates/vibe-core",
   "crates/vibe-db",
+  "crates/vibe-i18n",
   "crates/vibe-protocol",
 ]
 
@@ -18,6 +19,7 @@ rust-version = "1.82"
 [workspace.dependencies]
 vibe-core = { path = "crates/vibe-core" }
 vibe-db = { path = "crates/vibe-db" }
+vibe-i18n = { path = "crates/vibe-i18n" }
 vibe-protocol = { path = "crates/vibe-protocol" }
 
 # async runtime + http
@@ -74,6 +76,9 @@ tray-icon = "0.24"
 wry = "0.55"
 rust-embed = { version = "8", features = ["include-exclude"] }
 mime_guess = { version = "2", default-features = false, features = ["rev-mappings"] }
+fluent-templates = "0.13"
+unic-langid = { version = "0.9", features = ["macros"] }
+once_cell = "1"
 
 [profile.release]
 lto = "thin"

@@ -1,5 +1,5 @@
-use crate::stream_trace::StreamTraceStats;
 use super::*;
+use crate::stream_trace::StreamTraceStats;
 
 pub(super) async fn codex_responses_handler(
     ws_upgrade: Option<WebSocketUpgrade>,

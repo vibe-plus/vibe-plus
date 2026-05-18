@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 vibe-core = { workspace = true }
 vibe-db = { workspace = true }
+vibe-i18n = { workspace = true }
 vibe-protocol = { workspace = true }
 
 tokio = { workspace = true }

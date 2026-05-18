@@ -33,7 +33,8 @@ use vibe_protocol::{
     AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexPlanRefreshResult,
     Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats,
     Health, HealthSummary, Meta, Provider, ProviderAuthPoolSummary, ProviderCodexPlanItem,
-    ProviderHealth, ProviderHealthSummary, ProviderInput, ProvidersOverview, Status, UsageSummary,
+    ProviderHealth, ProviderHealthSummary, ProviderInput, ProvidersOverview, RealtimeSnapshot,
+    Status, UsageSummary,
 };
 
 mod clients;
@@ -167,6 +168,7 @@ pub fn router(state: AppState) -> Router {
         // usage + stats
         .route("/_vp/usage/summary", get(usage_summary))
         .route("/_vp/stats/dashboard", get(dashboard_stats))
+        .route("/_vp/realtime", get(realtime_snapshot))
         .route("/_vp/app-logs", get(list_app_logs))
         // sandboxed read/write of ~/.codex and ~/.claude
         .route("/_vp/files/:scope", get(list_files))
@@ -227,6 +229,23 @@ async fn favicon_placeholder() -> StatusCode {
 
 async fn health() -> Json<Health> {
     Json(Health { ok: true })
+}
+
+async fn realtime_snapshot(State(state): State<AppState>) -> Json<RealtimeSnapshot> {
+    let transport = state.codex_transport.snapshot();
+    let mut snapshot = state.realtime.snapshot(transport);
+    if let Ok(providers) = state.db.provider_list() {
+        let names: HashMap<String, String> = providers
+            .into_iter()
+            .map(|provider| (provider.id, provider.name))
+            .collect();
+        for provider in &mut snapshot.providers {
+            if let Some(name) = names.get(&provider.provider_id) {
+                provider.provider_name = name.clone();
+            }
+        }
+    }
+    Json(snapshot)
 }
 
 async fn compute_status(state: AppState) -> Result<Status, AppError> {
@@ -477,6 +496,8 @@ mod request_body_limit_tests {
             upstream_group: None,
             price_multiplier: 1.0,
             windows: vec![],
+            disabled_reason: None,
+            disabled_at: None,
         }
     }
 }

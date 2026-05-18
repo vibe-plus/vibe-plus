@@ -11,7 +11,7 @@
 
 use super::{Adapter, Wire};
 use crate::transforms;
-use crate::usage::Usage;
+use crate::usage::{estimate_output_tokens, Usage};
 use anyhow::Result;
 use reqwest::{Client, RequestBuilder};
 use vibe_protocol::{Provider, ProviderKind};
@@ -95,8 +95,38 @@ impl Adapter for OpenaiAdapter {
         };
         if let Some(usage) = v.get("usage").or_else(|| v.pointer("/response/usage")) {
             apply_openai_usage(usage, acc);
+            return;
+        }
+
+        for text in openai_stream_text_deltas(&v) {
+            acc.output_tokens += estimate_output_tokens(text);
         }
     }
+}
+
+fn openai_stream_text_deltas(v: &serde_json::Value) -> Vec<&str> {
+    let mut out = Vec::new();
+
+    // Responses API: response.output_text.delta frames carry live text in `delta`.
+    if v.get("type")
+        .and_then(|x| x.as_str())
+        .is_some_and(|t| t.ends_with(".delta"))
+    {
+        if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+            out.push(delta);
+        }
+    }
+
+    // Chat Completions API: each choice carries a delta content field.
+    if let Some(choices) = v.get("choices").and_then(|x| x.as_array()) {
+        for choice in choices {
+            if let Some(delta) = choice.pointer("/delta/content").and_then(|x| x.as_str()) {
+                out.push(delta);
+            }
+        }
+    }
+
+    out
 }
 
 fn apply_openai_usage(usage: &serde_json::Value, acc: &mut Usage) {

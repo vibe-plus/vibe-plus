@@ -59,22 +59,51 @@ pub(crate) fn emit_circuit_event(
     change: crate::circuit_breaker::CircuitStateChange,
 ) {
     use crate::circuit_breaker::CircuitStateChange;
-    let (level, message, detail) = match change {
+
+    let credential = state.db.credential_get(cb_key).ok().flatten();
+    let provider = credential
+        .as_ref()
+        .and_then(|c| state.db.provider_get(&c.provider_id).ok().flatten())
+        .or_else(|| state.db.provider_get(cb_key).ok().flatten());
+
+    let entity_kind = if credential.is_some() {
+        "credential"
+    } else {
+        "provider"
+    };
+    let display_name = credential
+        .as_ref()
+        .map(|c| c.label.as_str())
+        .or_else(|| provider.as_ref().map(|p| p.name.as_str()))
+        .unwrap_or(cb_key);
+
+    let (level, event_type, message, detail, change_payload) = match change {
         CircuitStateChange::Opened {
             consecutive_failures,
         } => (
             AppLogLevel::Warn,
-            format!("Circuit opened: {cb_key}"),
+            "circuit.opened",
+            format!("Circuit opened: {display_name}"),
             Some(format!("{consecutive_failures} consecutive failures")),
+            serde_json::json!({
+                "consecutive_failures": consecutive_failures,
+                "open_timeout_secs": state.cb.open_remaining_secs(cb_key),
+            }),
         ),
         CircuitStateChange::Closed => (
             AppLogLevel::Info,
-            format!("Circuit recovered: {cb_key}"),
+            "circuit.closed",
+            format!("Circuit recovered: {display_name}"),
             None,
+            serde_json::json!({}),
         ),
-        CircuitStateChange::ManualReset => {
-            (AppLogLevel::Info, format!("Circuit reset: {cb_key}"), None)
-        }
+        CircuitStateChange::ManualReset => (
+            AppLogLevel::Info,
+            "circuit.reset",
+            format!("Circuit reset: {display_name}"),
+            None,
+            serde_json::json!({}),
+        ),
     };
     let ev = AppLogEvent {
         ts: std::time::SystemTime::now()
@@ -82,6 +111,25 @@ pub(crate) fn emit_circuit_event(
             .unwrap_or_default()
             .as_secs() as i64,
         level,
+        event_type: event_type.to_string(),
+        payload: serde_json::json!({
+            "schema": 1,
+            "circuit": change_payload,
+            "subject": {
+                "kind": entity_kind,
+                "id": cb_key,
+                "label": display_name,
+            },
+            "provider": provider.as_ref().map(|p| serde_json::json!({
+                "id": p.id,
+                "name": p.name,
+            })),
+            "credential": credential.as_ref().map(|c| serde_json::json!({
+                "id": c.id,
+                "label": c.label,
+                "provider_id": c.provider_id,
+            })),
+        }),
         category: "circuit".to_string(),
         message,
         detail,
@@ -298,17 +346,33 @@ pub(crate) fn request_log_from_parts(
     )
 }
 
-pub(crate) fn persist_request_log(_state: &AppState, _log: RequestLog) {}
+pub(crate) fn persist_request_log(state: &AppState, log: RequestLog) {
+    state
+        .realtime
+        .finished(&log.id, log.status_code, log.error.clone());
+}
 
 pub(crate) fn publish_request_started(
-    _state: &AppState,
-    _id: &str,
-    _started_at: i64,
-    _app: &Option<String>,
-    _log_ctx: &LogCtx,
-    _provider_id: Option<&str>,
-    _requested_model: &str,
+    state: &AppState,
+    id: &str,
+    started_at: i64,
+    app: &Option<String>,
+    log_ctx: &LogCtx,
+    provider_id: Option<&str>,
+    requested_model: &str,
 ) {
+    state.realtime.started(
+        id,
+        started_at,
+        app,
+        provider_id,
+        log_ctx.credential_id.as_deref(),
+        requested_model,
+        None,
+        Some(wire_as_str(log_ctx.wire)),
+        log_ctx.route_prefix.as_deref(),
+        log_ctx.client_transport.as_deref(),
+    );
 }
 
 pub(crate) fn persist_request_log_placeholder(
@@ -356,33 +420,63 @@ pub(crate) fn new_attempt_ctx(
 }
 
 pub(crate) fn publish_upstream_attempt_started(
-    _state: &AppState,
+    state: &AppState,
     _log_ctx: &LogCtx,
-    _attempt: &AttemptCtx,
-    _phase: UpstreamAttemptPhase,
+    attempt: &AttemptCtx,
+    phase: UpstreamAttemptPhase,
 ) {
+    state.realtime.attempt_started(
+        &attempt.request_id,
+        attempt.provider_id.as_deref(),
+        attempt.credential_id.as_deref(),
+        attempt.upstream_model.as_str().into(),
+        match phase {
+            UpstreamAttemptPhase::Connecting => "connecting",
+            UpstreamAttemptPhase::Streaming => "streaming",
+            UpstreamAttemptPhase::Completed => "completed",
+            UpstreamAttemptPhase::Failed => "failed",
+            UpstreamAttemptPhase::Abandoned => "abandoned",
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_runtime_stats(
-    _state: &AppState,
-    _request_id: &str,
+    state: &AppState,
+    request_id: &str,
     _attempt_id: Option<&str>,
-    _provider_id: Option<&str>,
-    _active_request_tokens_per_sec: Option<f64>,
-    _active_upstream_decode_tps: Option<f64>,
+    provider_id: Option<&str>,
+    active_request_tokens_per_sec: Option<f64>,
+    active_upstream_decode_tps: Option<f64>,
     _active_downstream_emit_tps: Option<f64>,
-    _active_output_tokens_per_sec: Option<f64>,
-    _active_upstream_bytes_per_sec: f64,
-    _active_downstream_bytes_per_sec: f64,
+    active_output_tokens_per_sec: Option<f64>,
+    active_upstream_bytes_per_sec: f64,
+    active_downstream_bytes_per_sec: f64,
     _active_flow_bytes_per_sec: f64,
-    _output_tokens_so_far: i64,
-    _upstream_bytes_so_far: i64,
-    _client_bytes_so_far: i64,
-    _upstream_first_byte_ms: Option<i64>,
-    _client_first_write_ms: Option<i64>,
-    _attempt_scoped: bool,
+    output_tokens_so_far: i64,
+    upstream_bytes_so_far: i64,
+    client_bytes_so_far: i64,
+    upstream_first_byte_ms: Option<i64>,
+    client_first_write_ms: Option<i64>,
+    attempt_scoped: bool,
 ) {
+    if attempt_scoped {
+        return;
+    }
+    state.realtime.runtime(
+        request_id,
+        provider_id,
+        active_request_tokens_per_sec
+            .or(active_upstream_decode_tps)
+            .or(active_output_tokens_per_sec),
+        active_upstream_bytes_per_sec,
+        active_downstream_bytes_per_sec,
+        output_tokens_so_far,
+        upstream_bytes_so_far,
+        client_bytes_so_far,
+        upstream_first_byte_ms,
+        client_first_write_ms,
+    );
 }
 
 pub(crate) fn attempt_log_from_parts(
@@ -486,6 +580,18 @@ pub(crate) enum PreparedForwardError {
         requested_model: String,
         log_ctx: LogCtx,
         request_snapshot: Option<String>,
+    },
+    /// Router matched providers but every credential is `enabled=0` and no
+    /// provider-level auth_ref exists. Surfaced as a localized 503 to clients.
+    NoUsableCredentials {
+        log_id: String,
+        started_at: i64,
+        started_instant: Instant,
+        app: Option<String>,
+        requested_model: String,
+        log_ctx: LogCtx,
+        request_snapshot: Option<String>,
+        message: String,
     },
     Exhausted {
         log_id: String,
@@ -640,6 +746,20 @@ pub(crate) async fn prepare_forward_once(
         .as_deref()
         .and_then(|k| state.get_codex_sticky_route(k, CODEX_STICKY_ROUTE_TTL));
     let expanded_picks = selector::apply_sticky_priority(sticky_route.as_ref(), expanded_picks);
+
+    if expanded_picks.is_empty() {
+        return Err(PreparedForwardError::NoUsableCredentials {
+            log_id,
+            started_at,
+            started_instant,
+            app,
+            requested_model,
+            log_ctx: empty_log_ctx,
+            request_snapshot,
+            message: vibe_i18n::text_env("gateway-no-credentials"),
+        });
+    }
+
     let mut last_error = String::from("all providers unavailable or circuit open");
     let mut routing_attempt_trace: Vec<String> = Vec::new();
     let mut cb_skipped_total: usize = 0;
@@ -1106,6 +1226,41 @@ pub(crate) fn fire_credential_failure(
     });
 }
 
+/// Auto-disable a credential after a fatal auth error (401/403). The credential
+/// stays disabled until an operator manually re-enables it from the dashboard —
+/// there is no auto-recovery probe. We deliberately do not trip the circuit
+/// breaker on top: the breaker is for transient upstream pain, and a key that
+/// fails auth is gone, not slow.
+pub(crate) fn fire_credential_disable(state: &AppState, credential_id: String, reason: String) {
+    let db = state.db.clone();
+    let id_for_log = credential_id.clone();
+    let reason_for_log = reason.clone();
+    tokio::task::spawn_blocking(move || {
+        match db.credential_disable_with_reason(&credential_id, &reason) {
+            Ok(true) => {
+                tracing::warn!(
+                    credential_id = %id_for_log,
+                    reason = %reason_for_log,
+                    "credential auto-disabled (manual re-enable required)"
+                );
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    credential_id = %id_for_log,
+                    "credential_disable_with_reason: credential not found"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    credential_id = %id_for_log,
+                    error = ?e,
+                    "credential_disable_with_reason failed"
+                );
+            }
+        }
+    });
+}
+
 /// Persist RL headers from a non-success response without counting success/failure streaks.
 ///
 /// When the upstream sends 429 but no standard rate-limit headers (common for non-OpenAI
@@ -1294,6 +1449,46 @@ pub async fn forward(
         .as_deref()
         .and_then(|k| state.get_codex_sticky_route(k, CODEX_STICKY_ROUTE_TTL));
     let expanded_picks = selector::apply_sticky_priority(sticky_route.as_ref(), expanded_picks);
+
+    // Router found candidate providers but no credential survived expansion —
+    // i.e. every credential on every matching provider is `enabled=0` (and
+    // there is no provider-level auth_ref to fall back on). Don't run waves
+    // against an empty pool: fail fast with a localized 503 so the client
+    // (and the user) gets a clear "fix this in the dashboard" signal.
+    if expanded_picks.is_empty() {
+        let log_ctx = LogCtx {
+            wire,
+            route_prefix: route_prefix.clone(),
+            credential_id: None,
+            cb_key: None,
+            dedupe_key: dedupe_key.clone(),
+            client_transport: client_transport.clone(),
+            request_headers: request_headers.clone(),
+            codex_client_kind,
+            claude_client_kind,
+        };
+        let message = vibe_i18n::text_env("gateway-no-credentials");
+        let log = build_log(
+            &log_ctx,
+            &log_id,
+            started_at,
+            &started_instant,
+            &app,
+            None,
+            &requested_model,
+            "",
+            Some(503),
+            None,
+            None,
+            Some(message.clone()),
+            Usage::default(),
+            request_snapshot.clone(),
+            None,
+        );
+        persist_log(&state, log);
+        return (StatusCode::SERVICE_UNAVAILABLE, message).into_response();
+    }
+
     let request_start_ctx = LogCtx {
         wire,
         route_prefix: route_prefix.clone(),
@@ -1954,9 +2149,17 @@ pub(crate) fn build_log(
     log
 }
 
-pub(crate) fn persist_log(_state: &AppState, _log: RequestLog) {}
+pub(crate) fn persist_log(state: &AppState, log: RequestLog) {
+    state
+        .realtime
+        .finished(&log.id, log.status_code, log.error.clone());
+}
 
-async fn finalize_stream_request_log(_state: AppState, _log: RequestLog) {}
+async fn finalize_stream_request_log(state: AppState, log: RequestLog) {
+    state
+        .realtime
+        .finished(&log.id, log.status_code, log.error.clone());
+}
 
 pub(crate) fn fire_health(
     state: &AppState,

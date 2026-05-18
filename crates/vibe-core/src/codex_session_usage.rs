@@ -147,7 +147,8 @@ pub fn usage_from_reader(reader: impl BufRead) -> std::io::Result<Option<CodexSe
     let mut saw_known_cost = false;
     for line in reader.lines() {
         let line = line?;
-        let may_have_token_count = line.contains("\"token_count\"") && line.contains("total_token_usage");
+        let may_have_token_count =
+            line.contains("\"token_count\"") && line.contains("total_token_usage");
         let may_have_turn_context = line.contains("\"turn_context\"");
         if !may_have_token_count && !may_have_turn_context {
             continue;

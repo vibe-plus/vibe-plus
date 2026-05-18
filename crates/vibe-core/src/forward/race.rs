@@ -16,8 +16,8 @@ use super::outcome;
 use super::selector::ExpandedPick;
 use super::{
     attempt_log_from_parts, body_wants_stream, build_log, codex_visual_context,
-    copy_response_headers, emit_circuit_event, extract_rl_headers, fire_credential_failure,
-    fire_credential_rate_limit_only, fire_credential_success, fire_health,
+    copy_response_headers, emit_circuit_event, extract_rl_headers, fire_credential_disable,
+    fire_credential_failure, fire_credential_rate_limit_only, fire_credential_success, fire_health,
     forget_codex_sticky_route_if_present, format_routing_attempt,
     inject_chatgpt_codex_instructions_if_missing, lossy_optional_body, maybe_record_codex_plan,
     needs_chat_to_responses_bridge, new_attempt_ctx, persist_log, persist_upstream_attempt_log,
@@ -447,9 +447,25 @@ pub(crate) async fn try_one_pick(
             error_body_bytes = body_bytes.len(),
             "retryable upstream error, trying next provider"
         );
+        // AuthError (401/403) is treated as fatal *for this credential*: we
+        // mark it disabled in the DB so it stays out of the rotation pool
+        // until an operator re-enables it. No CB cooldown, no auto-recover.
+        // Provider-level auth (no credential row) still trips the CB as a
+        // best-effort backstop.
         if retry_outcome == outcome::RetryOutcome::AuthError {
-            let change = state.cb.force_open(&cb_key);
-            emit_circuit_event(&state, &cb_key, change);
+            match epick.credential_id.as_deref() {
+                Some(cid) => {
+                    fire_credential_disable(
+                        &state,
+                        cid.to_string(),
+                        format!("HTTP {status} from {}", provider.id),
+                    );
+                }
+                None => {
+                    let change = state.cb.force_open(&cb_key);
+                    emit_circuit_event(&state, &cb_key, change);
+                }
+            }
         }
         fire_health(
             &state,
@@ -458,8 +474,13 @@ pub(crate) async fn try_one_pick(
             ctx.started_instant.elapsed().as_millis() as i64,
             Some(format!("HTTP {status}")),
         );
-        if let Some(cid) = &epick.credential_id {
-            fire_credential_failure(&state, cid.clone(), Some(format!("HTTP {status}")));
+        // For non-auth retryable errors we still bump the failure counter on the
+        // credential. AuthError is handled above (full disable) and shouldn't
+        // also bump the counter, since the counter is for "transient" pain.
+        if retry_outcome != outcome::RetryOutcome::AuthError {
+            if let Some(cid) = &epick.credential_id {
+                fire_credential_failure(&state, cid.clone(), Some(format!("HTTP {status}")));
+            }
         }
         let routing_note = format_routing_attempt(
             &provider,
@@ -1171,6 +1192,87 @@ mod tests {
         let result = try_one_pick(state.clone(), epick, 1, ctx).await;
         assert!(matches!(result, PickResult::Retry { .. }));
         assert!(!state.cb.allow(&cb_key), "CB must be force-opened by 401");
+    }
+
+    // ── 6b. 401 with credential-id — disables in DB instead of tripping CB ─
+
+    #[tokio::test]
+    async fn pick_on_401_disables_credential_when_id_present() {
+        use vibe_protocol::{CredentialInput, ProviderInput};
+
+        let base = start_mock(401, r#"{"error":"unauthorized"}"#).await;
+        let state = make_state();
+
+        // Seed a provider + credential row so the DAO has something to disable.
+        let provider = state
+            .db
+            .provider_insert(ProviderInput {
+                name: "p-401-cred".into(),
+                group_name: None,
+                avatar_url: None,
+                kind: ProviderKind::OpenaiChat,
+                base_url: base,
+                protocols: vec![],
+                host: None,
+                auth_ref: Some("passthrough".into()),
+                enabled: true,
+                priority: 10,
+                supports_websocket: None,
+                passthrough_mode: true,
+                model_aliases: vec![],
+            })
+            .expect("provider_insert");
+        let cred = state
+            .db
+            .credential_insert(
+                &provider.id,
+                CredentialInput {
+                    label: "broken-key".into(),
+                    auth_ref: Some("passthrough".into()),
+                    enabled: true,
+                    priority: 10,
+                    ..CredentialInput::default()
+                },
+                None,
+            )
+            .expect("credential_insert");
+
+        let cb_key_for_cred = cred.id.clone();
+        let epick = ExpandedPick {
+            cb_key: cb_key_for_cred.clone(),
+            upstream_model: "gpt-test".into(),
+            auth_ref: Some("passthrough".into()),
+            oauth: None,
+            credential_id: Some(cred.id.clone()),
+            credential: Some(cred.clone()),
+            provider,
+        };
+        let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
+
+        let result = try_one_pick(state.clone(), epick, 1, ctx).await;
+        assert!(matches!(result, PickResult::Retry { .. }));
+
+        // The disable is fired via spawn_blocking; poll the DB up to ~1s.
+        let mut disabled = None;
+        for _ in 0..40 {
+            let row = state.db.credential_get(&cred.id).unwrap().unwrap();
+            if !row.enabled {
+                disabled = Some(row);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let disabled = disabled.expect("credential should be auto-disabled after 401");
+        assert!(disabled.disabled_reason.as_deref().unwrap().contains("401"));
+        assert!(disabled.disabled_at.is_some());
+
+        // And the CB for the credential key must NOT be force-opened in this branch
+        // — the disable takes its place. (Re-enable should put the cred back in play
+        // without needing a CB reset.)
+        assert!(
+            state.cb.allow(&cb_key_for_cred),
+            "CB must not be force-opened when the credential is auto-disabled instead"
+        );
     }
 
     // ── 7. 403 forbidden — treated as auth error, retryable ─────────────
