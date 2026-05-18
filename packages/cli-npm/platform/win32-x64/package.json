@@ -1,6 +1,6 @@
 {
   "name": "@vibe-plus/cli-win32-x64",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "vibe binary for win32-x64",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "cheezone <cheezone@163.com>",

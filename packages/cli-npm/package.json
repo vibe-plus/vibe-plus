@@ -1,6 +1,6 @@
 {
   "name": "@vibe-plus/cli",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "The Unified Toolchain for the Vibe — local AI API gateway CLI",
   "keywords": [
     "ai",
@@ -31,8 +31,8 @@
     "verify": "node ./scripts/verify-package.mjs"
   },
   "optionalDependencies": {
-    "@vibe-plus/cli-darwin-arm64": "0.0.4",
-    "@vibe-plus/cli-win32-x64": "0.0.4"
+    "@vibe-plus/cli-darwin-arm64": "0.0.5",
+    "@vibe-plus/cli-win32-x64": "0.0.5"
   },
   "engines": {
     "node": ">=18.0.0"
