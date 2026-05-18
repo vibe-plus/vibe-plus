@@ -120,7 +120,7 @@ $env:VIBE_HOME = $testHome
 $ExePath = (Resolve-Path $ExePath).Path
 Write-Host "Testing Windows CLI binary: $ExePath"
 
-Invoke-Vibe -FilePath $ExePath -Arguments @("--help") -Expected "local AI API gateway" | Out-Null
+Invoke-Vibe -FilePath $ExePath -Arguments @("--help") -Expected "local API gateway" | Out-Null
 Invoke-Vibe -FilePath $ExePath -Arguments @("--version") -Expected "vibe" | Out-Null
 Invoke-Vibe -FilePath $ExePath -Arguments @("status") -Expected "vibe is not running" | Out-Null
 Invoke-Vibe -FilePath $ExePath -Arguments @("config", "path") -Expected "vibe" | Out-Null
@@ -181,7 +181,7 @@ try {
       throw "npm did not create the vibe.cmd binary shim"
     }
 
-    Invoke-Vibe -FilePath $installedVibeShim -Arguments @("--help") -Expected "local AI API gateway" | Out-Null
+    Invoke-Vibe -FilePath $installedVibeShim -Arguments @("--help") -Expected "local API gateway" | Out-Null
     Invoke-Vibe -FilePath $installedVibeShim -Arguments @("--version") -Expected "vibe" | Out-Null
     Invoke-Vibe -FilePath $installedVibeShim -Arguments @("statusline") -Stdin $statusLineInput -Expected "Vibe+" | Out-Null
   } finally {
