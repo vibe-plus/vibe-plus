@@ -10,7 +10,6 @@ import {
   type ProviderHealth,
   type Provider,
   type ProviderAuthPoolSummary,
-  type ProviderCodexPlanItem,
   type ProvidersOverview,
   type RealtimeSnapshot,
 } from "../api/client.ts";
@@ -157,12 +156,6 @@ const realtimeProviderById = computed(
 );
 const realtimeActiveCount = computed(() => realtime.value?.active_count ?? 0);
 const realtimeOutputTps = computed(() => realtime.value?.active_output_tokens_per_sec ?? 0);
-const realtimeUpstreamKbps = computed(
-  () => (realtime.value?.active_upstream_bytes_per_sec ?? 0) / 1024,
-);
-const realtimeDownstreamKbps = computed(
-  () => (realtime.value?.active_downstream_bytes_per_sec ?? 0) / 1024,
-);
 const realtimeNetworkBytesPerSec = computed(
   () =>
     (realtime.value?.active_upstream_bytes_per_sec ?? 0) +
@@ -355,16 +348,6 @@ const scopedSuccessRate = computed(() => {
   return successes / requests;
 });
 
-const scopedAvgLatencyMs = computed(() => {
-  const requests = scopedRequestCount.value;
-  if (requests <= 0) return stats.value?.avg_latency_ms ?? null;
-  const weighted = scopedProviderRows.value.reduce(
-    (sum, row) => sum + row.avg_latency_ms * row.requests,
-    0,
-  );
-  return Math.round(weighted / requests);
-});
-
 const scopedOutputTps = computed(() => {
   if (realtimeOutputTps.value > 0) return realtimeOutputTps.value;
   const overviewSpeed = dashboardWindowTps.value;
@@ -426,29 +409,6 @@ const activeProviderCards = computed(() =>
     .slice(0, 6),
 );
 
-const visibleRequestCount = computed(() =>
-  view.value === "overview"
-    ? (stats.value?.requests_in_window ?? stats.value?.requests_last_24h ?? 0)
-    : scopedRequestCount.value,
-);
-const visibleInputTokens = computed(() => {
-  if (view.value === "overview")
-    return stats.value?.input_tokens_in_window ?? stats.value?.input_tokens_last_24h ?? 0;
-  return scopedProviderRows.value.reduce((sum, row) => sum + row.input_tokens, 0);
-});
-const visibleOutputTokens = computed(() => {
-  if (view.value === "overview")
-    return stats.value?.output_tokens_in_window ?? stats.value?.output_tokens_last_24h ?? 0;
-  return scopedProviderRows.value.reduce((sum, row) => sum + row.output_tokens, 0);
-});
-const visibleTotalTokens = computed(() => visibleInputTokens.value + visibleOutputTokens.value);
-const dashboardOutputMetric = computed(() => ({
-  value: scopedOutputTps.value ?? 0,
-  suffix: "tok/s",
-  precision: 1,
-  tone: "default" as const,
-}));
-
 const liveHeatLevel = computed(() => {
   if (!online.value) return 0;
   const speed = realtimeOutputTps.value;
@@ -501,145 +461,6 @@ const providerSummaryLabel = computed(() => {
   }
   return t("providers.summary", { ready: activeCredentialTotal.value, total });
 });
-
-type FuelCard = {
-  key: string;
-  label: string;
-  value: string;
-  detail: string;
-  tone: "good" | "warn" | "bad" | "muted";
-  to?: string;
-};
-
-const scopedCodexPlanRows = computed(() => {
-  const out: ProviderCodexPlanItem[] = [];
-  for (const provider of providers.value) {
-    if (!providerMatchesWorkspaceView(provider, view.value)) continue;
-    if (provider.kind !== "openai-responses" && provider.kind !== "openai-chat") continue;
-    out.push(...(codexPlans.value[provider.id] ?? []));
-  }
-  return out;
-});
-
-const codexQuotaSummary = computed(() => {
-  let usedPct: number | null = null;
-  let resetSecs: number | null = null;
-  let stale = 0;
-  for (const row of scopedCodexPlanRows.value) {
-    const snap = row.plan;
-    if (!snap) {
-      stale += 1;
-      continue;
-    }
-    const pct =
-      snap.codex_primary_used_percent ??
-      snap.codex_5h_used_percent ??
-      snap.codex_7d_used_percent ??
-      null;
-    if (pct != null && Number.isFinite(pct)) usedPct = Math.max(usedPct ?? 0, pct);
-    const reset = snap.codex_5h_reset_after_seconds ?? snap.codex_7d_reset_after_seconds ?? null;
-    if (reset != null && Number.isFinite(reset)) resetSecs = Math.min(resetSecs ?? reset, reset);
-  }
-  return {
-    usedPct,
-    remainingPct: usedPct == null ? null : Math.max(0, 100 - usedPct),
-    resetSecs,
-    stale,
-  };
-});
-
-const expiringCredentialCount = computed(() => {
-  const now = Math.floor(Date.now() / 1000);
-  return scopedPools.value.reduce(
-    (sum, pool) =>
-      sum +
-      pool.credentials.filter(
-        (cred) => cred.oauth_expires_at != null && cred.oauth_expires_at - now < 24 * 3600,
-      ).length,
-    0,
-  );
-});
-
-const slowProviderCount = computed(
-  () => scopedProviderRows.value.filter((row) => row.avg_latency_ms >= 10_000).length,
-);
-
-const fuelCards = computed<FuelCard[]>(() => {
-  const cards: FuelCard[] = [];
-
-  const codex = codexQuotaSummary.value;
-  cards.push({
-    key: "codex",
-    label: t("fuel.codex.label"),
-    value:
-      codex.remainingPct == null
-        ? t("fuel.codex.unknown")
-        : t("fuel.codex.left", { pct: codex.remainingPct.toFixed(0) }),
-    detail:
-      codex.resetSecs != null
-        ? t("fuel.codex.nextWave", { duration: formatDurationSeconds(codex.resetSecs) })
-        : codex.stale
-          ? t("fuel.codex.refreshPlan")
-          : t("fuel.codex.waiting"),
-    tone:
-      codex.remainingPct == null
-        ? "muted"
-        : codex.remainingPct < 15
-          ? "bad"
-          : codex.remainingPct < 35
-            ? "warn"
-            : "good",
-    to: "/ui/providers",
-  });
-
-  cards.push({
-    key: "capacity",
-    label: t("fuel.capacity.label"),
-    value: t("fuel.capacity.ready", { count: activeCredentialTotal.value }),
-    detail:
-      blockedCredentialTotal.value > 0
-        ? t("fuel.capacity.limited", { count: blockedCredentialTotal.value })
-        : t("fuel.capacity.noBlocked"),
-    tone:
-      activeCredentialTotal.value === 0
-        ? "bad"
-        : blockedCredentialTotal.value > 0
-          ? "warn"
-          : "good",
-    to: "/ui/providers",
-  });
-
-  const attention =
-    expiringCredentialCount.value + slowProviderCount.value + providerIssueCount.value;
-  cards.push({
-    key: "attention",
-    label: t("fuel.attention.label"),
-    value: attention ? t("fuel.attention.items", { count: attention }) : t("fuel.attention.clear"),
-    detail:
-      [
-        expiringCredentialCount.value
-          ? t("fuel.attention.expiring", { count: expiringCredentialCount.value })
-          : "",
-        slowProviderCount.value ? t("fuel.attention.slow", { count: slowProviderCount.value }) : "",
-        providerIssueCount.value
-          ? t("fuel.attention.unhealthy", { count: providerIssueCount.value })
-          : "",
-      ]
-        .filter(Boolean)
-        .join(" · ") || t("fuel.attention.stable"),
-    tone: attention ? "warn" : "good",
-    to: "/ui/providers",
-  });
-
-  return cards;
-});
-
-function fuelToneClass(tone: FuelCard["tone"]) {
-  if (tone === "good") return "border-emerald-200 bg-emerald-50/60";
-  if (tone === "warn") return "border-amber-200 bg-amber-50/70";
-  if (tone === "bad") return "border-red-200 bg-red-50/70";
-  return "border-vp-border bg-vp-surface";
-}
 
 const overviewInsights = computed<OverviewInsight[]>(() => {
   const items: OverviewInsight[] = [];
@@ -767,11 +588,6 @@ const liveStateTextClass = computed(() => {
   if (hasProviderAttention.value) return "text-amber-700";
   return "text-vp-text";
 });
-const liveTrafficReadinessLabel = computed(() => {
-  if (!online.value) return t("live.readinessOffline");
-  if (hasProviderAttention.value) return t("live.readinessAttention");
-  return t("live.readinessReady");
-});
 const visibleTakeoverClients = computed<("claude" | "codex")[]>(() => {
   if (view.value === "claude") return ["claude"];
   if (view.value === "codex") return ["codex"];
@@ -800,13 +616,6 @@ function fmt(ms: number | null) {
   return ms != null ? `${ms}ms` : "—";
 }
 
-function statusColor(code: number | null) {
-  if (!code) return "text-slate-500";
-  if (code < 300) return "text-emerald-600";
-  if (code < 500) return "text-amber-600";
-  return "text-red-600";
-}
-
 function providerCircuitState(row: DashboardStats["per_provider"][number]): string {
   const provider = healthByProvider.value.get(row.provider_id);
   const pool = poolByProviderId.value.get(row.provider_id);
@@ -827,32 +636,6 @@ function credentialPulse(row: DashboardStats["per_provider"][number]): string {
     return `${pool.available_credentials}/${pool.enabled_credentials}`;
   }
   return t("providers.readyCount", { count: pool.available_credentials });
-}
-
-function localeInt(n: unknown): string {
-  if (n === undefined || n === null) return "—";
-  const x = typeof n === "bigint" ? Number(n) : Number(n);
-  if (Number.isNaN(x)) return "—";
-  return x.toLocaleString();
-}
-
-function formatUsd(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "$0";
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  if (n < 10) return `$${n.toFixed(2)}`;
-  return `$${n.toFixed(1)}`;
-}
-
-function formatDurationSeconds(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  const remM = m % 60;
-  if (h < 48) return remM ? `${h}h ${remM}m` : `${h}h`;
-  const d = Math.floor(h / 24);
-  return `${d}d`;
 }
 
 function rateOr(n: unknown, fallback = 1): number {

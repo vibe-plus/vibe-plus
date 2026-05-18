@@ -29,16 +29,12 @@ const activeLabel = computed(() => {
   if (props.client === "claude") return t("active.claude");
   return t("active.default");
 });
-const animatedActiveChars = computed(() => {
-  const chars = Array.from(activeLabel.value);
-  const activeIndex = chars.length === 0 ? 0 : trafficPhase.value % chars.length;
-
-  return chars.map((char, index) => ({
+const animatedActiveChars = computed(() =>
+  Array.from(activeLabel.value).map((char, index) => ({
     char,
-    index,
-    key: `${props.client}-${index}-${char}`,
-  }));
-});
+    key: `${props.client}-${trafficPhase.value}-${index}-${char}`,
+  })),
+);
 const stateLabel = computed(() => {
   if (error.value) return t("state.error");
   if (!status.value) return "...";

@@ -48,11 +48,33 @@ export interface ProviderProtocol {
   model_aliases: ModelAlias[];
 }
 
+export interface Upstream {
+  id: string;
+  provider_id: string;
+  kind: ProviderKind;
+  base_url: string;
+  credential_id: string | null;
+  cb_key: string;
+  enabled: boolean;
+  priority: number;
+}
+
+export interface ProviderUpstreamSummary {
+  provider_id: string;
+  total_upstreams: number;
+  enabled_upstreams: number;
+  endpoint_count: number;
+  credential_count: number;
+  sample_upstreams: Upstream[];
+}
+
 export interface Provider {
   id: string;
   name: string;
   group_name: string | null;
   avatar_url: string | null;
+  upstreams: Upstream[];
+  upstream_summary: ProviderUpstreamSummary | null;
   kind: ProviderKind;
   base_url: string;
   protocols?: ProviderProtocol[];
@@ -99,6 +121,7 @@ export interface ProvidersOverview {
   health: ProviderHealthSummary[];
   pools: ProviderAuthPoolSummary[];
   credentials: Record<string, Credential[]>;
+  upstreams: Record<string, Upstream[]>;
   codex_plans: Record<string, ProviderCodexPlanItem[]>;
 }
 export type AppLogLevel = "debug" | "info" | "warn" | "error";
@@ -747,9 +770,13 @@ export const api = {
         method: "POST",
       }),
     refreshModels: (id: string) =>
-      req<Credential>(`/_vp/credentials/${id}/models/refresh`, { method: "POST" }),
+      req<Credential>(`/_vp/credentials/${id}/models/refresh`, {
+        method: "POST",
+      }),
     refreshBalance: (id: string) =>
-      req<Credential>(`/_vp/credentials/${id}/balance/refresh`, { method: "POST" }),
+      req<Credential>(`/_vp/credentials/${id}/balance/refresh`, {
+        method: "POST",
+      }),
     login: (id: string, body: CredentialLoginRequest) =>
       req<CredentialLoginResponse>(`/_vp/credentials/${id}/login`, {
         method: "POST",

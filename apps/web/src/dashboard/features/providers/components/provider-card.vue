@@ -7,6 +7,7 @@ import type {
   CredentialPoolStatus,
   Provider,
   ProviderHealthSummary,
+  Upstream,
 } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderLogo from "../../../components/provider-logo.vue";
@@ -108,6 +109,7 @@ const visibleCreds = computed(() => sortedCreds.value.slice(0, MAX_VISIBLE_CREDS
 const hiddenCredCount = computed(() => Math.max(0, props.creds.length - MAX_VISIBLE_CREDS));
 const providerCircuitState = computed(() => props.health?.cumulative?.circuit_state ?? "closed");
 const providerEnabled = computed(() => props.card.provider.enabled);
+const providerUpstreamSummary = computed(() => props.card.provider.upstream_summary);
 const remoteModelCount = computed(() => props.card.provider.remote_models?.length ?? 0);
 const aliasCount = computed(() => props.card.provider.model_aliases?.length ?? 0);
 const nowTs = ref(Math.floor(Date.now() / 1000));
@@ -195,7 +197,14 @@ function circuitCooldownText(totalSeconds: number | null | undefined): string {
   return t("circuit.untilRetry", { duration: formatCooldown(totalSeconds) });
 }
 
-function modelInventoryLabel(provider: Provider): string {
+function upstreamInventoryLabel(provider: Provider): string {
+  const summary = providerUpstreamSummary.value;
+  if (summary) {
+    return t("inventory.upstreams", {
+      total: summary.total_upstreams,
+      enabled: summary.enabled_upstreams,
+    });
+  }
   if (remoteModelCount.value > 0) return t("inventory.models", { count: remoteModelCount.value });
   if (aliasCount.value > 0) return t("inventory.aliases", { count: aliasCount.value });
   return provider.passthrough_mode ? t("inventory.passthrough") : t("inventory.empty");
@@ -277,7 +286,10 @@ const providerStateClass = computed(() => {
 const providerStateBadge = computed(() => {
   if (!providerEnabled.value) return { icon: "pause", label: t("state.disabled") };
   if (providerCircuitState.value !== "closed") {
-    return { icon: "clock", label: circuitCooldownText(providerPool.value.cooldownMax) };
+    return {
+      icon: "clock",
+      label: circuitCooldownText(providerPool.value.cooldownMax),
+    };
   }
   return { icon: "circle", label: t("state.idle") };
 });
@@ -317,7 +329,9 @@ function credentialLine(credential: Credential): string {
   const pool = poolRowFor(credential.id);
   if (pool?.circuit_open)
     parts.push(
-      t("credentialDetail.open", { detail: circuitCooldownText(pool.circuit_open_remaining_secs) }),
+      t("credentialDetail.open", {
+        detail: circuitCooldownText(pool.circuit_open_remaining_secs),
+      }),
     );
   if (pool?.is_rate_limited) parts.push(rateLimitResetLabel(pool));
   return parts.join(" · ");
@@ -330,7 +344,9 @@ function rateLimitResetLabel(pool: CredentialPoolStatus | undefined): string {
   );
   if (!resets.length) return t("credentialDetail.rateLimited");
   const left = Math.max(0, Math.min(...resets) - nowTs.value);
-  return t("credentialDetail.rateLimitedFor", { duration: formatShortDuration(left) });
+  return t("credentialDetail.rateLimitedFor", {
+    duration: formatShortDuration(left),
+  });
 }
 
 function credentialTrafficUnits(credential: Credential): number {
@@ -377,7 +393,9 @@ function credentialStatusText(credential: Credential): string {
   const activeCount = activeCredentialCount(credential.id);
   if (activeCount) return t("credentialDetail.active", { count: activeCount });
   if (pool?.rolling_requests)
-    return t("credentialDetail.requests", { count: pool.rolling_requests.toLocaleString() });
+    return t("credentialDetail.requests", {
+      count: pool.rolling_requests.toLocaleString(),
+    });
   return t("credentialDetail.standby");
 }
 
@@ -397,7 +415,11 @@ function credentialTrafficText(credential: Credential): string {
     const ok = pool.rolling_requests
       ? Math.round((pool.rolling_successes / Math.max(1, pool.rolling_requests)) * 100)
       : 0;
-    parts.push(t("credentialDetail.requests", { count: pool.rolling_requests.toLocaleString() }));
+    parts.push(
+      t("credentialDetail.requests", {
+        count: pool.rolling_requests.toLocaleString(),
+      }),
+    );
     parts.push(t("credentialDetail.success", { pct: ok }));
     if (pool.rolling_avg_latency_ms != null)
       parts.push(`${Math.round(pool.rolling_avg_latency_ms)}ms`);
@@ -531,7 +553,7 @@ onUnmounted(() => {
                 <p class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <span>{{ protocolSummary }}</span>
                   <span class="hidden sm:inline">·</span>
-                  <span>{{ modelInventoryLabel(card.provider) }}</span>
+                  <span>{{ upstreamInventoryLabel(card.provider) }}</span>
                   <span class="hidden sm:inline">·</span>
                   <span>{{ speedtestLabel(card.provider) }}</span>
                 </p>
@@ -576,7 +598,8 @@ onUnmounted(() => {
                 class="h-8 px-2"
                 @click="emit('add-cred', card.provider.id)"
               >
-                <VpIcon name="plus" size-class="size-4" /> {{ t("actions.add") }}
+                <VpIcon name="plus" size-class="size-4" />
+                {{ t("actions.add") }}
               </UiButton>
             </div>
             <p class="mt-1 text-sm text-foreground">{{ credentialSummary }}</p>
@@ -590,9 +613,20 @@ onUnmounted(() => {
                 card.sortReason || `score ${Math.round(card.qualityScore)}`
               }}</span>
             </div>
-            <p class="mt-1 text-sm text-foreground">{{ card.provider.base_url }}</p>
+            <p class="mt-1 text-sm text-foreground">
+              {{ card.provider.base_url }}
+            </p>
             <p class="mt-1 text-xs text-muted-foreground">
-              {{ websocketLabel(card.provider) }} · {{ endpointModeLabel(card.provider) }}
+              {{ websocketLabel(card.provider) }} ·
+              {{ endpointModeLabel(card.provider) }}
+            </p>
+            <p v-if="providerUpstreamSummary" class="mt-1 text-xs text-muted-foreground">
+              {{
+                t("upstream.summary", {
+                  total: providerUpstreamSummary.total_upstreams,
+                  enabled: providerUpstreamSummary.enabled_upstreams,
+                })
+              }}
             </p>
           </div>
         </div>
@@ -686,7 +720,8 @@ onUnmounted(() => {
       "aliases": "{count} aliases",
       "empty": "empty",
       "models": "{count} models",
-      "passthrough": "passthrough"
+      "passthrough": "passthrough",
+      "upstreams": "{enabled}/{total} upstreams"
     },
     "protocol": {
       "chat": "Chat",
@@ -695,8 +730,8 @@ onUnmounted(() => {
       "responses": "Responses",
       "unknown": "Unknown"
     },
-    "routing": { "routeHints": "{count} route hints" },
-    "sections": { "credentials": "Credentials", "routing": "Routing" },
+    "routing": { "routeHints": "{count} runtime units" },
+    "sections": { "credentials": "Credentials", "routing": "Upstreams" },
     "speed": { "untested": "untested" },
     "state": { "disabled": "disabled", "idle": "idle" },
     "support": {
@@ -704,6 +739,9 @@ onUnmounted(() => {
       "native": "native",
       "none": "No direct tool support",
       "unsupported": "unsupported"
+    },
+    "upstream": {
+      "summary": "{total} upstreams · {enabled} enabled"
     },
     "time": { "now": "now" },
     "websocket": {
@@ -722,7 +760,11 @@ onUnmounted(() => {
       "on": "开启",
       "reset": "重置"
     },
-    "circuit": { "open": "熔断中", "pendingProbe": "等待探测", "untilRetry": "{duration} 后重试" },
+    "circuit": {
+      "open": "熔断中",
+      "pendingProbe": "等待探测",
+      "untilRetry": "{duration} 后重试"
+    },
     "credentialDetail": {
       "active": "活跃 {count}",
       "disabledWithReason": "已禁用 · {reason}",
@@ -753,7 +795,8 @@ onUnmounted(() => {
       "aliases": "{count} 个别名",
       "empty": "空",
       "models": "{count} 个模型",
-      "passthrough": "透传"
+      "passthrough": "透传",
+      "upstreams": "{enabled}/{total} 个上游"
     },
     "protocol": {
       "chat": "聊天",
@@ -762,8 +805,8 @@ onUnmounted(() => {
       "responses": "响应",
       "unknown": "未知"
     },
-    "routing": { "routeHints": "{count} 条路由提示" },
-    "sections": { "credentials": "凭证", "routing": "路由" },
+    "routing": { "routeHints": "{count} 个运行单元" },
+    "sections": { "credentials": "凭证", "routing": "上游" },
     "speed": { "untested": "未测试" },
     "state": { "disabled": "已禁用", "idle": "空闲" },
     "support": {
@@ -771,6 +814,9 @@ onUnmounted(() => {
       "native": "原生",
       "none": "无直接工具支持",
       "unsupported": "不支持"
+    },
+    "upstream": {
+      "summary": "{total} 个上游 · {enabled} 个启用"
     },
     "time": { "now": "现在" },
     "websocket": {

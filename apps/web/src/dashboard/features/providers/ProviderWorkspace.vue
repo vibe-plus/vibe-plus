@@ -139,7 +139,11 @@ function resetAuthJsonImportUi() {
   authJsonDragActive.value = false;
 }
 
-type OauthTriple = { access: string; refresh: string | null; exp: number | null };
+type OauthTriple = {
+  access: string;
+  refresh: string | null;
+  exp: number | null;
+};
 
 function extractOauthTriple(v: Record<string, unknown>): OauthTriple | null {
   const tokens = v.tokens;
@@ -420,7 +424,10 @@ async function refreshProviderModels(providerId: string) {
 
 async function refreshCredentialModels(credentialId: string) {
   if (credModelRefreshBusy.value[credentialId]) return;
-  credModelRefreshBusy.value = { ...credModelRefreshBusy.value, [credentialId]: true };
+  credModelRefreshBusy.value = {
+    ...credModelRefreshBusy.value,
+    [credentialId]: true,
+  };
   try {
     const updated = await api.credentials.refreshModels(credentialId);
     const pid = updated.provider_id;
@@ -443,7 +450,10 @@ async function refreshCredentialModels(credentialId: string) {
 
 async function refreshCredentialBalance(credentialId: string) {
   if (credBalanceRefreshBusy.value[credentialId]) return;
-  credBalanceRefreshBusy.value = { ...credBalanceRefreshBusy.value, [credentialId]: true };
+  credBalanceRefreshBusy.value = {
+    ...credBalanceRefreshBusy.value,
+    [credentialId]: true,
+  };
   try {
     const updated = await api.credentials.refreshBalance(credentialId);
     const pid = updated.provider_id;
@@ -627,6 +637,7 @@ async function toggleProviderEnabled(p: Provider) {
     await api.providers.update(p.id, {
       name: p.name,
       group_name: p.group_name ?? null,
+      avatar_url: p.avatar_url ?? null,
       kind: p.kind,
       base_url: p.base_url,
       auth_ref: null,
@@ -742,7 +753,10 @@ async function doCredLogin() {
   credLoginBusy.value = true;
   credLoginNote.value = null;
   try {
-    const res = await api.credentials.login(editCred.value.id, { username, password });
+    const res = await api.credentials.login(editCred.value.id, {
+      username,
+      password,
+    });
     credLoginNote.value = res.ok ? t("login.success") : (res.note ?? t("login.failed"));
     if (res.ok) credLoginPassword.value = "";
   } catch (e) {
@@ -828,7 +842,11 @@ async function toggleCredentialEnabled(cred: Credential) {
 
 function circuitBadge(state: string, remainingSecs?: number | bigint | null) {
   if (state === "closed") {
-    return { label: "ok", detail: "", cls: "bg-emerald-50 text-emerald-800 border-emerald-200" };
+    return {
+      label: "ok",
+      detail: "",
+      cls: "bg-emerald-50 text-emerald-800 border-emerald-200",
+    };
   }
   if (state === "half-open") {
     return {

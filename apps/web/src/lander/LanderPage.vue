@@ -3,36 +3,63 @@ import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { RouterLink } from "vue-router";
 import logoUrl from "../dashboard/assets/brand/vibe-plus-icon-soft-mint.svg";
+import claudeCodeIconUrl from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
+import codexIconUrl from "@lobehub/icons-static-svg/icons/codex-color.svg";
+import openCodeIconUrl from "@lobehub/icons-static-svg/icons/opencode.svg";
+import VpIcon from "../dashboard/components/vp-icon.vue";
+import type { vp_icon_name } from "../dashboard/components/vp-icon.vue";
 
 const { t } = useI18n();
 
-const features = computed(() => [
+const features = computed<{ icon: vp_icon_name; title: string; desc: string }[]>(() => [
   {
-    icon: "🔀",
+    icon: "route",
     title: t("featureItems.smartRouting.title"),
     desc: t("featureItems.smartRouting.desc"),
   },
-  { icon: "🔑", title: t("featureItems.multiKey.title"), desc: t("featureItems.multiKey.desc") },
-  { icon: "📊", title: t("featureItems.usage.title"), desc: t("featureItems.usage.desc") },
-  { icon: "⚡", title: t("featureItems.rateLimit.title"), desc: t("featureItems.rateLimit.desc") },
+  { icon: "key", title: t("featureItems.multiKey.title"), desc: t("featureItems.multiKey.desc") },
+  { icon: "activity", title: t("featureItems.usage.title"), desc: t("featureItems.usage.desc") },
+  { icon: "zap", title: t("featureItems.rateLimit.title"), desc: t("featureItems.rateLimit.desc") },
   {
-    icon: "🛡️",
+    icon: "shield",
     title: t("featureItems.circuitBreaker.title"),
     desc: t("featureItems.circuitBreaker.desc"),
   },
   {
-    icon: "🌐",
+    icon: "globe",
     title: t("featureItems.wireFormats.title"),
     desc: t("featureItems.wireFormats.desc"),
   },
-  { icon: "🖥️", title: t("featureItems.dashboard.title"), desc: t("featureItems.dashboard.desc") },
-  { icon: "🔌", title: t("featureItems.takeover.title"), desc: t("featureItems.takeover.desc") },
-  { icon: "📦", title: t("featureItems.binary.title"), desc: t("featureItems.binary.desc") },
+  {
+    icon: "layout-dashboard",
+    title: t("featureItems.dashboard.title"),
+    desc: t("featureItems.dashboard.desc"),
+  },
+  { icon: "plug", title: t("featureItems.takeover.title"), desc: t("featureItems.takeover.desc") },
+  { icon: "package", title: t("featureItems.binary.title"), desc: t("featureItems.binary.desc") },
 ]);
 const clients = [
-  { icon: "🤖", name: "Claude Code", cmd: "claude" },
-  { icon: "💡", name: "OpenCode", cmd: "opencode" },
-  { icon: "⚡", name: "Codex CLI", cmd: "codex" },
+  {
+    iconUrl: claudeCodeIconUrl,
+    iconClass: "",
+    iconWrapClass: "bg-white/5 border-white/10",
+    name: "Claude Code",
+    cmd: "claude",
+  },
+  {
+    iconUrl: openCodeIconUrl,
+    iconClass: "",
+    iconWrapClass: "bg-white border-white",
+    name: "OpenCode",
+    cmd: "opencode",
+  },
+  {
+    iconUrl: codexIconUrl,
+    iconClass: "",
+    iconWrapClass: "bg-white/5 border-white/10",
+    name: "Codex CLI",
+    cmd: "codex",
+  },
 ];
 
 const cmds: { label: string; cmd: string }[] = [
@@ -219,7 +246,11 @@ function copy(text: string) {
             :key="f.title"
             class="rounded-2xl border border-white/5 bg-white/[0.03] p-5 hover:border-indigo-500/30 transition-colors"
           >
-            <div class="text-2xl mb-3">{{ f.icon }}</div>
+            <div
+              class="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-indigo-400/15 bg-indigo-400/10 text-indigo-300"
+            >
+              <VpIcon :name="f.icon" size-class="h-5 w-5" />
+            </div>
             <h3 class="font-semibold mb-1.5 text-sm sm:text-base">{{ f.title }}</h3>
             <p class="text-xs sm:text-sm text-gray-500 leading-relaxed">{{ f.desc }}</p>
           </div>
@@ -240,7 +271,17 @@ function copy(text: string) {
             :key="client.name"
             class="rounded-2xl border border-white/5 bg-white/[0.03] p-5 flex sm:flex-col items-center sm:items-center gap-4 sm:gap-3 text-left sm:text-center"
           >
-            <div class="text-3xl sm:text-4xl shrink-0">{{ client.icon }}</div>
+            <div
+              class="shrink-0 inline-flex h-12 w-12 items-center justify-center rounded-xl border"
+              :class="client.iconWrapClass"
+            >
+              <img
+                :src="client.iconUrl"
+                :alt="`${client.name} icon`"
+                class="h-7 w-7 object-contain"
+                :class="client.iconClass"
+              />
+            </div>
             <div class="min-w-0">
               <div class="font-semibold mb-1 text-sm sm:text-base">{{ client.name }}</div>
               <div
@@ -337,9 +378,9 @@ function copy(text: string) {
   "en": {
     "actions": {
       "copy": "copy",
-      "dashboard": "Dashboard →",
-      "getStarted": "Get started →",
-      "openDashboard": "Open Dashboard →",
+      "dashboard": "Dashboard",
+      "getStarted": "Install and vibe",
+      "openDashboard": "Open Dashboard",
       "viewGithub": "View on GitHub"
     },
     "clients": {
@@ -392,9 +433,9 @@ function copy(text: string) {
     "gateway": { "providers": "providers", "reqHr": "req/hr", "running": "Gateway running" },
     "hero": {
       "badge": "Local-first · No cloud required · Open source",
-      "description": "is a local AI API proxy that aggregates Claude Code, Codex, OpenCode, and any OpenAI-compatible provider into a single endpoint — with smart routing, multi-key rotation, and real-time usage tracking.",
-      "gradient": "all your AI subscriptions",
-      "titlePrefix": "One gateway for"
+      "description": "shows every slot directly inside Codex App, Codex CLI, and Claude Code. Others just proxy requests; vibe+ lets you see, switch, and trust the exact slot you are using.",
+      "gradient": "visible AI slots",
+      "titlePrefix": "The only gateway with"
     },
     "install": {
       "readyDescription": "Your local gateway is running on port {port} with {count} active provider(s).",
@@ -406,17 +447,17 @@ function copy(text: string) {
       },
       "readyTitle": "You're all set",
       "requires": "Requires Node.js 18+ or Bun.",
-      "thenOpen": "Then open the dashboard:",
-      "title": "Install in 30 seconds"
+      "thenOpen": "After install, open the dashboard and vibe:",
+      "title": "Install, then vibe"
     },
     "nav": { "features": "Features", "install": "Install" }
   },
   "zh-CN": {
     "actions": {
       "copy": "复制",
-      "dashboard": "控制台 →",
-      "getStarted": "开始使用 →",
-      "openDashboard": "打开控制台 →",
+      "dashboard": "控制台",
+      "getStarted": "安装后直接 vibe",
+      "openDashboard": "打开控制台",
       "viewGithub": "在 GitHub 查看"
     },
     "clients": {
@@ -466,9 +507,9 @@ function copy(text: string) {
     "gateway": { "providers": "供应商", "reqHr": "请求/小时", "running": "网关运行中" },
     "hero": {
       "badge": "本地优先 · 无需云服务 · 开源",
-      "description": "是一个本地 AI API 代理，可将 Claude Code、Codex、OpenCode 和任何 OpenAI 兼容供应商聚合到单一端点，并提供智能路由、多 Key 轮换和实时用量追踪。",
-      "gradient": "你的所有 AI 订阅",
-      "titlePrefix": "一个网关连接"
+      "description": "能把 slot 直接显示在 Codex App、Codex CLI 和 Claude Code 里。市面上的代理只会转发请求；vibe+ 让你看得见、切得准、知道当前到底在用哪个 slot。",
+      "gradient": "可见的 AI slot",
+      "titlePrefix": "唯一能显示"
     },
     "install": {
       "readyDescription": "你的本地网关正在端口 {port} 运行，已有 {count} 个供应商启用。",
@@ -480,8 +521,8 @@ function copy(text: string) {
       },
       "readyTitle": "已经准备好了",
       "requires": "需要 Node.js 18+ 或 Bun。",
-      "thenOpen": "然后打开控制台：",
-      "title": "30 秒安装"
+      "thenOpen": "安装后打开控制台，直接 vibe：",
+      "title": "安装后直接 vibe"
     },
     "nav": { "features": "功能", "install": "安装" }
   }
