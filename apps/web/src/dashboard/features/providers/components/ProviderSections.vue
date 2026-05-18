@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import type {
   Credential,
   CredentialPlanSnapshot,
@@ -10,9 +11,10 @@ import type {
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderCard from "./provider-card.vue";
 import UiBadge from "../../../components/ui/badge.vue";
-import UiButton from "../../../components/ui/button.vue";
 import UiCard from "../../../components/ui/card.vue";
 import type { ProviderSectionView } from "../types.ts";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   sections: ProviderSectionView[];
@@ -21,8 +23,6 @@ const props = defineProps<{
   loadingCreds: Record<string, boolean>;
   toggleBusy: Record<string, boolean>;
   circuitResetBusy: Record<string, boolean>;
-  speedtestBusy: Record<string, boolean>;
-  modelRefreshBusy: Record<string, boolean>;
   credModelRefreshBusy: Record<string, boolean>;
   credBalanceRefreshBusy: Record<string, boolean>;
   credToggleBusy: Record<string, boolean>;
@@ -30,17 +30,10 @@ const props = defineProps<{
   planSnapByCred: Record<string, CredentialPlanSnapshot | null>;
   activeCredentialCountsByProvider: Record<string, Record<string, number>>;
   providerRollingStatById: Map<string, NonNullable<ProviderHealthSummary["rolling"]>>;
-  detectVendorBusy: Record<string, boolean>;
   highlightedProviderId: string | null;
 }>();
 
 const emit = defineEmits<{
-  speedtestProviders: [providerIds: string[]];
-  refreshProviderModelsForProviders: [providerIds: string[]];
-  syncCreds: [providerId: string];
-  detectVendor: [providerId: string];
-  speedtestProvider: [providerId: string];
-  refreshModels: [providerId: string];
   refreshCredModels: [credentialId: string];
   refreshCredBalance: [credentialId: string];
   toggleProvider: [provider: Provider];
@@ -53,18 +46,6 @@ const emit = defineEmits<{
   deleteCred: [credential: Credential];
 }>();
 
-function providerIdsFromSection(section: ProviderSectionView): string[] {
-  return section.providers.map((card) => card.provider.id);
-}
-
-function sectionSpeedtestBusy(section: ProviderSectionView): boolean {
-  return providerIdsFromSection(section).some((providerId) => !!props.speedtestBusy[providerId]);
-}
-
-function sectionModelRefreshBusy(section: ProviderSectionView): boolean {
-  return providerIdsFromSection(section).some((providerId) => !!props.modelRefreshBusy[providerId]);
-}
-
 function poolRows(providerId: string): CredentialPoolStatus[] {
   return props.poolByProviderId[providerId]?.credentials ?? [];
 }
@@ -74,6 +55,10 @@ function tokensPerSec(providerId: string): number | null | undefined {
     props.providerRollingStatById.get(providerId)?.decode_output_tokens_per_sec ||
     props.providerRollingStatById.get(providerId)?.output_tokens_per_sec
   );
+}
+
+function fastestLabel(value: number | null): string {
+  return value == null ? t("summary.noSpeed") : t("summary.bestLatency", { ms: Math.round(value) });
 }
 </script>
 
@@ -98,52 +83,39 @@ function tokensPerSec(providerId: string): number | null | undefined {
             </div>
             <div class="flex flex-wrap gap-2 text-xs">
               <UiBadge variant="secondary">
-                {{ section.summary.enabledEndpoints }}/{{ section.summary.totalEndpoints }} active
+                {{
+                  t("summary.activeEndpoints", {
+                    enabled: section.summary.enabledEndpoints,
+                    total: section.summary.totalEndpoints,
+                  })
+                }}
               </UiBadge>
               <UiBadge v-if="section.summary.blockedCredentials" variant="outline">
-                {{ section.summary.blockedCredentials }} blocked creds
-              </UiBadge>
-              <UiBadge variant="outline">
-                {{ section.summary.availableCredentials }}/{{ section.summary.enabledCredentials }}
-                creds
+                {{ t("summary.blockedCredentials", { count: section.summary.blockedCredentials }) }}
               </UiBadge>
               <UiBadge variant="outline">
                 {{
-                  section.summary.fastestLatencyMs == null
-                    ? "no speed"
-                    : `${Math.round(section.summary.fastestLatencyMs)}ms best`
+                  t("summary.credentials", {
+                    available: section.summary.availableCredentials,
+                    enabled: section.summary.enabledCredentials,
+                  })
                 }}
               </UiBadge>
-              <UiBadge variant="outline">{{ section.summary.remoteModels }} models</UiBadge>
               <UiBadge variant="outline">
-                {{ section.summary.nativeEndpoints }} native ·
-                {{ section.summary.bridgedEndpoints }} bridge
+                {{ fastestLabel(section.summary.fastestLatencyMs) }}
+              </UiBadge>
+              <UiBadge variant="outline">{{
+                t("summary.models", { count: section.summary.remoteModels })
+              }}</UiBadge>
+              <UiBadge variant="outline">
+                {{
+                  t("summary.nativeBridge", {
+                    native: section.summary.nativeEndpoints,
+                    bridge: section.summary.bridgedEndpoints,
+                  })
+                }}
               </UiBadge>
             </div>
-          </div>
-          <div class="flex shrink-0 flex-wrap items-center gap-2">
-            <UiButton
-              size="sm"
-              variant="outline"
-              :disabled="sectionSpeedtestBusy(section)"
-              @click="emit('speedtestProviders', providerIdsFromSection(section))"
-            >
-              <VpIcon name="radar" size-class="size-4" :spin="sectionSpeedtestBusy(section)" />
-              Probe
-            </UiButton>
-            <UiButton
-              size="sm"
-              variant="outline"
-              :disabled="sectionModelRefreshBusy(section)"
-              @click="emit('refreshProviderModelsForProviders', providerIdsFromSection(section))"
-            >
-              <VpIcon
-                name="book-open"
-                size-class="size-4"
-                :spin="sectionModelRefreshBusy(section)"
-              />
-              Models
-            </UiButton>
           </div>
         </div>
       </div>
@@ -159,8 +131,6 @@ function tokensPerSec(providerId: string): number | null | undefined {
           :loading-creds="!!loadingCreds[card.provider.id]"
           :toggle-provider-busy="!!toggleBusy[card.provider.id]"
           :circuit-reset-busy="!!circuitResetBusy[card.provider.id]"
-          :speedtest-busy="!!speedtestBusy[card.provider.id]"
-          :model-refresh-busy="!!modelRefreshBusy[card.provider.id]"
           :cred-model-refresh-busy="credModelRefreshBusy"
           :cred-balance-refresh-busy="credBalanceRefreshBusy"
           :cred-toggle-busy="credToggleBusy"
@@ -168,16 +138,11 @@ function tokensPerSec(providerId: string): number | null | undefined {
           :plan-snap-by-cred="planSnapByCred"
           :active-credential-counts="activeCredentialCountsByProvider[card.provider.id] ?? {}"
           :tokens-per-sec="tokensPerSec(card.provider.id)"
-          :detect-vendor-busy="!!detectVendorBusy[card.provider.id]"
           :class="[
             highlightedProviderId === card.provider.id
               ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background'
               : '',
           ]"
-          @sync-creds="emit('syncCreds', $event)"
-          @detect-vendor="emit('detectVendor', $event)"
-          @speedtest-provider="emit('speedtestProvider', $event)"
-          @refresh-models="emit('refreshModels', $event)"
           @refresh-cred-models="emit('refreshCredModels', $event)"
           @refresh-cred-balance="emit('refreshCredBalance', $event)"
           @toggle-provider="emit('toggleProvider', $event)"
@@ -193,3 +158,30 @@ function tokensPerSec(providerId: string): number | null | undefined {
     </UiCard>
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "summary": {
+      "activeEndpoints": "{enabled}/{total} active",
+      "bestLatency": "{ms}ms best",
+      "blockedCredentials": "{count} blocked creds",
+      "credentials": "{available}/{enabled} creds",
+      "models": "{count} models",
+      "nativeBridge": "{native} native · {bridge} bridge",
+      "noSpeed": "no speed"
+    }
+  },
+  "zh-CN": {
+    "summary": {
+      "activeEndpoints": "{enabled}/{total} 已启用",
+      "bestLatency": "最快 {ms}ms",
+      "blockedCredentials": "{count} 个凭证受阻",
+      "credentials": "{available}/{enabled} 凭证可用",
+      "models": "{count} 个模型",
+      "nativeBridge": "{native} 原生 · {bridge} 桥接",
+      "noSpeed": "无测速"
+    }
+  }
+}
+</i18n>

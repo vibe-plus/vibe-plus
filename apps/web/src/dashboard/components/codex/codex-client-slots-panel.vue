@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
 import type {
   CodexSummaryClientKind,
   CodexSummaryConfig,
   CodexSummaryStyle,
 } from "../../api/client.ts";
 import VpIcon from "../vp-icon.vue";
+
+const { t } = useI18n();
 
 /** Gateway `codex.summary`: only used for ES (end recap), unrelated to BS begin status. */
 const endRecap = defineModel<CodexSummaryConfig>({ required: true });
@@ -260,8 +263,8 @@ const livePreviewText = computed(() => {
         <button
           class="vp-icon-btn !size-8"
           type="button"
-          title="Reload"
-          aria-label="Reload"
+          :title="t('actions.reload')"
+          :aria-label="t('actions.reload')"
           :disabled="readonly"
           @click="emit('refresh')"
         >
@@ -270,8 +273,8 @@ const livePreviewText = computed(() => {
         <button
           class="vp-icon-btn !size-8"
           type="button"
-          title="Reset draft"
-          aria-label="Reset draft"
+          :title="t('actions.resetDraft')"
+          :aria-label="t('actions.resetDraft')"
           :disabled="!dirty || readonly"
           @click="emit('reset')"
         >
@@ -280,8 +283,8 @@ const livePreviewText = computed(() => {
         <button
           class="vp-icon-btn !size-8"
           type="button"
-          title="Save"
-          aria-label="Save"
+          :title="t('actions.save')"
+          :aria-label="t('actions.save')"
           :disabled="!dirty || readonly"
           @click="emit('save')"
         >
@@ -299,20 +302,24 @@ const livePreviewText = computed(() => {
       <div class="rounded-xl border-2 border-sky-200/80 bg-sky-50/40 p-4 sm:p-5">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div class="min-w-0 flex-1">
-            <p class="text-xs font-semibold uppercase tracking-wide text-sky-900/90">BS · begin</p>
+            <p class="text-xs font-semibold uppercase tracking-wide text-sky-900/90">
+              {{ t("begin.title") }}
+            </p>
             <p class="mt-2 text-sm leading-relaxed text-vp-text">
-              Tells users <strong>which route is currently used</strong>: provider, credential
+              {{ t("begin.descriptionBefore") }} <strong>{{ t("begin.currentRoute") }}</strong
+              >{{ t("begin.descriptionAfter") }}
               label, requested model, actual upstream model, first-token latency (TTFS), and more.
               This is separate from the ES usage recap below.
             </p>
             <p class="mt-2 font-mono text-[10px] text-vp-muted">
               config: [codex] route_status_enabled — run
-              <code class="rounded bg-vp-surface px-1">bun gateway:restart</code> after saving to
+              <code class="rounded bg-vp-surface px-1">bun gateway:restart</code>
+              {{ t("begin.afterSavingTo") }}
               apply.
             </p>
           </div>
           <div class="flex shrink-0 flex-col items-stretch gap-3 sm:w-44">
-            <p class="text-center text-[11px] font-medium text-vp-muted">Begin status toggle</p>
+            <p class="text-center text-[11px] font-medium text-vp-muted">{{ t("begin.toggle") }}</p>
             <div class="inline-flex rounded-xl border border-vp-border bg-vp-surface p-1 shadow-sm">
               <button
                 type="button"
@@ -347,7 +354,7 @@ const livePreviewText = computed(() => {
           class="mt-4 rounded-lg border border-vp-border bg-vp-surface p-3"
           :class="!routeStatusEnabled ? 'opacity-45' : ''"
         >
-          <p class="mb-2 text-[10px] font-medium uppercase text-vp-muted">preview</p>
+          <p class="mb-2 text-[10px] font-medium uppercase text-vp-muted">{{ t("preview") }}</p>
           <pre
             class="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-vp-text"
             >{{ beginSlotPreview() }}</pre
@@ -357,9 +364,12 @@ const livePreviewText = computed(() => {
 
       <!-- ES -->
       <div class="rounded-xl border border-vp-border p-4 sm:p-5">
-        <p class="text-xs font-semibold uppercase tracking-wide text-vp-muted">ES · end recap</p>
+        <p class="text-xs font-semibold uppercase tracking-wide text-vp-muted">
+          {{ t("end.title") }}
+        </p>
         <p class="mt-2 text-sm leading-relaxed text-vp-text">
-          Appends a usage/speed recap only <strong>at the end of this turn</strong>; it does not
+          {{ t("end.descriptionBefore") }} <strong>{{ t("end.endOfTurn") }}</strong
+          >{{ t("end.descriptionAfter") }}
           describe the current route.
         </p>
         <p class="mt-2 font-mono text-[10px] text-vp-muted">
@@ -369,7 +379,7 @@ const livePreviewText = computed(() => {
         <div
           class="mt-4 flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"
         >
-          <p class="text-[11px] font-medium text-vp-muted">End recap master toggle</p>
+          <p class="text-[11px] font-medium text-vp-muted">{{ t("end.toggle") }}</p>
           <div
             class="inline-flex w-full max-w-xs rounded-xl border border-vp-border bg-vp-surface p-1 sm:ml-auto"
           >
@@ -404,7 +414,7 @@ const livePreviewText = computed(() => {
       </div>
 
       <div :class="!endRecap.enabled ? 'pointer-events-none opacity-45' : ''">
-        <p class="mb-2 text-xs font-medium text-vp-muted">ES · clients</p>
+        <p class="mb-2 text-xs font-medium text-vp-muted">{{ t("end.clients") }}</p>
         <div class="grid grid-cols-3 gap-2">
           <button
             v-for="ch in channelRows"
@@ -449,7 +459,7 @@ const livePreviewText = computed(() => {
             :disabled="readonly || !endRecap.enabled"
             @click="applyUnifiedStyle(st)"
           >
-            <span class="sr-only">style preview</span>
+            <span class="sr-only">{{ t("stylePreview") }}</span>
             <pre
               class="max-h-24 flex-1 overflow-hidden whitespace-pre-wrap break-words font-mono text-[9px] leading-snug text-vp-text sm:text-[10px]"
               :title="previewForStyle(st)"
@@ -460,7 +470,7 @@ const livePreviewText = computed(() => {
       </div>
 
       <div :class="!endRecap.enabled ? 'pointer-events-none opacity-45' : ''">
-        <p class="mb-2 text-xs font-medium text-vp-muted">ES · metrics</p>
+        <p class="mb-2 text-xs font-medium text-vp-muted">{{ t("end.metrics") }}</p>
         <div class="flex flex-wrap gap-2">
           <button
             v-for="m in metricRows"
@@ -482,7 +492,7 @@ const livePreviewText = computed(() => {
             type="button"
             class="ml-auto min-h-10 rounded-full border border-vp-border px-3 text-xs font-medium text-vp-text hover:bg-vp-bg-hover"
             :disabled="readonly || !endRecap.enabled"
-            title="Speed decimal places"
+            :title="t('speedDecimals')"
             @click="cycleSpeedDecimals()"
           >
             speed dp: {{ endRecap.speed_decimal_places }}
@@ -506,3 +516,54 @@ const livePreviewText = computed(() => {
     </div>
   </section>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "actions": { "reload": "Reload", "resetDraft": "Reset draft", "save": "Save" },
+    "begin": {
+      "afterSavingTo": "after saving to",
+      "currentRoute": "which route is currently used",
+      "descriptionAfter": ": provider, credential",
+      "descriptionBefore": "Tells users",
+      "title": "BS · begin",
+      "toggle": "Begin status toggle"
+    },
+    "end": {
+      "clients": "ES · clients",
+      "descriptionAfter": "; it does not",
+      "descriptionBefore": "Appends a usage/speed recap only",
+      "endOfTurn": "at the end of this turn",
+      "metrics": "ES · metrics",
+      "title": "ES · end recap",
+      "toggle": "End recap master toggle"
+    },
+    "preview": "preview",
+    "speedDecimals": "Speed decimal places",
+    "stylePreview": "style preview"
+  },
+  "zh-CN": {
+    "actions": { "reload": "重新加载", "resetDraft": "重置草稿", "save": "保存" },
+    "begin": {
+      "afterSavingTo": "保存后执行",
+      "currentRoute": "当前使用的路由",
+      "descriptionAfter": "：供应商、凭证",
+      "descriptionBefore": "告诉用户",
+      "title": "BS · 开始状态",
+      "toggle": "开始状态开关"
+    },
+    "end": {
+      "clients": "ES · 客户端",
+      "descriptionAfter": "；不会",
+      "descriptionBefore": "只在",
+      "endOfTurn": "本轮结束时",
+      "metrics": "ES · 指标",
+      "title": "ES · 结束摘要",
+      "toggle": "结束摘要总开关"
+    },
+    "preview": "预览",
+    "speedDecimals": "速度小数位",
+    "stylePreview": "样式预览"
+  }
+}
+</i18n>

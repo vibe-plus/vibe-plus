@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
 import { defineConfig } from "vite-plus";
 import vue from "@vitejs/plugin-vue";
+import VueI18nPlugin from "@intlify/unplugin-vue-i18n/vite";
 import tailwindcss from "@tailwindcss/vite";
 import singleton from "unplugin-singleton/vite";
 import caddyLocalhost from "unplugin-caddy-localhost/vite";
@@ -73,6 +74,11 @@ export default defineConfig({
     caddyLocalhost(),
     ...(process.env.NODE_ENV === "test" || process.env.VITEST ? [] : [singleton()]),
     vue(),
+    VueI18nPlugin({
+      runtimeOnly: false,
+      compositionOnly: true,
+      defaultSFCLang: "json",
+    }),
     tailwindcss(),
     generateUiManifest(pkg.version),
   ],

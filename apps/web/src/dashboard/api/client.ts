@@ -20,12 +20,6 @@ export function apiUrl(path: string, base = BASE): string {
   return base + path;
 }
 
-export function wsUrl(path: string, base = BASE): string {
-  const url = new URL(apiUrl(path, base));
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString();
-}
-
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(apiUrl(path), {
     headers: { "content-type": "application/json" },
@@ -42,7 +36,6 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export type ProviderKind = "anthropic" | "openai-chat" | "openai-responses" | "gemini-native";
-export type ForwardStrategy = "rotate" | "race" | "fallback";
 
 export interface ModelAlias {
   alias: string;
@@ -100,32 +93,6 @@ export interface ProviderInput {
   model_aliases: ModelAlias[];
 }
 
-export interface ProviderSyncPreview {
-  provider: Provider;
-  display_name: string;
-  avatar_url: string | null;
-  balance: {
-    currency: string;
-    balance: string | null;
-    remaining: string | null;
-    used: string | null;
-    total: string | null;
-    period: string | null;
-    note: string | null;
-  } | null;
-  usage: {
-    currency: string;
-    balance: string | null;
-    remaining: string | null;
-    used: string | null;
-    total: string | null;
-    period: string | null;
-    note: string | null;
-  } | null;
-  supported_protocols: string[];
-  note: string;
-}
-
 export interface ProvidersOverview {
   rolling_hours: number;
   providers: Provider[];
@@ -136,9 +103,19 @@ export interface ProvidersOverview {
 }
 export type AppLogLevel = "debug" | "info" | "warn" | "error";
 
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
 export interface AppLogEvent {
   ts: number;
   level: AppLogLevel;
+  event_type?: string;
+  payload?: JsonValue;
   category: string;
   message: string;
   detail: string | null;
@@ -178,100 +155,6 @@ export interface ClientTakeoverResult {
   config_path: string;
   backup_path: string | null;
   status: ClientStatus;
-}
-
-export interface VibeConfig {
-  server: {
-    host: string;
-    port: number;
-  };
-  failover: {
-    failure_threshold: number;
-    success_threshold: number;
-    open_timeout_secs: number;
-    inject_cache: boolean;
-  };
-  log: {
-    bodies: boolean;
-    redact_sensitive_headers: boolean;
-  };
-  codex?: {
-    route_status_enabled: boolean;
-    summary: CodexSummaryConfig;
-  };
-  claude?: {
-    native: ClaudeNativeConfig;
-    summary: CodexSummaryConfig;
-    routing: ClaudeRoutingConfig;
-    fallback: ClaudeFallbackConfig;
-    request: ClaudeRequestConfig;
-    status_line: ClaudeStatusLineConfig;
-  };
-}
-
-export type ClaudeNativeEffort = "default" | "max";
-
-export interface ClaudeNativeConfig {
-  manage_settings_json: boolean;
-  proxy_env: boolean;
-  clear_model_overrides_on_takeover: boolean;
-  write_model_overrides_on_takeover: boolean;
-  default_model: string | null;
-  small_fast_model: string | null;
-  haiku_model: string | null;
-  sonnet_model: string | null;
-  opus_model: string | null;
-  max_output_tokens: number | null;
-  disable_nonessential_traffic: boolean;
-  enable_tool_search: boolean;
-  experimental_agent_teams: boolean;
-  effort: ClaudeNativeEffort;
-  disable_auto_updater: boolean;
-  hide_attribution: boolean;
-}
-
-export interface ClaudeRoutingConfig {
-  enabled: boolean;
-  default_model: string;
-  background_model: string;
-  think_model: string;
-  long_context_model: string;
-  long_context_threshold_tokens: number;
-  web_search_model: string;
-  image_model: string;
-  route_haiku_to_background: boolean;
-  enable_subagent_model_tag: boolean;
-}
-
-export interface ClaudeFallbackConfig {
-  enabled: boolean;
-  default: string[];
-  background: string[];
-  think: string[];
-  long_context: string[];
-  web_search: string[];
-  image: string[];
-}
-
-export type ClaudeThinkingPolicy = "preserve" | "remove" | "force_enabled";
-
-export interface ClaudeRequestConfig {
-  api_timeout_ms: number;
-  max_tokens_cap: number | null;
-  default_max_tokens: number | null;
-  disable_web_search: boolean;
-  thinking_policy: ClaudeThinkingPolicy;
-  thinking_budget_tokens: number | null;
-}
-
-export type ClaudeStatusLineStyle = "compact" | "detailed";
-
-export interface ClaudeStatusLineConfig {
-  enabled: boolean;
-  style: ClaudeStatusLineStyle;
-  show_provider: boolean;
-  show_model: boolean;
-  show_usage: boolean;
 }
 
 export type CodexSummaryClientKind = "app" | "cli" | "unknown";
@@ -315,6 +198,56 @@ export interface CodexSummaryConfig {
   clients: Record<CodexSummaryClientKind, CodexSummaryClientConfig>;
 }
 
+export interface RealtimeRequest {
+  id: string;
+  started_at: number;
+  updated_at: number;
+  app: string | null;
+  provider_id: string | null;
+  credential_id: string | null;
+  requested_model: string | null;
+  upstream_model: string | null;
+  wire: string | null;
+  route_prefix: string | null;
+  client_transport: string | null;
+  phase: string;
+  status_code: number | null;
+  error: string | null;
+  active_output_tokens_per_sec: number | null;
+  active_cost_usd_per_hour: number | null;
+  active_upstream_bytes_per_sec: number;
+  active_downstream_bytes_per_sec: number;
+  output_tokens_so_far: number;
+  upstream_bytes_so_far: number;
+  client_bytes_so_far: number;
+  upstream_first_byte_ms: number | null;
+  client_first_write_ms: number | null;
+}
+export interface RealtimeProvider {
+  provider_id: string;
+  provider_name: string;
+  active_requests: number;
+  active_output_tokens_per_sec: number;
+  active_cost_usd_per_hour: number | null;
+  active_upstream_bytes_per_sec: number;
+  active_downstream_bytes_per_sec: number;
+  output_tokens_so_far: number;
+  upstream_bytes_so_far: number;
+  client_bytes_so_far: number;
+}
+export interface RealtimeSnapshot {
+  now: number;
+  active_requests: RealtimeRequest[];
+  recent_requests: RealtimeRequest[];
+  providers: RealtimeProvider[];
+  active_count: number;
+  active_output_tokens_per_sec: number;
+  active_cost_usd_per_hour: number | null;
+  active_upstream_bytes_per_sec: number;
+  active_downstream_bytes_per_sec: number;
+  codex_ws_active: number;
+  codex_last_transport: string | null;
+}
 export interface UsageSummary {
   range: string;
   requests: number;
@@ -741,14 +674,6 @@ export interface CodexConfigSettings {
 export const api = {
   ping: () => req<{ ok: boolean }>("/health"),
   status: () => req<Status>("/status"),
-  config: {
-    get: () => req<VibeConfig>("/_vp/config"),
-    save: (input: VibeConfig) =>
-      req<VibeConfig>("/_vp/config", {
-        method: "PUT",
-        body: JSON.stringify(input),
-      }),
-  },
   providers: {
     list: () => req<Provider[]>("/_vp/providers"),
     overview: (hours = 24) => req<ProvidersOverview>(`/_vp/providers/overview?hours=${hours}`),
@@ -773,28 +698,8 @@ export const api = {
       req<ProviderHealth>(`/_vp/providers/${id}/circuit/reset`, {
         method: "POST",
       }),
-    speedtest: (id: string, timeoutSecs?: number) =>
-      req<Provider>(`/_vp/providers/${id}/speedtest`, {
-        method: "POST",
-        body: JSON.stringify({ timeout_secs: timeoutSecs ?? null }),
-      }),
-    probe: (id: string, timeoutSecs?: number) =>
-      req<Provider>(`/_vp/providers/${id}/probe`, {
-        method: "POST",
-        body: JSON.stringify({ timeout_secs: timeoutSecs ?? null }),
-      }),
-    detectVendor: (id: string) =>
-      req<{ upstream_vendor: string | null; updated_credentials: number; base_url: string }>(
-        `/_vp/providers/${id}/detect-vendor`,
-        { method: "POST" },
-      ),
     refreshModels: (id: string) =>
       req<Provider>(`/_vp/providers/${id}/models/refresh`, { method: "POST" }),
-    sync: (id: string, scope: "all" | "brand" | "protocol" | "models" | "usage") =>
-      req<ProviderSyncPreview>(`/_vp/providers/${id}/sync`, {
-        method: "POST",
-        body: JSON.stringify({ scope }),
-      }),
     scanLocal: () => req<LocalCandidate[]>("/_vp/providers/import-local"),
     importLocal: (clients: string[]) =>
       req<Provider[]>("/_vp/providers/import-local", {
@@ -860,6 +765,7 @@ export const api = {
   },
   usage: (hours = 24) => req<UsageSummary>(`/_vp/usage/summary?hours=${hours}`),
   stats: (hours = 24) => req<DashboardStats>(`/_vp/stats/dashboard?hours=${hours}`),
+  realtime: () => req<RealtimeSnapshot>("/_vp/realtime"),
   clients: {
     status: (client: string) =>
       req<ClientStatus>(`/_vp/clients/${encodeURIComponent(client)}/status`),

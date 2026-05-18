@@ -46,14 +46,6 @@ export const pageAccentByRouteName: Record<string, PageAccentClasses> = {
     chipActive: "bg-amber-600 text-white shadow-md shadow-amber-600/25",
     accentBar: "from-amber-500 to-orange-600",
   },
-  statistics: {
-    heading: "text-emerald-700",
-    kicker: "text-emerald-600 font-mono tracking-[0.12em]",
-    btnPrimary:
-      "bg-emerald-600 text-white hover:bg-emerald-700 shadow-md shadow-emerald-600/20 focus-visible:ring-2 focus-visible:ring-emerald-500/45 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-50",
-    chipActive: "bg-emerald-600 text-white shadow-md shadow-emerald-600/25",
-    accentBar: "from-emerald-500 to-teal-600",
-  },
   monitor: {
     heading: "text-sky-700",
     kicker: "text-sky-600 font-mono tracking-[0.12em]",

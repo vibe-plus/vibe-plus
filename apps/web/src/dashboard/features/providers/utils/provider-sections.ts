@@ -22,16 +22,48 @@ export type BuildProviderSectionsInput = {
   selectedTool: ClientToolInfo | null;
   healthMap: Record<string, ProviderHealthSummary>;
   poolByProviderId: Record<string, ProviderAuthPoolSummary>;
+  fallbackGroupName?: string;
+  text?: Partial<ProviderSectionText>;
 };
 
-export function providerGroupName(provider: Provider): string {
-  const trimmed = provider.group_name?.trim();
-  if (trimmed) return trimmed;
-  return "Ungrouped";
+export type ProviderSectionText = {
+  bridge: string;
+  credentialShort: string;
+  fastest: (ms: number) => string;
+  first: (ms: number) => string;
+  models: string;
+  native: string;
+  noCredential: string;
+  notTested: string;
+  success: (pct: number) => string;
+  tokensPerSecond: (value: string) => string;
+};
+
+const DEFAULT_TEXT: ProviderSectionText = {
+  bridge: "bridge",
+  credentialShort: "cred",
+  fastest: (ms) => `${ms}ms best`,
+  first: (ms) => `${ms}ms first`,
+  models: "models",
+  native: "native",
+  noCredential: "no cred",
+  notTested: "not tested",
+  success: (pct) => `${pct}% ok`,
+  tokensPerSecond: (value) => `${value} tok/s`,
+};
+
+function sectionText(input: BuildProviderSectionsInput): ProviderSectionText {
+  return { ...DEFAULT_TEXT, ...input.text };
 }
 
-export function providerGroupKey(provider: Provider): string {
-  return providerGroupName(provider).toLowerCase();
+export function providerGroupName(provider: Provider, fallback = "Ungrouped"): string {
+  const trimmed = provider.group_name?.trim();
+  if (trimmed) return trimmed;
+  return fallback;
+}
+
+export function providerGroupKey(provider: Provider, fallback?: string): string {
+  return providerGroupName(provider, fallback).toLowerCase();
 }
 
 export function buildProviderSections(input: BuildProviderSectionsInput): ProviderSectionView[] {
@@ -45,8 +77,8 @@ export function buildProviderSections(input: BuildProviderSectionsInput): Provid
 
   const grouped = new Map<string, ProviderSectionView>();
   for (const card of cards) {
-    const key = providerGroupKey(card.provider);
-    const title = providerGroupName(card.provider);
+    const key = providerGroupKey(card.provider, input.fallbackGroupName);
+    const title = providerGroupName(card.provider, input.fallbackGroupName);
     const section =
       grouped.get(key) ??
       ({
@@ -68,7 +100,7 @@ export function buildProviderSections(input: BuildProviderSectionsInput): Provid
         ...section,
         providers,
         summary,
-        description: providerSectionDescription(summary),
+        description: providerSectionDescription(summary, sectionText(input)),
       };
     })
     .sort((a, b) => a.title.localeCompare(b.title, "zh-Hans-CN"));
@@ -143,17 +175,20 @@ function summarizeProviderSection(
   };
 }
 
-function providerSectionDescription(summary: ProviderSectionSummary): string {
+function providerSectionDescription(
+  summary: ProviderSectionSummary,
+  text: ProviderSectionText,
+): string {
   const pieces = [
-    summary.nativeEndpoints ? `${summary.nativeEndpoints} native` : "",
-    summary.bridgedEndpoints ? `${summary.bridgedEndpoints} bridge` : "",
+    summary.nativeEndpoints ? `${summary.nativeEndpoints} ${text.native}` : "",
+    summary.bridgedEndpoints ? `${summary.bridgedEndpoints} ${text.bridge}` : "",
     summary.availableCredentials
-      ? `${summary.availableCredentials}/${summary.enabledCredentials} cred`
-      : "no cred",
+      ? `${summary.availableCredentials}/${summary.enabledCredentials} ${text.credentialShort}`
+      : text.noCredential,
     summary.fastestLatencyMs == null
-      ? "not tested"
-      : `${Math.round(summary.fastestLatencyMs)}ms best`,
-    summary.remoteModels ? `${summary.remoteModels} models` : "",
+      ? text.notTested
+      : text.fastest(Math.round(summary.fastestLatencyMs)),
+    summary.remoteModels ? `${summary.remoteModels} ${text.models}` : "",
   ].filter(Boolean);
   return pieces.join(" · ");
 }
@@ -210,10 +245,12 @@ function providerCompositeScore(
     speedScore +
     priorityScore;
   const reasonParts = [
-    `${Math.round(successRate * 100)}% ok`,
-    latencyMs == null ? "" : `${Math.round(latencyMs)}ms first`,
-    tps ? `${tps.toFixed(1)} tok/s` : "",
-    availableCreds ? `${availableCreds} cred` : "no cred",
+    sectionText(input).success(Math.round(successRate * 100)),
+    latencyMs == null ? "" : sectionText(input).first(Math.round(latencyMs)),
+    tps ? sectionText(input).tokensPerSecond(tps.toFixed(1)) : "",
+    availableCreds
+      ? `${availableCreds} ${sectionText(input).credentialShort}`
+      : sectionText(input).noCredential,
   ].filter(Boolean);
   return { score, reason: reasonParts.join(" · ") };
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import { ref } from "vue";
 import type {
   Credential,
@@ -40,6 +41,44 @@ const plan = () => primaryPlanPercent(props.planSnap);
 const status = () => mergedPoolStatus(props.credential, props.poolRow);
 const dupFp = () => isDupFingerprint(props.credential, props.peerCreds);
 const showDetail = ref(false);
+const { t } = useI18n();
+
+function statusText(): string {
+  const raw = status().text;
+  switch (raw) {
+    case "disabled":
+      return t("status.disabled");
+    case "enabled":
+      return t("status.enabled");
+    case "circuit:open":
+      return t("status.circuitOpen");
+    case "circuit:half-open":
+      return t("status.circuitHalfOpen");
+    case "rate_limited":
+      return t("status.rateLimited");
+    case "ok":
+      return t("status.ok");
+    default:
+      return raw;
+  }
+}
+
+function authModeLabel(): string {
+  const raw = credentialAuthShort(props.credential, props.poolRow);
+  switch (raw) {
+    case "auth_ref":
+      return t("authModes.authRef");
+    case "apikey":
+    case "API Key":
+      return t("authModes.apiKey");
+    case "OAuth":
+      return "OAuth";
+    case "unconfigured":
+      return t("authModes.unconfigured");
+    default:
+      return raw;
+  }
+}
 
 function statusDotClass(tone: "ok" | "warn" | "bad"): string {
   if (tone === "ok") return "bg-emerald-500";
@@ -48,7 +87,7 @@ function statusDotClass(tone: "ok" | "warn" | "bad"): string {
 }
 
 function formatShortDuration(totalSeconds: number): string {
-  if (totalSeconds <= 0) return "now";
+  if (totalSeconds <= 0) return t("time.now");
   const mins = Math.floor(totalSeconds / 60);
   if (mins < 60) return `${mins}m`;
   const hours = Math.floor(mins / 60);
@@ -103,7 +142,7 @@ function cooldownLabel(): string | null {
           >
             <span class="h-1.5 w-1.5 rounded-full" :class="statusDotClass(status().tone)" />
           </span>
-          <span class="text-slate-700">{{ status().text }}</span>
+          <span class="text-slate-700">{{ statusText() }}</span>
         </span>
         <span
           class="max-w-[8.5rem] truncate font-medium text-slate-900 sm:max-w-[12rem]"
@@ -126,9 +165,11 @@ function cooldownLabel(): string | null {
         <span v-if="planResetHint()" class="rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">
           {{ planResetHint() }}
         </span>
-        <span class="text-slate-500">{{ credentialAuthShort(credential, poolRow) }}</span>
-        <span v-if="!credential.enabled" class="rounded bg-slate-200 px-1.5 py-0.5 text-slate-700"
-          >disabled</span
+        <span class="text-slate-500">{{ authModeLabel() }}</span>
+        <span
+          v-if="!credential.enabled"
+          class="rounded bg-slate-200 px-1.5 py-0.5 text-slate-700"
+          >{{ t("status.disabled") }}</span
         >
         <span v-if="rateLimitLabel()" class="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">{{
           rateLimitLabel()
@@ -152,8 +193,8 @@ function cooldownLabel(): string | null {
       <button
         type="button"
         class="inline-flex size-7 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50"
-        aria-label="details"
-        title="details"
+        :aria-label="t('actions.details')"
+        :title="t('actions.details')"
         @click="showDetail = true"
       >
         <VpIcon name="file-text" size-class="size-3.5" />
@@ -161,8 +202,8 @@ function cooldownLabel(): string | null {
       <button
         type="button"
         class="inline-flex size-7 items-center justify-center rounded-md border border-vp-border/80 text-slate-600 hover:bg-slate-50"
-        aria-label="edit"
-        title="edit"
+        :aria-label="t('actions.edit')"
+        :title="t('actions.edit')"
         @click="emit('edit', credential)"
       >
         <VpIcon name="pencil" size-class="size-3.5" />
@@ -170,8 +211,8 @@ function cooldownLabel(): string | null {
       <button
         type="button"
         class="inline-flex size-7 items-center justify-center rounded-md border border-red-200 text-red-600 hover:bg-red-50"
-        aria-label="delete"
-        title="delete"
+        :aria-label="t('actions.delete')"
+        :title="t('actions.delete')"
         @click="emit('delete', credential)"
       >
         <VpIcon name="trash-2" size-class="size-3.5" />
@@ -185,7 +226,7 @@ function cooldownLabel(): string | null {
       class="vp-modal-backdrop z-[120]"
       role="dialog"
       aria-modal="true"
-      aria-label="details"
+      :aria-label="t('actions.details')"
       @click.self="showDetail = false"
     >
       <div class="vp-modal-panel max-w-lg flex flex-col" @click.stop>
@@ -197,7 +238,7 @@ function cooldownLabel(): string | null {
             <VpIcon name="key" size-class="size-4.5" />
           </span>
           <div class="min-w-0 flex-1">
-            <h3 class="sr-only">credential</h3>
+            <h3 class="sr-only">{{ t("title") }}</h3>
             <p class="mt-0.5 truncate text-xs text-slate-500">
               {{ credentialPrimaryAccountLabel(credential) }}
             </p>
@@ -205,8 +246,8 @@ function cooldownLabel(): string | null {
           <button
             type="button"
             class="vp-icon-btn shrink-0"
-            aria-label="close"
-            title="close"
+            :aria-label="t('actions.close')"
+            :title="t('actions.close')"
             @click="showDetail = false"
           >
             <VpIcon name="x" size-class="size-4.5" />
@@ -214,19 +255,24 @@ function cooldownLabel(): string | null {
         </div>
 
         <div class="px-5 py-4 space-y-2 text-xs text-slate-700 max-h-[65vh] overflow-y-auto">
-          <p v-if="dupFp()" class="font-mono text-amber-800">fingerprint:duplicate</p>
+          <p v-if="dupFp()" class="font-mono text-amber-800">
+            {{ t("flags.duplicateFingerprint") }}
+          </p>
           <p v-if="!poolRow" class="text-slate-500">{{ poolRowMissingLabel() }}</p>
           <p v-if="credentialJwtPlanSlugDisplay(credential)">
-            jwt.plan <span class="font-mono">{{ credentialJwtPlanSlugDisplay(credential) }}</span>
+            {{ t("details.jwtPlan") }}
+            <span class="font-mono">{{ credentialJwtPlanSlugDisplay(credential) }}</span>
           </p>
           <p>
-            fingerprint
+            {{ t("details.fingerprint") }}
             <code class="break-all font-mono">{{
               fingerprintDisplay(credential.auth_fingerprint)
             }}</code>
           </p>
           <p>
-            auth_ref：<code class="break-all font-mono">{{ authRefPreview(credential) }}</code>
+            {{ t("details.authRef") }}：<code class="break-all font-mono">{{
+              authRefPreview(credential)
+            }}</code>
           </p>
           <p
             v-if="credential.auth_ref && !credential.auth_ref.startsWith('literal:')"
@@ -234,34 +280,44 @@ function cooldownLabel(): string | null {
           >
             {{ credential.auth_ref }}
           </p>
-          <p v-if="credential.notes">notes {{ credential.notes }}</p>
-          <p v-if="credential.last_used_at">last_used {{ fmtTs(credential.last_used_at) }}</p>
+          <p v-if="credential.notes">{{ t("details.notes") }} {{ credential.notes }}</p>
+          <p v-if="credential.last_used_at">
+            {{ t("details.lastUsed") }} {{ fmtTs(credential.last_used_at) }}
+          </p>
           <p v-if="lastErrorSummary(credential, poolRow)" class="text-red-600">
-            last_error {{ lastErrorSummary(credential, poolRow) }}
+            {{ t("details.lastError") }} {{ lastErrorSummary(credential, poolRow) }}
           </p>
           <p v-if="credential.consecutive_failures > 0" class="text-red-700">
-            failures {{ credential.consecutive_failures }}
+            {{ t("details.failures") }} {{ credential.consecutive_failures }}
           </p>
-          <p v-if="!credential.enabled" class="text-slate-700">status disabled</p>
-          <p v-if="rateLimitLabel()" class="text-amber-700">rate_limit {{ rateLimitLabel() }}</p>
-          <p v-if="cooldownLabel()" class="text-red-700">circuit {{ cooldownLabel() }}</p>
-          <p v-if="credential.oauth_has_refresh" class="text-emerald-700">oauth.refresh</p>
+          <p v-if="!credential.enabled" class="text-slate-700">{{ t("status.disabledLong") }}</p>
+          <p v-if="rateLimitLabel()" class="text-amber-700">
+            {{ t("details.rateLimit") }} {{ rateLimitLabel() }}
+          </p>
+          <p v-if="cooldownLabel()" class="text-red-700">
+            {{ t("details.circuit") }} {{ cooldownLabel() }}
+          </p>
+          <p v-if="credential.oauth_has_refresh" class="text-emerald-700">
+            {{ t("flags.oauthRefresh") }}
+          </p>
           <p v-if="credential.oauth_expires_at">
-            oauth.expires {{ new Date(credential.oauth_expires_at * 1000).toLocaleString() }}
+            {{ t("details.oauthExpires") }}
+            {{ new Date(credential.oauth_expires_at * 1000).toLocaleString() }}
           </p>
           <div
             v-if="poolRow"
             class="rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px]"
           >
-            window.req {{ poolRow.rolling_requests }} · ok {{ poolRow.rolling_successes }} · err
-            {{ poolRow.rolling_failures }}
+            {{ t("details.windowReq") }} {{ poolRow.rolling_requests }} · {{ t("details.ok") }}
+            {{ poolRow.rolling_successes }} · {{ t("details.err") }} {{ poolRow.rolling_failures }}
           </div>
           <div
             v-if="credential.rl_requests_limit != null || credential.rl_tokens_limit != null"
             class="rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] space-y-1"
           >
             <p v-if="credential.rl_requests_limit != null">
-              rate.requests {{ credential.rl_requests_remaining?.toLocaleString() }} /
+              {{ t("details.rateRequests") }}
+              {{ credential.rl_requests_remaining?.toLocaleString() }} /
               {{ credential.rl_requests_limit?.toLocaleString() }}（{{
                 rlPercent(credential.rl_requests_remaining, credential.rl_requests_limit).toFixed(
                   0,
@@ -269,7 +325,7 @@ function cooldownLabel(): string | null {
               }}%）
             </p>
             <p v-if="credential.rl_tokens_limit != null">
-              rate.tokens {{ credential.rl_tokens_remaining?.toLocaleString() }} /
+              {{ t("details.rateTokens") }} {{ credential.rl_tokens_remaining?.toLocaleString() }} /
               {{ credential.rl_tokens_limit?.toLocaleString() }}（{{
                 rlPercent(credential.rl_tokens_remaining, credential.rl_tokens_limit).toFixed(0)
               }}%）
@@ -289,7 +345,10 @@ function cooldownLabel(): string | null {
               7d：{{ planSnap.codex_7d_used_percent.toFixed(0) }}%
             </p>
             <p class="text-slate-500">
-              {{ planSnap.captured_at ? `captured ${fmtTs(planSnap.captured_at)} · ` : ""
+              {{
+                planSnap.captured_at
+                  ? t("details.capturedAt", { time: fmtTs(planSnap.captured_at) }) + " · "
+                  : ""
               }}{{ planSnap.source }}
             </p>
           </div>
@@ -298,3 +357,100 @@ function cooldownLabel(): string | null {
     </div>
   </Teleport>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "actions": {
+      "close": "close",
+      "delete": "delete",
+      "details": "details",
+      "edit": "edit"
+    },
+    "authModes": {
+      "apiKey": "API Key",
+      "authRef": "auth_ref",
+      "unconfigured": "unconfigured"
+    },
+    "details": {
+      "authRef": "auth_ref",
+      "capturedAt": "captured {time}",
+      "circuit": "circuit",
+      "err": "err",
+      "failures": "failures",
+      "fingerprint": "fingerprint",
+      "jwtPlan": "jwt.plan",
+      "lastError": "last_error",
+      "lastUsed": "last_used",
+      "notes": "notes",
+      "oauthExpires": "oauth.expires",
+      "ok": "ok",
+      "rateLimit": "rate_limit",
+      "rateRequests": "rate.requests",
+      "rateTokens": "rate.tokens",
+      "windowReq": "window.req"
+    },
+    "flags": {
+      "duplicateFingerprint": "fingerprint:duplicate",
+      "oauthRefresh": "oauth.refresh"
+    },
+    "status": {
+      "disabled": "disabled",
+      "disabledLong": "status disabled",
+      "enabled": "enabled",
+      "circuitOpen": "circuit:open",
+      "circuitHalfOpen": "circuit:half-open",
+      "rateLimited": "rate limited",
+      "ok": "ok"
+    },
+    "time": { "now": "now" },
+    "title": "credential"
+  },
+  "zh-CN": {
+    "actions": {
+      "close": "关闭",
+      "delete": "删除",
+      "details": "详情",
+      "edit": "编辑"
+    },
+    "authModes": {
+      "apiKey": "API Key",
+      "authRef": "认证引用",
+      "unconfigured": "未配置"
+    },
+    "details": {
+      "authRef": "认证引用",
+      "capturedAt": "采集于 {time}",
+      "circuit": "熔断",
+      "err": "失败",
+      "failures": "连续失败",
+      "fingerprint": "指纹",
+      "jwtPlan": "JWT 计划",
+      "lastError": "最后错误",
+      "lastUsed": "最后使用",
+      "notes": "备注",
+      "oauthExpires": "OAuth 到期",
+      "ok": "成功",
+      "rateLimit": "限流",
+      "rateRequests": "请求限额",
+      "rateTokens": "Token 限额",
+      "windowReq": "窗口请求"
+    },
+    "flags": {
+      "duplicateFingerprint": "指纹重复",
+      "oauthRefresh": "OAuth refresh"
+    },
+    "status": {
+      "disabled": "已禁用",
+      "disabledLong": "状态：已禁用",
+      "enabled": "已启用",
+      "circuitOpen": "熔断中",
+      "circuitHalfOpen": "半开探测",
+      "rateLimited": "限流中",
+      "ok": "正常"
+    },
+    "time": { "now": "现在" },
+    "title": "凭证"
+  }
+}
+</i18n>

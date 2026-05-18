@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { ProviderKind } from "../api/client.ts";
 import VpIcon from "./vp-icon.vue";
 import type { vp_icon_name } from "./vp-icon.vue";
@@ -9,6 +10,8 @@ import {
   frameworkIconFromBaseUrl,
   hostFromUrlOrHost,
 } from "../utils/provider-visual.ts";
+
+const { t } = useI18n();
 
 const props = withDefaults(
   defineProps<{
@@ -292,12 +295,15 @@ const statusClass = computed(() => {
   return "bg-sky-300";
 });
 const title = computed(() => {
-  if (!props.enabled) return "provider:off";
-  if (props.circuitState === "open") return "provider:circuit-open";
-  if (props.circuitState === "half-open") return "provider:circuit-half-open";
+  if (!props.enabled) return t("title.off");
+  if (props.circuitState === "open") return t("title.circuitOpen");
+  if (props.circuitState === "half-open") return t("title.circuitHalfOpen");
   if (active.value)
-    return `${props.activeRequestCount} active · ${props.activityLabel ?? `${(props.tokensPerSec ?? 0).toFixed(1)} tok/s`}`;
-  return "provider:idle";
+    return t("title.active", {
+      count: props.activeRequestCount,
+      activity: props.activityLabel ?? `${(props.tokensPerSec ?? 0).toFixed(1)} tok/s`,
+    });
+  return t("title.idle");
 });
 </script>
 
@@ -334,7 +340,7 @@ const title = computed(() => {
     <img
       v-else-if="showAvatarImg"
       :src="avatarUrl!"
-      :alt="providerName ?? 'provider avatar'"
+      :alt="providerName ?? t('alt.providerAvatar')"
       class="h-full w-full object-cover"
       loading="lazy"
       referrerpolicy="no-referrer"
@@ -343,7 +349,7 @@ const title = computed(() => {
     <img
       v-else-if="showFaviconImg"
       :src="faviconUrl!"
-      :alt="providerName ?? 'favicon'"
+      :alt="providerName ?? t('alt.favicon')"
       class="h-full w-full object-cover"
       loading="lazy"
       referrerpolicy="no-referrer"
@@ -382,6 +388,31 @@ const title = computed(() => {
     />
   </span>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "alt": { "favicon": "favicon", "providerAvatar": "provider avatar" },
+    "title": {
+      "active": "{count} active · {activity}",
+      "circuitHalfOpen": "provider:half-open",
+      "circuitOpen": "provider:circuit-open",
+      "idle": "provider:idle",
+      "off": "provider:off"
+    }
+  },
+  "zh-CN": {
+    "alt": { "favicon": "站点图标", "providerAvatar": "供应商头像" },
+    "title": {
+      "active": "{count} 个请求活跃 · {activity}",
+      "circuitHalfOpen": "供应商：半开探测",
+      "circuitOpen": "供应商：熔断中",
+      "idle": "供应商：空闲",
+      "off": "供应商：关闭"
+    }
+  }
+}
+</i18n>
 
 <style scoped>
 .provider-logo__spin {

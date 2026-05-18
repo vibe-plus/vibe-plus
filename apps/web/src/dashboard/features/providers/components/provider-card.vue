@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import type {
   Credential,
@@ -9,17 +10,12 @@ import type {
 } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderLogo from "../../../components/provider-logo.vue";
-import UsageRing from "../../../components/UsageRing.vue";
+
+const { t } = useI18n();
 import CredentialRow from "./provider-credential-row.vue";
 import UiBadge from "../../../components/ui/badge.vue";
 import UiButton from "../../../components/ui/button.vue";
-import {
-  credentialPlanTierHint,
-  credentialPrimaryAccountLabel,
-  mergedPoolStatus,
-  primaryPlanPercent,
-} from "../../../utils/providers-display.ts";
-import { protocolLabelsForProvider } from "../../../utils/protocol-label.ts";
+import { credentialPlanTierHint, primaryPlanPercent } from "../../../utils/providers-display.ts";
 import { brandHintFromHost } from "../../../utils/brand-hint.ts";
 
 type ProviderGroupKey = "native" | "bridged" | "other";
@@ -55,8 +51,6 @@ const props = defineProps<{
   loadingCreds: boolean;
   toggleProviderBusy: boolean;
   circuitResetBusy: boolean;
-  speedtestBusy: boolean;
-  modelRefreshBusy: boolean;
   credModelRefreshBusy: Record<string, boolean>;
   credBalanceRefreshBusy: Record<string, boolean>;
   credToggleBusy: Record<string, boolean>;
@@ -64,13 +58,9 @@ const props = defineProps<{
   planSnapByCred: Record<string, CredentialPlanSnapshot | null>;
   activeCredentialCounts: Record<string, number>;
   tokensPerSec?: number | null;
-  detectVendorBusy?: boolean;
 }>();
 
 const emit = defineEmits<{
-  "sync-creds": [providerId: string];
-  "speedtest-provider": [providerId: string];
-  "refresh-models": [providerId: string];
   "refresh-cred-models": [credentialId: string];
   "refresh-cred-balance": [credentialId: string];
   "toggle-provider": [provider: Provider];
@@ -81,7 +71,6 @@ const emit = defineEmits<{
   "toggle-cred": [credential: Credential];
   "edit-cred": [credential: Credential];
   "delete-cred": [credential: Credential];
-  "detect-vendor": [providerId: string];
 }>();
 
 const MAX_VISIBLE_CREDS = 8;
@@ -145,49 +134,42 @@ watch(
   { deep: true },
 );
 
-const providerProtocolLabels = computed(() => protocolLabelsForProvider(props.card.provider));
+const providerProtocolLabels = computed(() => {
+  const protos =
+    props.card.provider.protocols && props.card.provider.protocols.length > 0
+      ? props.card.provider.protocols
+      : [{ kind: props.card.provider.kind }];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const proto of protos) {
+    const label = protocolLabel(proto.kind);
+    if (seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
+  }
+  return out;
+});
+
+function protocolLabel(kind: string): string {
+  switch (kind) {
+    case "anthropic":
+      return t("protocol.messages");
+    case "openai-chat":
+    case "openai-compat":
+      return t("protocol.chat");
+    case "openai-responses":
+      return t("protocol.responses");
+    case "gemini-native":
+      return t("protocol.generate");
+    default:
+      return kind || t("protocol.unknown");
+  }
+}
 
 const providerBrandHint = computed(
   () =>
     brandHintFromHost(props.card.provider.host) ?? brandHintFromHost(props.card.provider.base_url),
 );
-
-function credentialModelLabel(credential: Credential): string {
-  const n = credential.remote_models?.length ?? 0;
-  return n > 0 ? `${n} models` : "no models";
-}
-
-function credentialBalanceLabel(credential: Credential): string {
-  const snap = credential.balance;
-  if (!snap?.balance && !snap?.remaining) return "";
-  const amount = snap.remaining ?? snap.balance;
-  if (!amount) return "";
-  return `${snap.currency} ${amount}`;
-}
-
-function balancePct(credential: Credential): number | null {
-  const snap = credential.balance;
-  if (!snap?.remaining || !snap?.total) return null;
-  const rem = parseFloat(snap.remaining);
-  const total = parseFloat(snap.total);
-  if (!total || isNaN(rem) || isNaN(total)) return null;
-  return Math.round(((total - rem) / total) * 100);
-}
-
-function balanceCenterText(credential: Credential): string | undefined {
-  const snap = credential.balance;
-  if (!snap?.remaining) return undefined;
-  const v = parseFloat(snap.remaining);
-  if (isNaN(v)) return snap.remaining;
-  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
-  return v.toFixed(v < 10 ? 2 : 0);
-}
-
-function statusDotClass(tone: "ok" | "warn" | "bad"): string {
-  if (tone === "ok") return "bg-emerald-500";
-  if (tone === "bad") return "bg-red-500";
-  return "bg-amber-500";
-}
 
 function poolRowFor(credentialId: string): CredentialPoolStatus | undefined {
   return props.poolRows.find((row) => row.credential_id === credentialId);
@@ -208,32 +190,32 @@ function formatCooldown(totalSeconds: number | null | undefined): string {
 }
 
 function circuitCooldownText(totalSeconds: number | null | undefined): string {
-  if (totalSeconds == null) return "Circuit open";
-  if (totalSeconds <= 0) return "Pending probe";
-  return `${formatCooldown(totalSeconds)} until retry`;
+  if (totalSeconds == null) return t("circuit.open");
+  if (totalSeconds <= 0) return t("circuit.pendingProbe");
+  return t("circuit.untilRetry", { duration: formatCooldown(totalSeconds) });
 }
 
 function modelInventoryLabel(provider: Provider): string {
-  if (remoteModelCount.value > 0) return `${remoteModelCount.value} models`;
-  if (aliasCount.value > 0) return `${aliasCount.value} aliases`;
-  return provider.passthrough_mode ? "passthrough" : "empty";
+  if (remoteModelCount.value > 0) return t("inventory.models", { count: remoteModelCount.value });
+  if (aliasCount.value > 0) return t("inventory.aliases", { count: aliasCount.value });
+  return provider.passthrough_mode ? t("inventory.passthrough") : t("inventory.empty");
 }
 
 function websocketLabel(provider: Provider): string {
-  if (provider.supports_websocket === true) return "upstream WS";
-  if (provider.supports_websocket === false) return "no upstream WS";
+  if (provider.supports_websocket === true) return t("websocket.upstream");
+  if (provider.supports_websocket === false) return t("websocket.none");
   if (
     provider.kind === "openai-responses" &&
     provider.base_url.includes("chatgpt.com/backend-api/codex")
   ) {
-    return "official WS";
+    return t("websocket.official");
   }
-  return "client WS → HTTP";
+  return t("websocket.clientToHttp");
 }
 
 function speedtestLabel(provider: Provider): string {
   const result = provider.last_speedtest;
-  if (!result) return "untested";
+  if (!result) return t("speed.untested");
   if (result.error) return result.error;
   const latency = result.latency_ms == null ? "—" : `${result.latency_ms}ms`;
   const status = result.status == null ? "" : ` · HTTP ${result.status}`;
@@ -242,10 +224,10 @@ function speedtestLabel(provider: Provider): string {
 
 function endpointModeLabel(provider: Provider): string {
   if (provider.base_url.includes("127.0.0.1") || provider.base_url.includes("localhost")) {
-    return "local proxy";
+    return t("endpoint.localProxy");
   }
-  if (provider.passthrough_mode) return "transparent relay";
-  return "mapped gateway";
+  if (provider.passthrough_mode) return t("endpoint.transparentRelay");
+  return t("endpoint.mappedGateway");
 }
 
 const visibleBadges = computed(() =>
@@ -253,11 +235,23 @@ const visibleBadges = computed(() =>
 );
 
 const protocolSummary = computed(() => {
-  if (!visibleBadges.value.length) return "No direct tool support";
+  if (!visibleBadges.value.length) return t("support.none");
   return visibleBadges.value
-    .map((badge) => `${badge.toolLabel} ${badge.support.label}`)
+    .map((badge) => `${badge.toolLabel} ${supportModeLabel(badge.support.mode)}`)
     .join(" / ");
 });
+
+function supportModeLabel(mode: ProtocolSupportInfo["mode"]): string {
+  if (mode === "native") return t("support.native");
+  if (mode === "bridged") return t("support.bridge");
+  return t("support.unsupported");
+}
+
+function groupLabel(group: ProviderGroupKey): string {
+  if (group === "native") return t("groups.native");
+  if (group === "bridged") return t("groups.bridged");
+  return t("groups.other");
+}
 
 const providerPool = computed(() => ({
   available: props.poolRows.filter(
@@ -281,19 +275,22 @@ const providerStateClass = computed(() => {
 });
 
 const providerStateBadge = computed(() => {
-  if (!providerEnabled.value) return { icon: "pause", label: "disabled" };
+  if (!providerEnabled.value) return { icon: "pause", label: t("state.disabled") };
   if (providerCircuitState.value !== "closed") {
     return { icon: "clock", label: circuitCooldownText(providerPool.value.cooldownMax) };
   }
-  return { icon: "circle", label: "idle" };
+  return { icon: "circle", label: t("state.idle") };
 });
 const providerStateText = computed(() => providerStateBadge.value.label);
 
 const credentialSummary = computed(() => {
-  const pieces = [`${providerPool.value.available} available`];
-  if (providerPool.value.open) pieces.push(`${providerPool.value.open} open`);
-  if (providerPool.value.disabled) pieces.push(`${providerPool.value.disabled} disabled`);
-  if (providerPool.value.halfOpen) pieces.push(`${providerPool.value.halfOpen} probing`);
+  const pieces = [t("credentials.available", { count: providerPool.value.available })];
+  if (providerPool.value.open)
+    pieces.push(t("credentials.open", { count: providerPool.value.open }));
+  if (providerPool.value.disabled)
+    pieces.push(t("credentials.disabled", { count: providerPool.value.disabled }));
+  if (providerPool.value.halfOpen)
+    pieces.push(t("credentials.probing", { count: providerPool.value.halfOpen }));
   if (providerPool.value.cooldownMax != null && providerPool.value.open) {
     pieces.push(circuitCooldownText(providerPool.value.cooldownMax));
   }
@@ -303,7 +300,7 @@ const credentialSummary = computed(() => {
 function credentialLine(credential: Credential): string {
   const parts = [];
   const activeCount = activeCredentialCount(credential.id);
-  if (activeCount) parts.push(`Active ${activeCount}`);
+  if (activeCount) parts.push(t("credentialDetail.active", { count: activeCount }));
   const tier = credentialPlanTierHint(credential);
   if (tier) parts.push(tier);
   const plan = planLabel(credential.id);
@@ -311,15 +308,17 @@ function credentialLine(credential: Credential): string {
   const secondary = secondaryPlanLabel(credential.id);
   if (secondary && secondary !== plan) parts.push(secondary);
   const reset = planResetHint(credential.id);
-  if (reset) parts.push(reset.replace(/^R /, "Reset "));
+  if (reset) parts.push(t("credentialDetail.reset", { duration: reset.replace(/^R /, "") }));
   if (!credential.enabled) {
     const disabledPool = poolRowFor(credential.id);
     const reason = disabledPool?.last_error ?? credential.last_error;
-    parts.push(reason ? `Disabled · ${reason}` : "Disabled");
+    parts.push(reason ? t("credentialDetail.disabledWithReason", { reason }) : t("state.disabled"));
   }
   const pool = poolRowFor(credential.id);
   if (pool?.circuit_open)
-    parts.push(`Open ${circuitCooldownText(pool.circuit_open_remaining_secs)}`);
+    parts.push(
+      t("credentialDetail.open", { detail: circuitCooldownText(pool.circuit_open_remaining_secs) }),
+    );
   if (pool?.is_rate_limited) parts.push(rateLimitResetLabel(pool));
   return parts.join(" · ");
 }
@@ -329,9 +328,9 @@ function rateLimitResetLabel(pool: CredentialPoolStatus | undefined): string {
   const resets = [pool.rl_requests_reset_at, pool.rl_tokens_reset_at].filter(
     (value): value is number => typeof value === "number" && value > 0,
   );
-  if (!resets.length) return "Rate limited";
+  if (!resets.length) return t("credentialDetail.rateLimited");
   const left = Math.max(0, Math.min(...resets) - nowTs.value);
-  return `Rate limited for ${formatShortDuration(left)}`;
+  return t("credentialDetail.rateLimitedFor", { duration: formatShortDuration(left) });
 }
 
 function credentialTrafficUnits(credential: Credential): number {
@@ -369,13 +368,17 @@ function credentialProgressClass(credential: Credential): string {
 
 function credentialStatusText(credential: Credential): string {
   const pool = poolRowFor(credential.id);
-  if (!credential.enabled) return "Disabled";
-  if (pool?.circuit_open) return `Open ${circuitCooldownText(pool.circuit_open_remaining_secs)}`;
+  if (!credential.enabled) return t("state.disabled");
+  if (pool?.circuit_open)
+    return t("credentialDetail.open", {
+      detail: circuitCooldownText(pool.circuit_open_remaining_secs),
+    });
   if (pool?.is_rate_limited) return rateLimitResetLabel(pool);
   const activeCount = activeCredentialCount(credential.id);
-  if (activeCount) return `Active ${activeCount}`;
-  if (pool?.rolling_requests) return `${pool.rolling_requests.toLocaleString()} req`;
-  return "Standby";
+  if (activeCount) return t("credentialDetail.active", { count: activeCount });
+  if (pool?.rolling_requests)
+    return t("credentialDetail.requests", { count: pool.rolling_requests.toLocaleString() });
+  return t("credentialDetail.standby");
 }
 
 function credentialStatusClass(credential: Credential): string {
@@ -394,8 +397,8 @@ function credentialTrafficText(credential: Credential): string {
     const ok = pool.rolling_requests
       ? Math.round((pool.rolling_successes / Math.max(1, pool.rolling_requests)) * 100)
       : 0;
-    parts.push(`${pool.rolling_requests.toLocaleString()} req`);
-    parts.push(`${ok}% ok`);
+    parts.push(t("credentialDetail.requests", { count: pool.rolling_requests.toLocaleString() }));
+    parts.push(t("credentialDetail.success", { pct: ok }));
     if (pool.rolling_avg_latency_ms != null)
       parts.push(`${Math.round(pool.rolling_avg_latency_ms)}ms`);
   }
@@ -405,7 +408,7 @@ function credentialTrafficText(credential: Credential): string {
 }
 
 function formatShortDuration(totalSeconds: number): string {
-  if (totalSeconds <= 0) return "now";
+  if (totalSeconds <= 0) return t("time.now");
   const mins = Math.floor(totalSeconds / 60);
   if (mins < 60) return `${mins}m`;
   const hours = Math.floor(mins / 60);
@@ -483,8 +486,8 @@ onUnmounted(() => {
               <button
                 type="button"
                 class="shrink-0 rounded-xl transition-transform duration-200 hover:scale-[1.02]"
-                :title="card.provider.enabled ? 'off' : 'on'"
-                :aria-label="card.provider.enabled ? 'off' : 'on'"
+                :title="card.provider.enabled ? t('actions.off') : t('actions.on')"
+                :aria-label="card.provider.enabled ? t('actions.off') : t('actions.on')"
                 :disabled="toggleProviderBusy"
                 @click="emit('toggle-provider', card.provider)"
               >
@@ -544,65 +547,20 @@ onUnmounted(() => {
               @click="emit('reset-circuit', card.provider.id)"
             >
               <VpIcon name="rotate-ccw" size-class="size-4" />
-              Reset
+              {{ t("actions.reset") }}
+            </UiButton>
+            <UiButton size="sm" variant="outline" @click="emit('edit-provider', card.provider)">
+              <VpIcon name="pencil" size-class="size-4" />
+              {{ t("actions.edit") }}
             </UiButton>
             <UiButton
               size="sm"
-              variant="outline"
-              :disabled="speedtestBusy"
-              @click="emit('speedtest-provider', card.provider.id)"
+              variant="destructive"
+              @click="emit('delete-provider', card.provider.id)"
             >
-              <VpIcon name="activity" size-class="size-4" :spin="speedtestBusy" />
-              Probe
+              <VpIcon name="trash-2" size-class="size-4" />
+              {{ t("actions.delete") }}
             </UiButton>
-            <details class="relative">
-              <summary
-                class="inline-flex h-9 list-none items-center justify-center rounded-md border border-border bg-background px-3 text-sm font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-              >
-                More
-              </summary>
-              <div
-                class="absolute right-0 z-20 mt-2 w-52 overflow-hidden rounded-xl border border-border bg-popover p-1 shadow-lg"
-              >
-                <button
-                  class="menu-row"
-                  type="button"
-                  @click="emit('sync-creds', card.provider.id)"
-                >
-                  <VpIcon name="refresh-cw" size-class="size-4" :spin="loadingCreds" /> Sync creds
-                </button>
-                <button
-                  class="menu-row"
-                  type="button"
-                  @click="emit('refresh-models', card.provider.id)"
-                >
-                  <VpIcon name="book-open" size-class="size-4" :spin="modelRefreshBusy" /> Refresh
-                  models
-                </button>
-                <button
-                  class="menu-row"
-                  type="button"
-                  @click="emit('detect-vendor', card.provider.id)"
-                >
-                  <VpIcon name="scan-search" size-class="size-4" :spin="detectVendorBusy" /> Detect
-                  vendor
-                </button>
-                <button
-                  class="menu-row"
-                  type="button"
-                  @click="emit('edit-provider', card.provider)"
-                >
-                  <VpIcon name="pencil" size-class="size-4" /> Edit
-                </button>
-                <button
-                  class="menu-row menu-row--danger"
-                  type="button"
-                  @click="emit('delete-provider', card.provider.id)"
-                >
-                  <VpIcon name="trash-2" size-class="size-4" /> Delete
-                </button>
-              </div>
-            </details>
           </div>
         </div>
 
@@ -611,14 +569,14 @@ onUnmounted(() => {
             class="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
           >
             <div class="flex items-center justify-between gap-2">
-              <span>Credentials</span>
+              <span>{{ t("sections.credentials") }}</span>
               <UiButton
                 size="sm"
                 variant="ghost"
                 class="h-8 px-2"
                 @click="emit('add-cred', card.provider.id)"
               >
-                <VpIcon name="plus" size-class="size-4" /> Add
+                <VpIcon name="plus" size-class="size-4" /> {{ t("actions.add") }}
               </UiButton>
             </div>
             <p class="mt-1 text-sm text-foreground">{{ credentialSummary }}</p>
@@ -627,7 +585,7 @@ onUnmounted(() => {
             class="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
           >
             <div class="flex items-center justify-between gap-2">
-              <span>Routing</span>
+              <span>{{ t("sections.routing") }}</span>
               <span class="text-right text-foreground">{{
                 card.sortReason || `score ${Math.round(card.qualityScore)}`
               }}</span>
@@ -644,11 +602,14 @@ onUnmounted(() => {
     <div class="border-t border-border bg-muted/20 px-4 py-3 sm:px-5">
       <div class="flex items-center justify-between gap-3">
         <div class="text-xs text-muted-foreground">
-          {{ visibleCreds.length }} shown
-          <span v-if="hiddenCredCount">· {{ hiddenCredCount }} more hidden</span>
+          {{ t("credentials.shown", { count: visibleCreds.length }) }}
+          <span v-if="hiddenCredCount"
+            >· {{ t("credentials.hidden", { count: hiddenCredCount }) }}</span
+          >
         </div>
         <div class="text-xs text-muted-foreground">
-          {{ card.group }} · {{ card.badges.length }} route hints
+          {{ groupLabel(card.group) }} ·
+          {{ t("routing.routeHints", { count: card.badges.length }) }}
         </div>
       </div>
 
@@ -660,7 +621,7 @@ onUnmounted(() => {
           v-else-if="creds.length === 0"
           class="rounded-lg border border-dashed border-border px-3 py-4 text-sm text-muted-foreground"
         >
-          No credentials yet.
+          {{ t("credentials.empty") }}
         </div>
         <template v-else>
           <CredentialRow
@@ -679,31 +640,145 @@ onUnmounted(() => {
   </div>
 </template>
 
-<style scoped>
-.menu-row {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 0.5rem;
-  border-radius: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  text-align: left;
-  font-size: 0.875rem;
-  color: var(--vp-text);
-  transition-property: color, background-color;
-  transition-duration: 150ms;
+<i18n lang="json">
+{
+  "en": {
+    "actions": {
+      "add": "Add",
+      "delete": "Delete",
+      "edit": "Edit",
+      "off": "off",
+      "on": "on",
+      "reset": "Reset"
+    },
+    "circuit": {
+      "open": "Circuit open",
+      "pendingProbe": "Pending probe",
+      "untilRetry": "{duration} until retry"
+    },
+    "credentialDetail": {
+      "active": "Active {count}",
+      "disabledWithReason": "Disabled · {reason}",
+      "open": "Open {detail}",
+      "rateLimited": "Rate limited",
+      "rateLimitedFor": "Rate limited for {duration}",
+      "requests": "{count} req",
+      "reset": "Reset {duration}",
+      "standby": "Standby",
+      "success": "{pct}% ok"
+    },
+    "credentials": {
+      "available": "{count} available",
+      "disabled": "{count} disabled",
+      "empty": "No credentials yet.",
+      "hidden": "{count} more hidden",
+      "open": "{count} open",
+      "probing": "{count} probing",
+      "shown": "{count} shown"
+    },
+    "endpoint": {
+      "localProxy": "local proxy",
+      "mappedGateway": "mapped gateway",
+      "transparentRelay": "transparent relay"
+    },
+    "groups": { "bridged": "bridged", "native": "native", "other": "other" },
+    "inventory": {
+      "aliases": "{count} aliases",
+      "empty": "empty",
+      "models": "{count} models",
+      "passthrough": "passthrough"
+    },
+    "protocol": {
+      "chat": "Chat",
+      "generate": "Generate",
+      "messages": "Messages",
+      "responses": "Responses",
+      "unknown": "Unknown"
+    },
+    "routing": { "routeHints": "{count} route hints" },
+    "sections": { "credentials": "Credentials", "routing": "Routing" },
+    "speed": { "untested": "untested" },
+    "state": { "disabled": "disabled", "idle": "idle" },
+    "support": {
+      "bridge": "bridge",
+      "native": "native",
+      "none": "No direct tool support",
+      "unsupported": "unsupported"
+    },
+    "time": { "now": "now" },
+    "websocket": {
+      "clientToHttp": "client WS → HTTP",
+      "none": "no upstream WS",
+      "official": "official WS",
+      "upstream": "upstream WS"
+    }
+  },
+  "zh-CN": {
+    "actions": {
+      "add": "添加",
+      "delete": "删除",
+      "edit": "编辑",
+      "off": "关闭",
+      "on": "开启",
+      "reset": "重置"
+    },
+    "circuit": { "open": "熔断中", "pendingProbe": "等待探测", "untilRetry": "{duration} 后重试" },
+    "credentialDetail": {
+      "active": "活跃 {count}",
+      "disabledWithReason": "已禁用 · {reason}",
+      "open": "熔断 {detail}",
+      "rateLimited": "限流中",
+      "rateLimitedFor": "限流剩余 {duration}",
+      "requests": "{count} 请求",
+      "reset": "重置 {duration}",
+      "standby": "待命",
+      "success": "成功率 {pct}%"
+    },
+    "credentials": {
+      "available": "{count} 可用",
+      "disabled": "{count} 已禁用",
+      "empty": "暂无凭证。",
+      "hidden": "另有 {count} 个已隐藏",
+      "open": "{count} 熔断",
+      "probing": "{count} 探测中",
+      "shown": "显示 {count} 个"
+    },
+    "endpoint": {
+      "localProxy": "本地代理",
+      "mappedGateway": "映射网关",
+      "transparentRelay": "透明转发"
+    },
+    "groups": { "bridged": "桥接", "native": "原生", "other": "其他" },
+    "inventory": {
+      "aliases": "{count} 个别名",
+      "empty": "空",
+      "models": "{count} 个模型",
+      "passthrough": "透传"
+    },
+    "protocol": {
+      "chat": "聊天",
+      "generate": "生成",
+      "messages": "消息",
+      "responses": "响应",
+      "unknown": "未知"
+    },
+    "routing": { "routeHints": "{count} 条路由提示" },
+    "sections": { "credentials": "凭证", "routing": "路由" },
+    "speed": { "untested": "未测试" },
+    "state": { "disabled": "已禁用", "idle": "空闲" },
+    "support": {
+      "bridge": "桥接",
+      "native": "原生",
+      "none": "无直接工具支持",
+      "unsupported": "不支持"
+    },
+    "time": { "now": "现在" },
+    "websocket": {
+      "clientToHttp": "客户端 WS → HTTP",
+      "none": "无上游 WS",
+      "official": "官方 WS",
+      "upstream": "上游 WS"
+    }
+  }
 }
-
-.menu-row:hover {
-  background: color-mix(in srgb, var(--vp-primary) 12%, var(--vp-surface));
-}
-
-.menu-row--danger {
-  color: #dc2626;
-}
-
-.menu-row--danger:hover {
-  background: #fef2f2;
-  color: #b91c1c;
-}
-</style>
+</i18n>

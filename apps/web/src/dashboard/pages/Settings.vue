@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useRoute } from "vue-router";
+import { useI18n } from "vue-i18n";
 import Badge from "../components/ui/badge.vue";
 import Button from "../components/ui/button.vue";
 import Card from "../components/ui/card.vue";
@@ -8,14 +8,12 @@ import Separator from "../components/ui/separator.vue";
 import VpIcon from "../components/vp-icon.vue";
 import { useBrandLogo, type BrandLogoId } from "../composables/use-brand-logo.ts";
 import { setUiLanguage, useUiLanguage, type UiLanguage } from "../composables/use-ui-language.ts";
-import { resolvePageAccent } from "../utils/page-accent.ts";
 
-const route = useRoute();
-const pageAccent = computed(() => resolvePageAccent(route.name));
+const { t } = useI18n();
 const { brandLogos, currentBrandLogo, selectedBrandLogoId, setBrandLogo } = useBrandLogo();
 const { language, languageOptions } = useUiLanguage();
 
-const themeSummary = computed(() => `Current theme: ${currentBrandLogo.value.label}`);
+const themeSummary = computed(() => t("theme.summary", { theme: currentBrandLogo.value.label }));
 const languageSummary = computed(
   () => languageOptions.find((option) => option.value === language.value)?.label ?? language.value,
 );
@@ -31,27 +29,17 @@ function isSelectedLanguage(value: UiLanguage) {
 
 <template>
   <div class="mx-auto max-w-3xl space-y-5 sm:space-y-6">
-    <div class="min-w-0 space-y-2 sm:space-y-3">
-      <Badge variant="outline" :class="pageAccent.kicker">settings</Badge>
-      <h1 :class="['text-2xl font-bold tracking-tight sm:text-3xl', pageAccent.heading]">
-        Settings
-      </h1>
-      <p class="max-w-2xl text-sm text-muted-foreground">
-        Keep this page focused on browser-local preferences saved in localStorage.
-      </p>
-    </div>
-
     <Card class="overflow-hidden">
       <section id="theme" class="scroll-mt-20 p-4 sm:p-5">
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div class="flex items-center gap-2">
             <VpIcon name="palette" size-class="size-4 text-muted-foreground" />
             <div>
-              <h2 class="text-sm font-semibold text-foreground">Theme</h2>
+              <h2 class="text-sm font-semibold text-foreground">{{ t("theme.title") }}</h2>
               <p class="text-xs text-muted-foreground">{{ themeSummary }}</p>
             </div>
           </div>
-          <Badge variant="secondary">Local</Badge>
+          <Badge variant="secondary">{{ t("badges.local") }}</Badge>
         </div>
 
         <div class="grid grid-cols-2 gap-2 sm:grid-cols-5">
@@ -91,7 +79,7 @@ function isSelectedLanguage(value: UiLanguage) {
               v-if="isSelectedLogo(logo.id)"
               class="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary"
             >
-              Active
+              {{ t("common.active") }}
             </span>
           </Button>
         </div>
@@ -104,11 +92,13 @@ function isSelectedLanguage(value: UiLanguage) {
           <div class="flex items-center gap-2">
             <VpIcon name="languages" size-class="size-4 text-muted-foreground" />
             <div>
-              <h2 class="text-sm font-semibold text-foreground">Language</h2>
-              <p class="text-xs text-muted-foreground">Selected: {{ languageSummary }}</p>
+              <h2 class="text-sm font-semibold text-foreground">{{ t("language.title") }}</h2>
+              <p class="text-xs text-muted-foreground">
+                {{ t("language.selected", { language: languageSummary }) }}
+              </p>
             </div>
           </div>
-          <Badge variant="secondary">Future copy</Badge>
+          <Badge variant="secondary">{{ t("badges.futureCopy") }}</Badge>
         </div>
 
         <div class="grid gap-2 sm:grid-cols-2">
@@ -141,3 +131,52 @@ function isSelectedLanguage(value: UiLanguage) {
     </Card>
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "badges": {
+      "futureCopy": "Future copy",
+      "local": "Local"
+    },
+    "common": {
+      "active": "Active"
+    },
+    "language": {
+      "selected": "Selected: {language}",
+      "title": "Language"
+    },
+    "page": {
+      "description": "Keep this page focused on browser-local preferences saved in localStorage.",
+      "kicker": "settings",
+      "title": "Settings"
+    },
+    "theme": {
+      "summary": "Current theme: {theme}",
+      "title": "Theme"
+    }
+  },
+  "zh-CN": {
+    "badges": {
+      "futureCopy": "后续文案",
+      "local": "本地"
+    },
+    "common": {
+      "active": "已启用"
+    },
+    "language": {
+      "selected": "当前：{language}",
+      "title": "语言"
+    },
+    "page": {
+      "description": "这个页面只管理保存在 localStorage 中的浏览器本地偏好。",
+      "kicker": "设置",
+      "title": "设置"
+    },
+    "theme": {
+      "summary": "当前主题：{theme}",
+      "title": "主题"
+    }
+  }
+}
+</i18n>

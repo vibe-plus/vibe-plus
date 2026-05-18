@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import { computed, onMounted, shallowRef } from "vue";
 import { api, type CodexAppStatus } from "../../api/client.ts";
-import { useWs } from "../../composables/useProxy.ts";
 import VpIcon from "../vp-icon.vue";
+
+const { t } = useI18n();
 
 const status = shallowRef<CodexAppStatus | null>(null);
 const loading = shallowRef(false);
@@ -11,9 +13,9 @@ const error = shallowRef<string | null>(null);
 
 const visibleProcesses = computed(() => status.value?.processes.slice(0, 6) ?? []);
 const statusLabel = computed(() => {
-  if (!status.value) return "unknown";
-  if (!status.value.installed) return "not installed";
-  return status.value.running ? "running" : "stopped";
+  if (!status.value) return t("status.unknown");
+  if (!status.value.installed) return t("status.notInstalled");
+  return status.value.running ? t("status.running") : t("status.stopped");
 });
 
 async function refresh() {
@@ -31,11 +33,7 @@ async function refresh() {
 async function runAction(action: "open" | "quit" | "restart") {
   if (
     (action === "quit" || action === "restart") &&
-    !window.confirm(
-      action === "quit"
-        ? "Quit Codex App now? This can close the current Codex desktop session."
-        : "Restart Codex App now? This can briefly close the current Codex desktop session.",
-    )
+    !window.confirm(action === "quit" ? t("confirm.quit") : t("confirm.restart"))
   ) {
     return;
   }
@@ -54,15 +52,6 @@ async function runAction(action: "open" | "quit" | "restart") {
 onMounted(() => {
   void refresh();
 });
-
-useWs((event: unknown) => {
-  const ev = event as { type?: string } & CodexAppStatus;
-  if (ev.type !== "codex-app-status-changed") return;
-  const next = { ...ev };
-  delete (next as { type?: string }).type;
-  status.value = next;
-  error.value = null;
-});
 </script>
 
 <template>
@@ -71,7 +60,7 @@ useWs((event: unknown) => {
       <div class="flex min-w-0 items-center gap-2">
         <VpIcon name="power" size-class="size-4 text-vp-muted" />
         <div class="min-w-0">
-          <div class="text-sm font-medium text-vp-text">Codex App Control</div>
+          <div class="text-sm font-medium text-vp-text">{{ t("title") }}</div>
           <div class="mt-1 truncate font-mono text-xs text-vp-muted">
             {{ status?.app_path ?? "/Applications/Codex.app" }}
           </div>
@@ -93,8 +82,8 @@ useWs((event: unknown) => {
         type="button"
         class="vp-icon-btn"
         :disabled="loading || busyAction !== null"
-        aria-label="Refresh Codex App status"
-        title="Refresh Codex App status"
+        :aria-label="t('actions.refreshStatus')"
+        :title="t('actions.refreshStatus')"
         @click="refresh()"
       >
         <VpIcon name="refresh-cw" size-class="size-4" :spin="loading && busyAction === null" />
@@ -140,15 +129,15 @@ useWs((event: unknown) => {
 
     <div class="mt-4 grid gap-2 text-xs sm:grid-cols-3">
       <div class="rounded-lg border border-vp-border px-3 py-2">
-        <span class="block text-vp-muted">main pid</span>
+        <span class="block text-vp-muted">{{ t("fields.mainPid") }}</span>
         <span class="mt-1 block font-mono text-vp-text">{{ status?.main_pid ?? "—" }}</span>
       </div>
       <div class="rounded-lg border border-vp-border px-3 py-2">
-        <span class="block text-vp-muted">processes</span>
+        <span class="block text-vp-muted">{{ t("fields.processes") }}</span>
         <span class="mt-1 block font-mono text-vp-text">{{ status?.process_count ?? "—" }}</span>
       </div>
       <div class="rounded-lg border border-vp-border px-3 py-2">
-        <span class="block text-vp-muted">installed</span>
+        <span class="block text-vp-muted">{{ t("fields.installed") }}</span>
         <span class="mt-1 block font-mono text-vp-text">{{
           status?.installed ? "yes" : "no"
         }}</span>
@@ -178,3 +167,38 @@ useWs((event: unknown) => {
     </div>
   </section>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "actions": { "refreshStatus": "Refresh Codex App status" },
+    "confirm": {
+      "quit": "Quit Codex App now? This can close the current Codex desktop session.",
+      "restart": "Restart Codex App now? This can briefly close the current Codex desktop session."
+    },
+    "fields": { "installed": "installed", "mainPid": "main pid", "processes": "processes" },
+    "status": {
+      "notInstalled": "not installed",
+      "running": "running",
+      "stopped": "stopped",
+      "unknown": "unknown"
+    },
+    "title": "Codex App Control"
+  },
+  "zh-CN": {
+    "actions": { "refreshStatus": "刷新 Codex App 状态" },
+    "confirm": {
+      "quit": "现在退出 Codex App？这可能会关闭当前 Codex 桌面会话。",
+      "restart": "现在重启 Codex App？这可能会短暂关闭当前 Codex 桌面会话。"
+    },
+    "fields": { "installed": "已安装", "mainPid": "主 PID", "processes": "进程" },
+    "status": {
+      "notInstalled": "未安装",
+      "running": "运行中",
+      "stopped": "已停止",
+      "unknown": "未知"
+    },
+    "title": "Codex App 控制"
+  }
+}
+</i18n>
