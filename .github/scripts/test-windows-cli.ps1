@@ -129,7 +129,11 @@ $smokePort = Get-FreeTcpPort
 $vibeServer = $null
 try {
   $vibeServer = Start-VibeForegroundForSmokeTest -FilePath $ExePath -Port $smokePort
-  Invoke-Vibe -FilePath $ExePath -Arguments @("status") -Expected "endpoint:         http://127.0.0.1:$smokePort" | Out-Null
+  $healthUrl = "http://127.0.0.1:$smokePort/health"
+  $health = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
+  if ($health.StatusCode -ne 200) {
+    throw "Gateway health check failed at $healthUrl (status $($health.StatusCode))"
+  }
 } finally {
   if ($null -ne $vibeServer -and -not $vibeServer.HasExited) {
     Stop-Process -Id $vibeServer.Id -Force -ErrorAction SilentlyContinue
