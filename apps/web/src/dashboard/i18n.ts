@@ -1,6 +1,13 @@
-import { watch } from "vue";
+import { isRef, watch } from "vue";
 import { createI18n } from "vue-i18n";
-import { useUiLanguage } from "./composables/use-ui-language.ts";
+import { useUiLanguage, type UiLanguage } from "./composables/use-ui-language.ts";
+
+function setGlobalI18nLocale(next: UiLanguage) {
+  const locale = i18n.global.locale;
+  if (isRef(locale)) {
+    locale.value = next;
+  }
+}
 
 export type DashboardMessageSchema = Record<string, unknown>;
 
@@ -25,9 +32,9 @@ export function syncI18nWithUiLanguage() {
 
   const { language } = useUiLanguage();
   watch(
-    language,
+    () => language.value,
     (next) => {
-      i18n.global.locale = next;
+      setGlobalI18nLocale(next);
       if (typeof document !== "undefined") {
         document.documentElement.lang = next;
       }

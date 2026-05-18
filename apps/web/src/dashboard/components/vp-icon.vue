@@ -52,7 +52,9 @@ export type vp_icon_name =
   | "radar"
   | "layers-3"
   | "clock"
-  | "scan-search";
+  | "scan-search"
+  | "palette"
+  | "languages";
 
 const props = defineProps<{
   name: vp_icon_name;
@@ -114,6 +116,8 @@ const iconClassByName: Record<vp_icon_name, string> = {
   "layers-3": "i-[lucide--layers-3]",
   clock: "i-[lucide--clock-3]",
   "scan-search": "i-[lucide--scan-search]",
+  palette: "i-[lucide--palette]",
+  languages: "i-[lucide--languages]",
 };
 
 const iconClass = computed(() => iconClassByName[props.name]);
