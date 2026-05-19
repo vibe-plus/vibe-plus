@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import type {
   Credential,
   CredentialPoolStatus,
   CredentialPlanSnapshot,
 } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
+import UiBadge from "../../../components/ui/badge.vue";
+import { STATUS_TAG_CLASS, type StatusTagTone } from "../../../utils/provider-status-tags.ts";
+import { cn } from "../../../../lib/utils.ts";
 import {
   authRefPreview,
   credentialJwtPlanSlugDisplay,
@@ -79,11 +82,16 @@ function authModeLabel(): string {
   }
 }
 
-function statusDotClass(tone: "ok" | "warn" | "bad"): string {
-  if (tone === "ok") return "bg-emerald-500";
-  if (tone === "bad") return "bg-red-500";
-  return "bg-amber-500";
+function statusTone(tone: "ok" | "warn" | "bad"): StatusTagTone {
+  if (tone === "ok") return "ok";
+  if (tone === "bad") return "bad";
+  return "warn";
 }
+
+const statusTag = computed(() => ({
+  label: statusText(),
+  tone: statusTone(status().tone),
+}));
 
 function formatShortDuration(totalSeconds: number): string {
   if (totalSeconds <= 0) return t("time.now");
@@ -133,16 +141,9 @@ function cooldownLabel(): string | null {
   >
     <div class="min-w-0 flex-1">
       <div class="flex min-w-0 flex-wrap items-center gap-1 text-[11px]">
-        <span
-          class="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5"
-        >
-          <span
-            class="relative inline-flex h-2.5 w-2.5 items-center justify-center rounded-full border border-slate-300"
-          >
-            <span class="h-1.5 w-1.5 rounded-full" :class="statusDotClass(status().tone)" />
-          </span>
-          <span class="text-slate-700">{{ statusText() }}</span>
-        </span>
+        <UiBadge :class="cn('px-1.5 py-0 text-[10px]', STATUS_TAG_CLASS[statusTag.tone])">
+          {{ statusTag.label }}
+        </UiBadge>
         <span
           class="max-w-[8.5rem] truncate font-medium text-slate-900 sm:max-w-[12rem]"
           :title="credentialPrimaryAccountLabel(credential)"
@@ -165,17 +166,18 @@ function cooldownLabel(): string | null {
           {{ planResetHint() }}
         </span>
         <span class="text-slate-500">{{ authModeLabel() }}</span>
-        <span
-          v-if="!credential.enabled"
-          class="rounded bg-slate-200 px-1.5 py-0.5 text-slate-700"
-          >{{ t("status.disabled") }}</span
+        <UiBadge
+          v-if="rateLimitLabel()"
+          :class="cn('px-1.5 py-0 text-[10px]', STATUS_TAG_CLASS.warn)"
         >
-        <span v-if="rateLimitLabel()" class="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">{{
-          rateLimitLabel()
-        }}</span>
-        <span v-if="cooldownLabel()" class="rounded bg-red-50 px-1.5 py-0.5 text-red-700">{{
-          cooldownLabel()
-        }}</span>
+          {{ rateLimitLabel() }}
+        </UiBadge>
+        <UiBadge
+          v-if="cooldownLabel()"
+          :class="cn('px-1.5 py-0 text-[10px]', STATUS_TAG_CLASS.bad)"
+        >
+          {{ cooldownLabel() }}
+        </UiBadge>
       </div>
       <div v-if="plan().pct != null" class="mt-1 h-1 overflow-hidden rounded-full bg-slate-200/80">
         <div

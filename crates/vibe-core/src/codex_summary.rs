@@ -82,10 +82,6 @@ impl SummaryMetrics {
         }
     }
 
-    fn has_usage(self) -> bool {
-        self.input_tokens > 0 || self.output_tokens > 0 || self.cache_tokens > 0
-    }
-
     fn speed(self) -> Option<f64> {
         if self.output_tokens <= 0 {
             return None;
@@ -178,7 +174,7 @@ impl SummaryAccumulator {
             }
 
             let mut metrics = self.build_metrics(latency_ms);
-            let Some(text) = render_summary(&self.cfg, self.client, metrics) else {
+            let Some(text) = render_summary(&self.cfg, self.client, metrics.clone()) else {
                 self.flush_pending_finalization(&mut out);
                 out.push(frame_json);
                 continue;
@@ -540,7 +536,9 @@ impl SummaryAccumulator {
             return None;
         }
         let mut metrics = self.build_metrics(latency_ms);
-        let _ = render_summary(&self.cfg, self.client, metrics)?;
+        if render_summary(&self.cfg, self.client, metrics.clone()).is_none() {
+            return None;
+        }
         if !self.has_message_summary_target(frame_json) {
             return None;
         }
@@ -774,7 +772,9 @@ pub fn detect_client(headers: &HeaderMap) -> CodexClientKind {
         || ua.starts_with("codex_cli_rs/")
         || ua_l == "codex-cli"
         || ua_l.contains("codex-cli")
+        || ua_l.contains("codex_cli")
         || originator_l == "codex_cli_rs"
+        || originator_l.contains("codex_cli")
     {
         CodexClientKind::Cli
     } else {
@@ -782,37 +782,47 @@ pub fn detect_client(headers: &HeaderMap) -> CodexClientKind {
     }
 }
 
+/// End-of-turn recap (ES). Always rendered for Codex clients — not user-configurable.
 pub fn render_summary(
     cfg: &CodexSummaryConfig,
     client: CodexClientKind,
     metrics: SummaryMetrics,
 ) -> Option<String> {
-    if !cfg.enabled || !metrics.has_usage() {
-        return None;
-    }
     let client_cfg = client_config(cfg, client);
-    if !client_cfg.enabled {
-        return None;
-    }
     let labels = metric_labels(cfg, metrics);
-    if labels.is_empty() {
-        return None;
-    }
-
     let separator = cfg.separator.as_str();
     let prefix = client_cfg.prefix.as_deref().unwrap_or("↯ ");
     let suffix = client_cfg.suffix.as_deref().unwrap_or("");
-    let rendered = match client_cfg.style {
-        CodexSummaryStyle::FormulaCompact => formula_compact(&labels),
-        CodexSummaryStyle::PlainCompact => plain_compact(&labels, separator, prefix),
-        CodexSummaryStyle::InlineChips => inline_chips(&labels, separator, prefix),
-        CodexSummaryStyle::StatusBar => status_bar(&labels, separator),
-        CodexSummaryStyle::EnglishLight => english_light(&labels, separator),
-        CodexSummaryStyle::ChineseLight => chinese_light(&labels, separator),
-        CodexSummaryStyle::FormulaLabeled => formula_labeled(&labels),
-        CodexSummaryStyle::AsciiPlain => ascii_plain(&labels, separator),
+    let rendered = if labels.is_empty() {
+        end_slot_fallback(client, metrics)
+    } else {
+        match client_cfg.style {
+            CodexSummaryStyle::FormulaCompact => formula_compact(&labels),
+            CodexSummaryStyle::PlainCompact => plain_compact(&labels, separator, prefix),
+            CodexSummaryStyle::InlineChips => inline_chips(&labels, separator, prefix),
+            CodexSummaryStyle::StatusBar => status_bar(&labels, separator),
+            CodexSummaryStyle::EnglishLight => english_light(&labels, separator),
+            CodexSummaryStyle::ChineseLight => chinese_light(&labels, separator),
+            CodexSummaryStyle::FormulaLabeled => formula_labeled(&labels),
+            CodexSummaryStyle::AsciiPlain => ascii_plain(&labels, separator),
+        }
     };
     Some(format!("{rendered}{suffix}"))
+}
+
+fn end_slot_fallback(client: CodexClientKind, metrics: SummaryMetrics) -> String {
+    let lat = metrics
+        .latency_ms
+        .filter(|ms| *ms > 0)
+        .map(|ms| format_latency(ms))
+        .unwrap_or_else(|| "—".into());
+    match client {
+        CodexClientKind::App => format!(
+            "$$\n\\scriptsize\n\\color{{#64748b}}{{\\textsf{{Vibe+}}\\,\\mid\\,\\textsf{{lat}}={}}}\n$$",
+            formula_escape(&lat)
+        ),
+        CodexClientKind::Cli | CodexClientKind::Unknown => format!("↯ Vibe+ · lat {lat}"),
+    }
 }
 
 pub fn append_summary_to_completed_frame(frame_json: &str, text: &str) -> Option<String> {
@@ -1342,13 +1352,15 @@ mod tests {
     }
 
     #[test]
-    fn unknown_default_is_disabled() {
+    fn unknown_default_renders_plain() {
         let cfg = CodexSummaryConfig::default();
-        assert!(render_summary(&cfg, CodexClientKind::Unknown, metrics()).is_none());
+        let text = render_summary(&cfg, CodexClientKind::Unknown, metrics()).unwrap();
+        assert!(text.starts_with("↯ "));
+        assert!(!text.contains("$$"));
     }
 
     #[test]
-    fn no_usage_skips_summary() {
+    fn no_usage_still_renders_fallback() {
         let cfg = CodexSummaryConfig {
             clients: CodexSummaryClientsConfig::default(),
             ..CodexSummaryConfig::default()
@@ -1362,7 +1374,9 @@ mod tests {
             cost_usd: None,
             thread_cost_usd: None,
         };
-        assert!(render_summary(&cfg, CodexClientKind::App, metrics).is_none());
+        let text = render_summary(&cfg, CodexClientKind::Cli, metrics).unwrap();
+        assert!(text.contains("↯ Vibe+"));
+        assert!(text.contains("lat"));
     }
 
     #[test]

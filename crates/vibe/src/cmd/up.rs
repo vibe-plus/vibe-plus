@@ -1,10 +1,29 @@
-//! Default entry: start the gateway, take over known clients, and open the dashboard.
+//! Default entry: bring up the gateway, take over known clients, and open the dashboard.
 
 use anyhow::Result;
 
-use super::{configured_port, gateway, ui};
+use super::{configured_port, daemon, gateway, ui};
 
-pub async fn run() -> Result<()> {
+#[derive(clap::Args)]
+pub struct UpArgs {
+    /// Port to listen on.
+    #[arg(long, default_value_t = super::configured_port())]
+    pub port: u16,
+
+    /// Run the gateway in the foreground instead of daemonising.
+    #[arg(long)]
+    pub foreground: bool,
+}
+
+pub async fn run(args: UpArgs) -> Result<()> {
+    if args.foreground || args.port != configured_port() {
+        return daemon::run(daemon::UpArgs {
+            port: args.port,
+            foreground: args.foreground,
+        })
+        .await;
+    }
+
     let port = configured_port();
     let base_url = gateway::ensure_running(port).await?;
     println!("vibe is ready at {base_url}");
@@ -37,4 +56,13 @@ fn auto_unify_codex_history() {
         "  [codex-history] 已统一聊天记录（sqlite {} 行，rollout {} 处）",
         summary.sqlite_rows_changed, summary.rollout_fields_changed
     );
+}
+
+impl Default for UpArgs {
+    fn default() -> Self {
+        Self {
+            port: configured_port(),
+            foreground: false,
+        }
+    }
 }

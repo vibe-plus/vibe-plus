@@ -207,6 +207,7 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                 visual.clone(),
                                 request_started_instant.elapsed().as_millis() as i64,
                                 suppress_status,
+                                codex_client_kind,
                             );
                         }
                         // Never drop bytes on a non-UTF8 chunk boundary (reqwest can split codepoints).
@@ -391,6 +392,7 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                 visual.clone(),
                                 request_started_instant.elapsed().as_millis() as i64,
                                 suppress_status,
+                                codex_client_kind,
                             );
                             for event_str in summary_injection.maybe_append_to_frame_batch(
                                 frames,

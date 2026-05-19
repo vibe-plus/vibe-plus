@@ -748,7 +748,6 @@ pub(crate) async fn try_one_pick(
     };
     let client_body = if ctx.route_prefix.as_deref() == Some("codex-v1")
         && ctx.wire == Wire::OpenaiResponses
-        && state.codex_summary_config().enabled
     {
         let mut response_value = serde_json::from_slice::<serde_json::Value>(&client_body).ok();
         if let Some(response) = response_value.as_mut() {
@@ -790,6 +789,7 @@ pub(crate) async fn try_one_pick(
         let status_text = crate::codex_visual::status_message_text(
             &visual,
             ctx.started_instant.elapsed().as_millis() as i64,
+            log_ctx.codex_client_kind,
         );
         let item_id = format!("vibe_route_{}", uuid::Uuid::new_v4().simple());
         let with_status =

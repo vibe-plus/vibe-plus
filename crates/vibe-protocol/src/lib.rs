@@ -845,6 +845,37 @@ pub struct Health {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/ExtraCredential.ts")]
+pub struct ExtraCredential {
+    pub label: String,
+    pub source_path: String,
+    pub token_ok: bool,
+}
+
+/// One importable local provider candidate from CC Switch or tool configs.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/LocalCandidate.ts")]
+pub struct LocalCandidate {
+    pub client: String,
+    pub name: String,
+    pub kind: ProviderKind,
+    pub base_url: String,
+    #[serde(default)]
+    pub auth_ref: Option<String>,
+    pub token_ok: bool,
+    #[serde(default)]
+    pub proxy_managed: bool,
+    pub source_path: String,
+    #[serde(default)]
+    pub default_aliases: Vec<ModelAlias>,
+    #[serde(default)]
+    pub extra_credentials: Vec<ExtraCredential>,
+    /// When non-empty, supersedes single `kind` + `base_url` on import.
+    #[serde(default)]
+    pub protocols: Vec<ProviderProtocol>,
+}
+
 /// Body for `POST /_vp/providers` and the patch shape for `PUT`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/ProviderInput.ts")]
@@ -1071,6 +1102,8 @@ pub struct DashboardStats {
     pub window_label: String,
     /// Aggregates below use this rolling window (same as `hours` query).
     pub requests_in_window: i64,
+    /// Estimated USD cost summed across the rolling window.
+    pub estimated_cost_usd_in_window: String,
     pub success_rate_in_window: f64,
     pub input_tokens_in_window: i64,
     pub output_tokens_in_window: i64,

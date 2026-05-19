@@ -295,6 +295,7 @@ pub async fn try_forward_official_codex_ws(
                         status_decision.turn_id.as_deref(),
                         &state,
                         is_failover,
+                        prepared.log_ctx.codex_client_kind,
                     );
                 }
                 append_trace(&mut upstream_trace, &text);
@@ -533,6 +534,7 @@ struct CodexStatusInjection {
     emitted: bool,
     suppress_status: bool,
     is_failover: bool,
+    client_kind: codex_summary::CodexClientKind,
 }
 
 impl CodexStatusInjection {
@@ -543,6 +545,7 @@ impl CodexStatusInjection {
         turn_id: Option<&str>,
         state: &AppState,
         is_failover: bool,
+        client_kind: codex_summary::CodexClientKind,
     ) -> Option<Self> {
         visual.map(|visual| {
             let suppress_status = !state.codex_route_status_enabled()
@@ -554,6 +557,7 @@ impl CodexStatusInjection {
                 emitted: false,
                 suppress_status,
                 is_failover,
+                client_kind,
             }
         })
     }
@@ -581,6 +585,7 @@ impl CodexStatusInjection {
                 &self.visual,
                 response_id,
                 self.ttfs_ms,
+                self.client_kind,
             ));
         }
         frames

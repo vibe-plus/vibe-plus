@@ -251,6 +251,7 @@ pub struct DashboardRollingTotals {
     pub output_tokens: i64,
     pub output_tokens_per_sec: f64,
     pub decode_output_tokens_per_sec: f64,
+    pub estimated_cost_usd: String,
     pub avg_latency_ms: i64,
 }
 
@@ -692,7 +693,7 @@ impl Db {
                     id, started_at, app, provider_id, requested_model, upstream_model,
                     status_code, error, latency_ms, first_token_ms,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    estimated_cost_usd,
+                    estimated_cost_usd, estimated_cost_usd_micros,
                     wire, route_prefix, credential_id, cb_key, upstream_http_status,
                     upstream_error_preview, dedupe_key,
                     client_transport, request_headers,
@@ -708,11 +709,11 @@ impl Db {
                     keepalive_after_last_data_count, last_data_event_ms,
                     bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
                     request_body_ref, response_body_ref, client_response_body_ref
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                           ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
-                           ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39,
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                           ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28,
+                           ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39,
                            ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51,
-                           ?52, ?53, ?54, ?55, ?56, ?57, ?58)
+                           ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59)
                  ON CONFLICT(id) DO UPDATE SET
                     started_at = excluded.started_at,
                     app = excluded.app,
@@ -728,6 +729,7 @@ impl Db {
                     cache_read_tokens = excluded.cache_read_tokens,
                     cache_creation_tokens = excluded.cache_creation_tokens,
                     estimated_cost_usd = excluded.estimated_cost_usd,
+                    estimated_cost_usd_micros = excluded.estimated_cost_usd_micros,
                     wire = excluded.wire,
                     route_prefix = excluded.route_prefix,
                     credential_id = excluded.credential_id,
@@ -787,6 +789,7 @@ impl Db {
                     log.cache_read_tokens,
                     log.cache_creation_tokens,
                     log.estimated_cost_usd,
+                    usd_to_micros(&log.estimated_cost_usd),
                     log.wire,
                     log.route_prefix,
                     log.credential_id,
@@ -1052,6 +1055,7 @@ impl Db {
                         COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms > 0 THEN latency_ms ELSE 0 END), 0) as ok_sum_latency_ms,
                         COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms IS NOT NULL AND first_token_ms IS NOT NULL AND latency_ms > first_token_ms THEN output_tokens ELSE 0 END), 0) as ok_decode_output_tokens,
                         COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms IS NOT NULL AND first_token_ms IS NOT NULL AND latency_ms > first_token_ms THEN (latency_ms - first_token_ms) ELSE 0 END), 0) as ok_sum_decode_ms,
+                        COALESCE(sum(estimated_cost_usd_micros), 0) as estimated_cost_usd_micros,
                         COALESCE(avg(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), 0) as avg_latency_ms
                  FROM request_logs
                  WHERE started_at >= ?1",
@@ -1061,7 +1065,8 @@ impl Db {
                 let ok_sum_latency_ms: i64 = r.get(5)?;
                 let ok_decode_output_tokens: i64 = r.get(6)?;
                 let ok_sum_decode_ms: i64 = r.get(7)?;
-                let avg_latency_ms: f64 = r.get(8)?;
+                let estimated_cost_usd_micros: i64 = r.get(8)?;
+                let avg_latency_ms: f64 = r.get(9)?;
                 Ok(DashboardRollingTotals {
                     requests: r.get(0)?,
                     successes: r.get(1)?,
@@ -1077,6 +1082,7 @@ impl Db {
                     } else {
                         0.0
                     },
+                    estimated_cost_usd: micros_to_usd(estimated_cost_usd_micros),
                     avg_latency_ms: avg_latency_ms.round() as i64,
                 })
             })?)
@@ -1449,6 +1455,165 @@ impl Db {
                 has_more,
             })
         })
+    }
+
+    /// Move legacy inline body columns from the short-log DB to filesystem body refs.
+    ///
+    /// This is idempotent and intentionally bounded so gateway startup can make progress
+    /// over multiple runs without monopolizing SQLite for very large historical DBs.
+    pub fn migrate_inline_bodies_to_body_refs(&self, batch_limit: i64) -> Result<i64> {
+        let Some(store) = self.body_store().cloned() else {
+            return Ok(0);
+        };
+        let limit = batch_limit.clamp(1, 10_000);
+        let mut migrated = 0_i64;
+
+        let request_rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = self.with_short(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, request_body, response_body, client_response_body,
+                        request_body_ref, response_body_ref, client_response_body_ref
+                 FROM request_logs
+                 WHERE request_body IS NOT NULL
+                    OR response_body IS NOT NULL
+                    OR client_response_body IS NOT NULL
+                 ORDER BY started_at ASC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![limit], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })?;
+
+        for (
+            id,
+            request_body,
+            response_body,
+            client_response_body,
+            existing_request_ref,
+            existing_response_ref,
+            existing_client_ref,
+        ) in request_rows
+        {
+            let request_ref = match (existing_request_ref, request_body.as_deref()) {
+                (Some(r), _) => Some(r),
+                (None, Some(text)) => Some(store.write_text("request", &id, text)?),
+                (None, None) => None,
+            };
+            let response_ref = match (existing_response_ref, response_body.as_deref()) {
+                (Some(r), _) => Some(r),
+                (None, Some(text)) => Some(store.write_text("response", &id, text)?),
+                (None, None) => None,
+            };
+            let client_ref = match (existing_client_ref, client_response_body.as_deref()) {
+                (Some(r), _) => Some(r),
+                (None, Some(text)) => Some(store.write_text("client-response", &id, text)?),
+                (None, None) => None,
+            };
+            self.with_short(|c| {
+                c.execute(
+                    "UPDATE request_logs
+                     SET request_body = NULL,
+                         response_body = NULL,
+                         client_response_body = NULL,
+                         request_body_ref = ?2,
+                         response_body_ref = ?3,
+                         client_response_body_ref = ?4
+                     WHERE id = ?1",
+                    params![id, request_ref, response_ref, client_ref],
+                )?;
+                Ok(())
+            })?;
+            migrated += 1;
+        }
+
+        let remaining = limit.saturating_sub(migrated).max(0);
+        if remaining == 0 {
+            return Ok(migrated);
+        }
+
+        let attempt_rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = self.with_short(|c| {
+            let mut stmt = c.prepare(
+                "SELECT attempt_id, request_body, response_body, request_body_ref, response_body_ref
+                 FROM upstream_attempt_logs
+                 WHERE request_body IS NOT NULL OR response_body IS NOT NULL
+                 ORDER BY started_at ASC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![remaining], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })?;
+
+        for (
+            attempt_id,
+            request_body,
+            response_body,
+            existing_request_ref,
+            existing_response_ref,
+        ) in attempt_rows
+        {
+            let request_ref = match (existing_request_ref, request_body.as_deref()) {
+                (Some(r), _) => Some(r),
+                (None, Some(text)) => {
+                    Some(store.write_text("attempt-request", &attempt_id, text)?)
+                }
+                (None, None) => None,
+            };
+            let response_ref = match (existing_response_ref, response_body.as_deref()) {
+                (Some(r), _) => Some(r),
+                (None, Some(text)) => {
+                    Some(store.write_text("attempt-response", &attempt_id, text)?)
+                }
+                (None, None) => None,
+            };
+            self.with_short(|c| {
+                c.execute(
+                    "UPDATE upstream_attempt_logs
+                     SET request_body = NULL,
+                         response_body = NULL,
+                         request_body_ref = ?2,
+                         response_body_ref = ?3
+                     WHERE attempt_id = ?1",
+                    params![attempt_id, request_ref, response_ref],
+                )?;
+                Ok(())
+            })?;
+            migrated += 1;
+        }
+
+        Ok(migrated)
     }
 
     pub fn prune_short_logs(&self, policy: &ShortLogRetentionPolicy) -> Result<ShortLogPruneStats> {
@@ -3276,6 +3441,58 @@ mod tests {
         assert_eq!(detail.stream_terminal_seen, Some(true));
         assert!(detail.status_injected);
         assert_eq!(db.log_get("missing").unwrap().map(|l| l.id), None);
+    }
+
+    #[test]
+    fn migrates_inline_bodies_to_filesystem_refs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::memory()
+            .unwrap()
+            .with_body_store(temp.path().join("bodies"));
+        db.log_insert(&sample_log("log-inline", now_secs(), None, Some(200)))
+            .unwrap();
+
+        // Simulate a legacy row that still has inline bodies after the new columns exist.
+        db.with_short(|c| {
+            c.execute(
+                "UPDATE request_logs
+                 SET request_body = 'legacy-request', response_body = 'legacy-response',
+                     client_response_body = 'legacy-client',
+                     request_body_ref = NULL, response_body_ref = NULL, client_response_body_ref = NULL
+                 WHERE id = 'log-inline'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let migrated = db.migrate_inline_bodies_to_body_refs(100).unwrap();
+        assert_eq!(migrated, 1);
+        let detail = db.log_get("log-inline").unwrap().unwrap();
+        assert_eq!(detail.request_body.as_deref(), Some("legacy-request"));
+        assert_eq!(detail.response_body.as_deref(), Some("legacy-response"));
+        assert_eq!(
+            detail.client_response_body.as_deref(),
+            Some("legacy-client")
+        );
+        db.with_short(|c| {
+            let inline_count: i64 = c.query_row(
+                "SELECT count(*) FROM request_logs
+                 WHERE request_body IS NOT NULL OR response_body IS NOT NULL OR client_response_body IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            let ref_count: i64 = c.query_row(
+                "SELECT count(*) FROM request_logs
+                 WHERE request_body_ref IS NOT NULL AND response_body_ref IS NOT NULL AND client_response_body_ref IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(inline_count, 0);
+            assert_eq!(ref_count, 1);
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

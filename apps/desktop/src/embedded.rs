@@ -1,4 +1,4 @@
-//! In-process gateway lifecycle: start vibe-core and poll until ready.
+//! In-process gateway lifecycle: run vibe-core and poll until ready.
 
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -6,7 +6,7 @@ use std::time::Duration;
 use vibe_core::{config::Config, paths, state::AppState};
 use vibe_db::Db;
 
-/// Start the embedded gateway on the given port.
+/// Run the embedded gateway on the given port.
 /// This future runs forever (until the runtime is dropped).
 pub async fn start(port: u16) -> Result<()> {
     let db_path = paths::db_path()?;

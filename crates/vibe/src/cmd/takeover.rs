@@ -35,7 +35,7 @@ pub async fn run(args: TakeoverArgs) -> Result<()> {
         }
         _ => {
             println!("[!!]  warning: proxy not reachable at {base_url}");
-            println!("      run `vibe start` first for the config to take effect.\n");
+            println!("      run `vibe up` first for the config to take effect.\n");
         }
     }
 

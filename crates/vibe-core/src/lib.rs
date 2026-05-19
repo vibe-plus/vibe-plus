@@ -5,7 +5,7 @@
 //!
 //! Public entry points:
 //! - [`AppState::init`] — wire up DB + HTTP client + config
-//! - [`server::serve`] — start the axum app on a TcpListener
+//! - [`server::serve`] — run the axum app on a TcpListener
 
 pub mod auth_fingerprint;
 pub mod cache;
@@ -25,6 +25,7 @@ pub mod forward;
 pub mod model_defaults;
 pub mod oauth_identity;
 pub mod paths;
+pub mod provider_import;
 pub mod providers;
 pub mod router;
 pub mod secrets;

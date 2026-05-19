@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { nextTick, ref, useTemplateRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import BrandWordmark from "../components/brand-wordmark.vue";
+import { BRAND_NAME } from "../lib/brand.ts";
 
 interface SlotFields {
   ttfs?: string;
@@ -25,8 +27,8 @@ interface ChatMessage {
 
 const { t, locale } = useI18n();
 
-const UPSTREAM_PRIMARY = "Vibe+ Demo";
-const UPSTREAM_BACKUP = "Vibe+ Backup";
+const UPSTREAM_PRIMARY = `${BRAND_NAME} Demo`;
+const UPSTREAM_BACKUP = `${BRAND_NAME} Backup`;
 const MODEL = "gpt-5.5";
 
 const TOOL_INSTALL = "npm install -g @vibe-plus/cli@latest >/dev/null 2>&1";
@@ -237,7 +239,10 @@ async function switchUpstream() {
             v-else-if="msg.type === 'slot'"
             class="font-mono text-[11px] sm:text-[12px] text-center leading-relaxed px-2 py-0.5"
           >
-            <span class="text-[#5fb8d1] font-semibold">Vibe+</span>
+            <BrandWordmark
+              variant="lander"
+              class="text-[#5fb8d1] font-semibold [&_span:first-child]:text-[#5fb8d1] [&_span:last-child]:text-[#5fb8d1]"
+            />
             <span class="text-[#8fd0e0] mx-1.5">│</span>
             <template v-for="(field, i) in renderSlot(msg.slot!)" :key="field.k">
               <span v-if="i > 0" class="mx-1.5 text-[#8fd0e0]">·</span>
@@ -357,9 +362,9 @@ async function switchUpstream() {
 {
   "en": {
     "chat": {
-      "user1": "Install Vibe+ from npm.",
+      "user1": "Install Vibe Plus from npm.",
       "processed": "Processed in 12s",
-      "reply1": "Installed Vibe+: a unified local AI API gateway for developer tools.",
+      "reply1": "Installed Vibe Plus: a unified local AI API gateway for developer tools.",
       "user2": "Keep going — run vibe doctor for me.",
       "reply2": "All good: 5/5 checks passed.",
       "user3": "Show me what's in ~/.vibe.",
@@ -370,14 +375,14 @@ async function switchUpstream() {
       "receiving": "receiving",
       "switchBtn": "Switch upstream",
       "upstreamPrefix": "Upstream",
-      "windowTitle": "Codex · Vibe+ proxy"
+      "windowTitle": "Codex · Vibe Plus proxy"
     }
   },
   "zh-CN": {
     "chat": {
-      "user1": "请你从 npm 安装 Vibe+。",
+      "user1": "请你从 npm 安装 Vibe Plus。",
       "processed": "已处理 12s",
-      "reply1": "已从 npm 安装 Vibe+：面向开发者工具的一体化本地 AI API 网关。",
+      "reply1": "已从 npm 安装 Vibe Plus：面向开发者工具的一体化本地 AI API 网关。",
       "user2": "继续，再帮我跑一遍 vibe doctor。",
       "reply2": "一切正常：5/5 检查项通过。",
       "user3": "帮我看看 ~/.vibe 里都有什么。",
@@ -388,7 +393,7 @@ async function switchUpstream() {
       "receiving": "接收中",
       "switchBtn": "切换上游",
       "upstreamPrefix": "上游",
-      "windowTitle": "Codex · Vibe+ proxy"
+      "windowTitle": "Codex · Vibe Plus proxy"
     }
   }
 }

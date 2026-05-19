@@ -4,7 +4,7 @@ pub mod gateway;
 pub mod install;
 mod install_codex_app;
 pub mod logs;
-pub mod start;
+pub mod daemon;
 pub mod status;
 pub mod statusline;
 pub mod stop;

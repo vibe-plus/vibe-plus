@@ -285,8 +285,8 @@ impl Default for CodexSummaryClientsConfig {
                 suffix: None,
             },
             unknown: CodexSummaryClientConfig {
-                enabled: false,
-                style: CodexSummaryStyle::InlineChips,
+                enabled: true,
+                style: CodexSummaryStyle::PlainCompact,
                 prefix: None,
                 suffix: None,
             },

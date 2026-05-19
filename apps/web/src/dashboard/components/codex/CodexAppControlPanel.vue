@@ -148,7 +148,7 @@ onMounted(() => {
       class="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
     >
       Quit and Restart act on the native Codex desktop app. Unsaved in-app state belongs to Codex,
-      not Vibe+.
+      not Vibe Plus.
     </div>
 
     <div

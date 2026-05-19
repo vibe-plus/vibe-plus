@@ -399,7 +399,7 @@ const pendingCount = computed(
       "imported": "Imported",
       "tokenMissing": "Token missing",
       "tokenOk": "Token OK",
-      "vibeManaged": "Vibe managed"
+      "vibeManaged": "Vibe Plus managed"
     },
     "empty": {
       "description": "Supports Codex CLI (~/.codex), Claude (~/.claude), and more",
@@ -430,7 +430,7 @@ const pendingCount = computed(
       "imported": "已导入",
       "tokenMissing": "缺少 Token",
       "tokenOk": "Token 正常",
-      "vibeManaged": "Vibe 管理"
+      "vibeManaged": "Vibe Plus 管理"
     },
     "empty": {
       "description": "支持 Codex CLI（~/.codex）、Claude（~/.claude）等本地工具",

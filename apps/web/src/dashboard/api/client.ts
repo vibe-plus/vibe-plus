@@ -442,6 +442,7 @@ export interface DashboardStats {
   window_hours?: number;
   window_label?: string;
   requests_in_window?: number;
+  estimated_cost_usd_in_window?: string;
   success_rate_in_window?: number;
   input_tokens_in_window?: number;
   output_tokens_in_window?: number;

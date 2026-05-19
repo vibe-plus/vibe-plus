@@ -91,6 +91,7 @@ pub(super) struct CodexStatusInjection {
     ttfs_ms: i64,
     emitted: bool,
     suppress_status: bool,
+    client_kind: codex_summary::CodexClientKind,
 }
 
 impl CodexStatusInjection {
@@ -98,12 +99,14 @@ impl CodexStatusInjection {
         visual: Option<codex_visual::CodexVisualContext>,
         ttfs_ms: i64,
         suppress_status: bool,
+        client_kind: codex_summary::CodexClientKind,
     ) -> Option<Self> {
         visual.map(|visual| Self {
             visual,
             ttfs_ms,
             emitted: false,
             suppress_status,
+            client_kind,
         })
     }
 
@@ -121,6 +124,7 @@ impl CodexStatusInjection {
                 &self.visual,
                 response_id,
                 self.ttfs_ms,
+                self.client_kind,
             ));
         }
         frames
@@ -516,6 +520,7 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
                             visual.clone(),
                             request_started_instant.elapsed().as_millis() as i64,
                             !should_show_status || !state.codex_route_status_enabled(),
+                            codex_client_kind,
                         );
                     }
                     buf.push_str(&String::from_utf8_lossy(&bytes));

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the vibe CLI, stop any prior instance (pid file), then run the gateway in the foreground.
+# Build the vibe CLI, stop any prior instance (pid file), then bring up the gateway in the foreground.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -19,4 +19,4 @@ for i in $(seq 1 20); do
     sleep 0.5
 done
 
-exec "${ROOT}/target/debug/vibe" start --foreground --port "${PORT}"
+exec "${ROOT}/target/debug/vibe" up --foreground --port "${PORT}"

@@ -27,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ClientStatus::export_all()?;
     ClientTakeoverResult::export_all()?;
     Health::export_all()?;
+    LocalCandidate::export_all()?;
+    ExtraCredential::export_all()?;
     ProviderInput::export_all()?;
     ProvidersOverview::export_all()?;
     CredentialPoolStatus::export_all()?;

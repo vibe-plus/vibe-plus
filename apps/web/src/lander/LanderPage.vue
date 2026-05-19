@@ -10,6 +10,8 @@ import VpIcon from "../dashboard/components/vp-icon.vue";
 import type { vp_icon_name } from "../dashboard/components/vp-icon.vue";
 import HeroChatDemo from "./HeroChatDemo.vue";
 import WaveRoutingDemo from "./WaveRoutingDemo.vue";
+import BrandWordmark from "../components/brand-wordmark.vue";
+import { BRAND_NAME } from "../lib/brand.ts";
 
 const { t } = useI18n();
 
@@ -105,10 +107,8 @@ function copy(text: string) {
     <nav class="sticky top-0 z-50 border-b border-[#dfe9e4] bg-[#f6fbf8]/85 backdrop-blur-xl">
       <div class="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-4">
         <a href="/" class="flex items-center gap-2 shrink-0">
-          <img :src="logoUrl" alt="Vibe+" class="w-7 h-7 rounded-lg" />
-          <span class="text-base font-bold tracking-tight">
-            Vibe<span class="text-[#4dd4ad]">+</span>
-          </span>
+          <img :src="logoUrl" :alt="BRAND_NAME" class="w-7 h-7 rounded-lg" />
+          <BrandWordmark variant="lander" class="text-base font-bold tracking-tight" />
         </a>
 
         <div class="hidden sm:flex items-center gap-5 text-sm text-[#5a6b65] ml-2">
@@ -304,11 +304,10 @@ function copy(text: string) {
                     </span>
                   </div>
                   <span class="text-[#4dd4ad] text-base">→</span>
-                  <span
+                  <BrandWordmark
+                    variant="lander"
                     class="px-2 py-1 rounded-md bg-[#e7f8ef] border border-[#4dd4ad]/40 text-[#1f7a55] font-semibold"
-                  >
-                    Vibe+
-                  </span>
+                  />
                   <span class="text-[#4dd4ad] text-base">→</span>
                   <span
                     class="px-2 py-1 rounded-md bg-white border border-[#dfe9e4] text-[#0f1f1a] font-medium"
@@ -327,10 +326,13 @@ function copy(text: string) {
                 class="rounded-xl border border-[#dfe9e4] bg-[#f0f9f4] p-4"
               >
                 <div class="font-mono text-[11px] leading-relaxed">
-                  <span class="text-[#5fb8d1] font-semibold">Vibe+</span>
+                  <BrandWordmark
+                    variant="lander"
+                    class="text-[#5fb8d1] font-semibold [&_span:last-child]:text-[#5fb8d1]"
+                  />
                   <span class="text-[#8fd0e0] mx-1">│</span>
                   <span class="text-[#3aa7c4]">upstream =</span>
-                  <span class="text-[#1a8aa3] font-medium">Vibe+ Backup</span>
+                  <span class="text-[#1a8aa3] font-medium">{{ BRAND_NAME }} Backup</span>
                   <span class="text-[#8fd0e0] mx-1">·</span>
                   <span class="text-[#1a8aa3] font-medium">168 tok/s</span>
                   <span class="text-[#8fd0e0] mx-1">·</span>
@@ -446,9 +448,7 @@ function copy(text: string) {
       >
         <div class="flex items-center gap-2">
           <img :src="logoUrl" alt="" class="w-5 h-5 rounded opacity-80" />
-          <span class="font-semibold text-[#0f1f1a]">
-            Vibe<span class="text-[#4dd4ad]">+</span>
-          </span>
+          <BrandWordmark variant="lander" class="font-semibold text-[#0f1f1a]" />
           <span>· {{ t("footer.tagline") }}</span>
         </div>
         <div class="flex items-center gap-5">
@@ -493,7 +493,7 @@ function copy(text: string) {
       "gradient": "visible",
       "titlePrefix": "Make your AI usage",
       "trust": "Drops into",
-      "vision": "Vibe+ is the unified gateway and entry point for vibe coding."
+      "vision": "Vibe Plus is the unified gateway and entry point for vibe coding."
     },
     "install": {
       "readyDescription": "Your local gateway is running on port {port} with {count} active provider(s).",
@@ -501,17 +501,17 @@ function copy(text: string) {
       "subtitle": "Install, open dashboard, import credentials — done.",
       "title": "Install in one line",
       "importTitle": "Already on CC Switch, or signed into Codex / Claude?",
-      "importBody": "Vibe+ auto-detects local credentials on first launch — no re-login, no copy-pasting keys."
+      "importBody": "Vibe Plus auto-detects local credentials on first launch — no re-login, no copy-pasting keys."
     },
-    "nav": { "features": "Why Vibe+", "install": "Install" },
+    "nav": { "features": "Why Vibe Plus", "install": "Install" },
     "pain": {
       "history": {
-        "desc": "Lost your Codex chat history? Vibe+ unifies it across upstreams — we fix it for you.",
-        "miniNote": "Codex only ever sees one Vibe+ — the upstream swap behind it is invisible.",
+        "desc": "Lost your Codex chat history? Vibe Plus unifies it across upstreams — we fix it for you.",
+        "miniNote": "Codex only ever sees one Vibe Plus — the upstream swap behind it is invisible.",
         "title": "One chat history, every upstream"
       },
       "routing": {
-        "desc": "Most tools rotate a→b→c→d→e→f one at a time. A few 503s in a row means minutes of waiting. Vibe+ tries 1, then 2, then 3 in parallel — worst case 3 waves to a reply.",
+        "desc": "Most tools rotate a→b→c→d→e→f one at a time. A few 503s in a row means minutes of waiting. Vibe Plus tries 1, then 2, then 3 in parallel — worst case 3 waves to a reply.",
         "title": "Three waves to a reply, not six sequential failures"
       },
       "title": "Three things you'll feel from day one",
@@ -547,7 +547,7 @@ function copy(text: string) {
       "gradient": "看得见",
       "titlePrefix": "让你的 AI 使用情况",
       "trust": "已接管",
-      "vision": "Vibe+ 是 Vibe Coding 的统一网关与入口。"
+      "vision": "Vibe Plus 是 Vibe Coding 的统一网关与入口。"
     },
     "install": {
       "readyDescription": "你的本地网关正在端口 {port} 运行，已有 {count} 个供应商启用。",
@@ -555,17 +555,17 @@ function copy(text: string) {
       "subtitle": "装完打开控制台，导入凭证就能直接用。",
       "title": "一行装好",
       "importTitle": "已经在用 CC Switch 或官方 Codex / Claude？",
-      "importBody": "Vibe+ 启动时会自动找到本地凭证导入，不用重新登录、也不用手抄 key。"
+      "importBody": "Vibe Plus 启动时会自动找到本地凭证导入，不用重新登录、也不用手抄 key。"
     },
-    "nav": { "features": "为什么是 Vibe+", "install": "安装" },
+    "nav": { "features": "为什么是 Vibe Plus", "install": "安装" },
     "pain": {
       "history": {
-        "desc": "Codex 聊天记录没了？Vibe+ 具有聊天记录统一功能，直接帮你修好。",
-        "miniNote": "Codex 眼里只有一个 Vibe+，上游切换它根本看不到。",
+        "desc": "Codex 聊天记录没了？Vibe Plus 具有聊天记录统一功能，直接帮你修好。",
+        "miniNote": "Codex 眼里只有一个 Vibe Plus，上游切换它根本看不到。",
         "title": "聊天记录从此一统"
       },
       "routing": {
-        "desc": "别人 a→b→c→d→e→f 一个个轮，连续撞上几个 503 就要等几分钟。Vibe+ 第 1 波 1 个、第 2 波 2 个并行、第 3 波 3 个并行 —— 最坏 3 波内必有回复。",
+        "desc": "别人 a→b→c→d→e→f 一个个轮，连续撞上几个 503 就要等几分钟。Vibe Plus 第 1 波 1 个、第 2 波 2 个并行、第 3 波 3 个并行 —— 最坏 3 波内必有回复。",
         "title": "三波拿到结果，不是六次失败一个个等"
       },
       "title": "三件用户第一天就能感受到的差异",

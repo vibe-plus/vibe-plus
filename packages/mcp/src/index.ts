@@ -83,7 +83,7 @@ server.registerTool(
   "list_app_logs",
   {
     description:
-      "List Vibe+ application/runtime logs (operator events, circuit events, provider/credential changes). Not network traffic.",
+      "List Vibe Plus application/runtime logs (operator events, circuit events, provider/credential changes). Not network traffic.",
     inputSchema: {
       limit: z.number().int().min(1).max(500).optional(),
       since: z.number().int().optional(),

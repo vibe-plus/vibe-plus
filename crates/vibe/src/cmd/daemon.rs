@@ -13,7 +13,7 @@ fn default_port() -> u16 {
 }
 
 #[derive(clap::Args)]
-pub struct StartArgs {
+pub struct UpArgs {
     /// Port to listen on.
     #[arg(long, default_value_t = default_port())]
     pub port: u16,
@@ -23,12 +23,27 @@ pub struct StartArgs {
     pub foreground: bool,
 }
 
-pub async fn run(args: StartArgs) -> Result<()> {
+pub async fn run(args: UpArgs) -> Result<()> {
     let base_url = gateway::local_base_url(args.port);
     if gateway::is_responsive(&base_url).await {
-        println!("{}", text_env("cli-start-already-running"));
-        println!("  endpoint: {base_url}");
-        return Ok(());
+        if let Some(running) = gateway::fetch_running_version(&base_url).await {
+            if running != gateway::current_version() {
+                println!(
+                    "{}",
+                    gateway::upgrade_restart_message(&running, gateway::current_version())
+                );
+                gateway::stop_at_port(args.port).await?;
+                gateway::wait_until_stopped(&base_url, Duration::from_secs(15)).await?;
+            } else {
+                println!("{}", text_env("cli-up-already-running"));
+                println!("  endpoint: {base_url}");
+                return Ok(());
+            }
+        } else {
+            println!("{}", text_env("cli-up-already-running"));
+            println!("  endpoint: {base_url}");
+            return Ok(());
+        }
     }
 
     let pid_path = paths::pid_path()?;
@@ -42,14 +57,14 @@ pub async fn run(args: StartArgs) -> Result<()> {
         return Ok(());
     }
 
-    start_server(args.port).await
+    run_server(args.port).await
 }
 
-/// Spawn `vibe start --foreground` detached from this terminal.
+/// Spawn `vibe up --foreground` detached from this terminal.
 pub fn spawn_background(port: u16) -> Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("start")
+    cmd.arg("up")
         .arg("--foreground")
         .arg("--port")
         .arg(port.to_string())
@@ -69,19 +84,19 @@ pub fn spawn_background(port: u16) -> Result<()> {
             .spawn()?;
     }
 
-    println!("{}", text_env("cli-start-started-background"));
+    println!("{}", text_env("cli-up-running-background"));
     println!("  endpoint: {}", gateway::local_base_url(port));
     Ok(())
 }
 
-pub async fn start_server(port: u16) -> Result<()> {
+pub async fn run_server(port: u16) -> Result<()> {
     if let Some(summary) = vibe_core::codex_history::try_auto_unify() {
         let changes = summary.sqlite_rows_changed + summary.rollout_fields_changed;
         if changes > 0 {
             tracing::info!(
                 sqlite_rows = summary.sqlite_rows_changed,
                 rollout_fields = summary.rollout_fields_changed,
-                "codex history unified on gateway start"
+                "codex history unified on gateway up"
             );
         }
     }
@@ -94,8 +109,16 @@ pub async fn start_server(port: u16) -> Result<()> {
     let mut cfg = Config::default();
     cfg.server.port = port;
     let db = Db::open(&db_path)?.with_body_store(body_dir);
+    match db.migrate_inline_bodies_to_body_refs(10_000) {
+        Ok(n) if n > 0 => tracing::info!(
+            rows = n,
+            "legacy inline log bodies moved to filesystem refs"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(?e, "legacy inline body migration failed on gateway up"),
+    }
     if let Err(e) = db.prune_short_logs(&vibe_db::ShortLogRetentionPolicy::default()) {
-        tracing::warn!(?e, "short log retention prune failed on gateway start");
+        tracing::warn!(?e, "short log retention prune failed on gateway up");
     }
     let state = AppState::init(db, cfg, port)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;

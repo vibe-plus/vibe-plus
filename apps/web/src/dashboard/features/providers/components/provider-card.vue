@@ -17,6 +17,12 @@ import UiBadge from "../../../components/ui/badge.vue";
 import UiButton from "../../../components/ui/button.vue";
 import { primaryPlanPercent } from "../../../utils/providers-display.ts";
 import { brandHintFromHost } from "../../../utils/brand-hint.ts";
+import {
+  buildProviderRowTags,
+  STATUS_TAG_CLASS,
+  type ProviderRowTagLabels,
+} from "../../../utils/provider-status-tags.ts";
+import { cn } from "../../../../lib/utils.ts";
 
 type ProviderGroupKey = "native" | "bridged" | "other";
 type ClientToolId = "codex" | "opencode" | "claude-code";
@@ -252,36 +258,50 @@ const providerPool = computed(() => ({
   }, null),
 }));
 
-const providerStateClass = computed(() => {
-  if (!providerEnabled.value) return "bg-slate-100 text-slate-600";
-  if (providerCircuitState.value !== "closed") return "bg-amber-100 text-amber-800";
-  return "bg-sky-100 text-sky-700";
+const providerRowTagLabels = computed<ProviderRowTagLabels>(() => ({
+  operational: t("tags.operational"),
+  paused: t("state.disabled"),
+  limited: t("tags.limited"),
+  circuit: t("tags.circuit"),
+  recovering: t("tags.recovering"),
+  degraded: t("tags.degraded"),
+  readyCount: (count) => t("credentials.available", { count }),
+  disabledCreds: (count) => t("credentials.disabled", { count }),
+  noReady: t("tags.noReady"),
+}));
+
+const providerStatusTags = computed(() => {
+  const pool = props.poolRows;
+  const rateLimited = pool.filter((row) => row.is_rate_limited).length;
+  const openCircuit = pool.filter((row) => row.circuit_open).length;
+  const total = pool.length;
+  const enabled = pool.filter((row) => row.enabled).length;
+  const available = providerPool.value.available;
+  const rollingRequests = pool.reduce((sum, row) => sum + (row.rolling_requests ?? 0), 0);
+  const rollingSuccesses = pool.reduce((sum, row) => sum + (row.rolling_successes ?? 0), 0);
+  const successRate = rollingRequests > 0 ? rollingSuccesses / rollingRequests : 1;
+
+  return buildProviderRowTags({
+    providerEnabled: providerEnabled.value,
+    circuit: providerCircuitState.value,
+    availableCredentials: available,
+    enabledCredentials: enabled,
+    totalCredentials: total,
+    rateLimitedCredentials: rateLimited,
+    openCircuitCredentials: openCircuit,
+    successRate,
+    labels: providerRowTagLabels.value,
+  });
 });
 
-const providerStateBadge = computed(() => {
-  if (!providerEnabled.value) return { icon: "pause", label: t("state.disabled") };
-  if (providerCircuitState.value !== "closed") {
-    return {
-      icon: "clock",
-      label: circuitCooldownText(providerPool.value.cooldownMax),
-    };
+const providerCooldownTag = computed(() => {
+  if (providerEnabled.value && providerCircuitState.value !== "closed") {
+    const label = circuitCooldownText(providerPool.value.cooldownMax);
+    if (label) {
+      return { key: "cooldown", label, tone: "warn" as const };
+    }
   }
-  return { icon: "circle", label: t("state.idle") };
-});
-const providerStateText = computed(() => providerStateBadge.value.label);
-
-const credentialSummary = computed(() => {
-  const pieces = [t("credentials.available", { count: providerPool.value.available })];
-  if (providerPool.value.open)
-    pieces.push(t("credentials.open", { count: providerPool.value.open }));
-  if (providerPool.value.disabled)
-    pieces.push(t("credentials.disabled", { count: providerPool.value.disabled }));
-  if (providerPool.value.halfOpen)
-    pieces.push(t("credentials.probing", { count: providerPool.value.halfOpen }));
-  if (providerPool.value.cooldownMax != null && providerPool.value.open) {
-    pieces.push(circuitCooldownText(providerPool.value.cooldownMax));
-  }
-  return pieces.join(" · ");
+  return null;
 });
 </script>
 
@@ -331,12 +351,21 @@ const credentialSummary = computed(() => {
                   <h3 class="truncate text-base font-semibold text-foreground sm:text-lg">
                     {{ card.title }}
                   </h3>
-                  <span
-                    class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
-                    :class="providerStateClass"
+                  <UiBadge
+                    v-for="tag in providerStatusTags"
+                    :key="tag.key"
+                    :class="cn('px-2 py-0.5 text-[11px]', STATUS_TAG_CLASS[tag.tone])"
                   >
-                    {{ providerStateText }}
-                  </span>
+                    {{ tag.label }}
+                  </UiBadge>
+                  <UiBadge
+                    v-if="providerCooldownTag"
+                    :class="
+                      cn('px-2 py-0.5 text-[11px]', STATUS_TAG_CLASS[providerCooldownTag.tone])
+                    "
+                  >
+                    {{ providerCooldownTag.label }}
+                  </UiBadge>
                   <UiBadge v-if="tokensPerSec" variant="secondary">
                     {{ tokensPerSec.toFixed(1) }} tok/s
                   </UiBadge>
@@ -400,7 +429,9 @@ const credentialSummary = computed(() => {
                 {{ t("actions.add") }}
               </UiButton>
             </div>
-            <p class="mt-1 text-sm text-foreground">{{ credentialSummary }}</p>
+            <p class="mt-1 text-sm text-foreground">
+              {{ t("credentials.total", { count: creds.length }) }}
+            </p>
           </div>
           <div
             class="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
@@ -500,8 +531,9 @@ const credentialSummary = computed(() => {
       "success": "{pct}% ok"
     },
     "credentials": {
-      "available": "{count} available",
+      "available": "{count} ready",
       "disabled": "{count} disabled",
+      "total": "{count} credential(s)",
       "empty": "No credentials yet.",
       "hidden": "{count} more hidden",
       "open": "{count} open",
@@ -532,6 +564,14 @@ const credentialSummary = computed(() => {
     "sections": { "credentials": "Credentials", "routing": "Upstreams" },
     "speed": { "untested": "untested" },
     "state": { "disabled": "disabled", "idle": "idle" },
+    "tags": {
+      "circuit": "circuit",
+      "degraded": "degraded",
+      "limited": "limited",
+      "noReady": "not ready",
+      "operational": "operational",
+      "recovering": "recovering"
+    },
     "support": {
       "bridge": "bridge",
       "native": "native",
@@ -575,8 +615,9 @@ const credentialSummary = computed(() => {
       "success": "成功率 {pct}%"
     },
     "credentials": {
-      "available": "{count} 可用",
+      "available": "{count} 个就绪",
       "disabled": "{count} 已禁用",
+      "total": "共 {count} 个凭证",
       "empty": "暂无凭证。",
       "hidden": "另有 {count} 个已隐藏",
       "open": "{count} 熔断",
@@ -607,6 +648,14 @@ const credentialSummary = computed(() => {
     "sections": { "credentials": "凭证", "routing": "上游" },
     "speed": { "untested": "未测试" },
     "state": { "disabled": "已禁用", "idle": "空闲" },
+    "tags": {
+      "circuit": "熔断",
+      "degraded": "降级",
+      "limited": "限流",
+      "noReady": "无就绪",
+      "operational": "正常",
+      "recovering": "恢复中"
+    },
     "support": {
       "bridge": "桥接",
       "native": "原生",

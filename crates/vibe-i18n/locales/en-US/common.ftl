@@ -7,10 +7,10 @@ desktop-tray-quit = Quit Vibe Plus
 desktop-gateway-ready = Gateway ready
 desktop-gateway-unavailable = Gateway unavailable
 
-cli-start-already-running = vibe is already running.
-cli-start-started-background = vibe started in background.
-cli-stop-not-running = vibe is not running.
-cli-stop-stopped = vibe stopped.
-cli-doctor-title = vibe doctor
+cli-up-already-running = Vibe Plus is already running.
+cli-up-running-background = Vibe Plus is up in the background.
+cli-stop-not-running = Vibe Plus is not running.
+cli-stop-stopped = Vibe Plus stopped.
+cli-doctor-title = Vibe Plus doctor
 
 gateway-no-credentials = No usable credentials. All have been disabled (typically after upstream 401/403 auth errors). Re-enable one in the dashboard before retrying.

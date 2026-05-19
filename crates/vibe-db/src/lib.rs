@@ -101,6 +101,9 @@ impl Db {
             M::up(include_str!(
                 "../migrations/025_body_refs_and_short_log_prune.sql"
             )),
+            M::up(include_str!(
+                "../migrations/026_request_log_cost_micros.sql"
+            )),
         ])
     }
 

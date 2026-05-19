@@ -1,12 +1,11 @@
 import { isRef } from "vue";
 import type { RouteLocationNormalized } from "vue-router";
 import { i18n } from "../dashboard/i18n.ts";
-
-const BRAND = "Vibe+";
+import { brandHomeTitle, brandPageTitle } from "./brand.ts";
 
 const HOME_TITLE = {
-  en: `${BRAND} · The companion for vibe coding`,
-  "zh-CN": `${BRAND} · Vibe Coding 最佳伴侣`,
+  en: brandHomeTitle("The companion for vibe coding"),
+  "zh-CN": brandHomeTitle("Vibe Coding 最佳伴侣"),
 } as const;
 
 const ROUTE_PAGE_TITLE: Record<string, { en: string; "zh-CN": string }> = {
@@ -33,5 +32,5 @@ export function syncDocumentTitle(to: RouteLocationNormalized) {
 
   const routeName = typeof to.name === "string" ? to.name : null;
   const page = routeName ? ROUTE_PAGE_TITLE[routeName] : null;
-  document.title = page ? `${page[locale]} · ${BRAND}` : HOME_TITLE[locale];
+  document.title = page ? brandPageTitle(page[locale]) : HOME_TITLE[locale];
 }

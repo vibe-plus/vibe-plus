@@ -8,6 +8,7 @@ import VpIcon from "./components/vp-icon.vue";
 import type { vp_icon_name } from "./components/vp-icon.vue";
 import { workspaceViewFromQuery, type WorkspaceView } from "./utils/workspace-view.ts";
 import { useWebCompatibility } from "./composables/use-web-compatibility.ts";
+import BrandWordmark from "../components/brand-wordmark.vue";
 
 const { online, status } = useProxyStatus();
 const route = useRoute();
@@ -131,7 +132,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
           />
         </RouterLink>
         <div class="min-w-0 flex-1">
-          <span class="brand-wordmark-mobile block truncate text-vp-text">Vibe+</span>
+          <BrandWordmark class="brand-wordmark-mobile block truncate text-vp-text" />
         </div>
         <div
           class="flex items-center gap-1.5 rounded-full border border-vp-border/70 bg-vp-surface/80 px-2 py-1 text-[10px] text-vp-muted"
@@ -163,7 +164,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
             />
           </RouterLink>
           <div class="min-w-0 hidden md:block">
-            <span class="font-semibold text-[15px] tracking-tight text-vp-text">Vibe+</span>
+            <BrandWordmark class="font-semibold text-[15px] tracking-tight text-vp-text" />
           </div>
         </div>
         <div class="flex items-center justify-center md:justify-start gap-2 mt-3 px-0.5 flex-wrap">
@@ -308,7 +309,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
 {
   "en": {
     "compat": {
-      "updateRequired": "Vibe CLI update required"
+      "updateRequired": "Vibe Plus CLI update required"
     },
     "nav": {
       "home": "Back to landing page",
@@ -333,7 +334,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
   },
   "zh-CN": {
     "compat": {
-      "updateRequired": "需要更新 Vibe CLI"
+      "updateRequired": "需要更新 Vibe Plus CLI"
     },
     "nav": {
       "home": "返回落地页",

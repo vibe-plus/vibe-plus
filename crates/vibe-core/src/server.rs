@@ -14,6 +14,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use axum::{Json, Router};
@@ -33,28 +34,32 @@ use vibe_protocol::{
     AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexPlanRefreshResult,
     Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats,
     Health, HealthSummary, Meta, Provider, ProviderAuthPoolSummary, ProviderCodexPlanItem,
-    ProviderHealth, ProviderHealthSummary, ProviderInput, ProviderUpstreamSummary,
+    ProviderHealth, ProviderHealthSummary, ProviderInput, ProviderUpstreamSummary, LocalCandidate,
     ProvidersOverview, RealtimeSnapshot, RequestLog, Status, Upstream, UpstreamAttemptLog,
     UsageSummary,
 };
 
 mod clients;
+mod config;
 mod codex_http;
 mod codex_ws;
 mod dashboard;
 mod fetch;
 mod files;
+mod import;
 mod models;
 mod providers;
 mod proxy;
 mod records;
 
 use clients::*;
+use config::*;
 use codex_http::*;
 use codex_ws::*;
 use dashboard::*;
 use fetch::*;
 use files::*;
+use import::*;
 use models::*;
 use providers::*;
 use proxy::*;
@@ -73,6 +78,10 @@ pub fn router(state: AppState) -> Router {
         // health / status
         .route("/health", get(health))
         .route("/status", get(status))
+        .route(
+            "/_vp/config/codex",
+            get(get_codex_gateway_settings).put(put_codex_gateway_settings),
+        )
         .route("/_vp/meta", get(get_meta))
         // Generic model APIs (no tool prefix — for direct / legacy usage)
         .route("/v1/models", get(list_models_all))
@@ -106,6 +115,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1beta/models/*path", post(post_gemini))
         // providers CRUD
         .route("/_vp/providers", get(list_providers).post(create_provider))
+        .route(
+            "/_vp/providers/import-local",
+            get(scan_import_local).post(import_local),
+        )
         .route("/_vp/providers/overview", get(provider_overview))
         .route("/_vp/clients/:client/status", get(client_status))
         .route("/_vp/clients/:client/doctor", get(client_doctor))
@@ -172,6 +185,7 @@ pub fn router(state: AppState) -> Router {
         .route("/_vp/usage/summary", get(usage_summary))
         .route("/_vp/stats/dashboard", get(dashboard_stats))
         .route("/_vp/realtime", get(realtime_snapshot))
+        .route("/_vp/stream/realtime", get(realtime_stream))
         .route("/_vp/app-logs", get(list_app_logs))
         .route("/_vp/logs/app", get(list_app_log_records))
         .route("/_vp/records/requests", get(list_request_records))
@@ -248,7 +262,7 @@ async fn health() -> Json<Health> {
     Json(Health { ok: true })
 }
 
-async fn realtime_snapshot(State(state): State<AppState>) -> Json<RealtimeSnapshot> {
+fn compute_realtime_snapshot(state: &AppState) -> RealtimeSnapshot {
     let transport = state.codex_transport.snapshot();
     let mut snapshot = state.realtime.snapshot(transport);
     if let Ok(providers) = state.db.provider_list() {
@@ -262,7 +276,33 @@ async fn realtime_snapshot(State(state): State<AppState>) -> Json<RealtimeSnapsh
             }
         }
     }
-    Json(snapshot)
+    snapshot
+}
+
+async fn realtime_snapshot(State(state): State<AppState>) -> Json<RealtimeSnapshot> {
+    Json(compute_realtime_snapshot(&state))
+}
+
+/// SSE stream of `RealtimeSnapshot` frames, ~2 Hz.
+///
+/// Each connection holds its own interval timer and pulls a fresh snapshot
+/// from `state.realtime` on every tick. No event bus, no fan-out hub — when
+/// the client disconnects, the stream drops and the timer goes with it.
+async fn realtime_stream(
+    State(state): State<AppState>,
+) -> Sse<impl futures_util::Stream<Item = Result<SseEvent, std::convert::Infallible>>> {
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let stream = tokio_stream::wrappers::IntervalStream::new(ticker).map(move |_| {
+        let snapshot = compute_realtime_snapshot(&state);
+        let payload = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
+        Ok::<_, std::convert::Infallible>(SseEvent::default().event("snapshot").data(payload))
+    });
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 async fn compute_status(state: AppState) -> Result<Status, AppError> {

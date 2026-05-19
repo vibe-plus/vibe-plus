@@ -25,7 +25,7 @@ pub async fn run() -> Result<()> {
         }
     } else {
         print!("[--]  ");
-        println!("not started");
+        println!("not running");
         false
     };
 
@@ -52,14 +52,14 @@ pub async fn run() -> Result<()> {
         println!("db at {}", db_path.display());
     } else {
         print!("[--]  ");
-        println!("db not created yet (start vibe first)");
+        println!("db not created yet (run vibe first)");
     }
 
     println!();
     if running {
         println!("Providers: open the dashboard with `vibe ui` to view/edit configured providers.");
     } else {
-        println!("Run `vibe start` to start the local proxy.");
+        println!("Run `vibe up` to bring up the local proxy.");
     }
     Ok(())
 }

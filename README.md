@@ -2,29 +2,35 @@
 
 Local gateway for AI coding tools. You run it from the **web dashboard**.
 
-## Install
+## Install & run
+
+**Node (npm)**
 
 ```bash
-npm install -g @vibe-plus/cli
+npm install -g @vibe-plus/cli && npx vibe
 ```
 
-## Run
+**Bun**
 
 ```bash
-vibe
+bun install -g @vibe-plus/cli && bunx vibe
 ```
 
-Starts the gateway and opens the dashboard.
+Install, open the dashboard, import credentials — done. Data stays on your machine in `~/.vibe`.
 
-1. **Providers** — add your upstream APIs and keys
-2. **Overview** — connect Claude Code, Codex, or OpenCode
-3. **Monitor** — see requests when something breaks
+## Features
 
-Data stays on your machine in `~/.vibe`.
+### Slot
+
+![Slot](docs/assets/features/slot.png)
+
+### Unified history
+
+### Wave routing
 
 ---
 
-**Why bother?** One place for providers and keys instead of editing every app by hand. Try it and see if it fits—you do not need a feature list here.
+**Why bother?** One place for providers and keys instead of editing every app by hand.
 
 ## License
 

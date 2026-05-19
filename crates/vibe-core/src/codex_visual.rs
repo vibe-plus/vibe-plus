@@ -8,6 +8,8 @@ use chrono::Utc;
 use serde_json::Value;
 use vibe_protocol::{Credential, CredentialPlanSnapshot};
 
+use crate::codex_summary::CodexClientKind;
+
 #[derive(Clone, Debug, Default)]
 pub struct CodexVisualContext {
     pub provider_id: String,
@@ -78,7 +80,18 @@ pub fn is_payg_plan(plan_type: Option<&str>) -> bool {
     plan == "payg" || plan.contains("pay-as") || plan.contains("pay_as") || plan.contains("paygo")
 }
 
-pub fn status_message_text(ctx: &CodexVisualContext, ttfs_ms: i64) -> String {
+pub fn status_message_text(
+    ctx: &CodexVisualContext,
+    ttfs_ms: i64,
+    client: CodexClientKind,
+) -> String {
+    match client {
+        CodexClientKind::App => status_message_latex(ctx, ttfs_ms),
+        CodexClientKind::Cli | CodexClientKind::Unknown => status_message_plain(ctx, ttfs_ms),
+    }
+}
+
+fn status_message_latex(ctx: &CodexVisualContext, ttfs_ms: i64) -> String {
     let mut parts = vec![
         format!("\\textsf{{TTFS}}={}\\textsf{{ms}}", ttfs_ms.max(0)),
         format!(
@@ -114,6 +127,32 @@ pub fn status_message_text(ctx: &CodexVisualContext, ttfs_ms: i64) -> String {
     )
 }
 
+fn status_message_plain(ctx: &CodexVisualContext, ttfs_ms: i64) -> String {
+    let mut parts = vec![
+        format!("TTFS={}ms", ttfs_ms.max(0)),
+        format!("upstream={}", ctx.provider_name),
+    ];
+
+    if ctx.requested_model != ctx.upstream_model {
+        parts.push(format!(
+            "alias={}→{}",
+            ctx.requested_model, ctx.upstream_model
+        ));
+    } else if !ctx.upstream_model.is_empty() {
+        parts.push(format!("model={}", ctx.upstream_model));
+    }
+
+    if let Some(plan) = ctx.token_plan.as_ref().filter(|p| p.is_useful()) {
+        parts.push(format!(
+            "Token={}/{}",
+            format_plain_tokens(plan.remaining),
+            format_plain_tokens(plan.limit)
+        ));
+    }
+
+    format!("↯ Vibe+ · {}", parts.join(" · "))
+}
+
 pub fn route_signature(ctx: &CodexVisualContext) -> String {
     format!(
         "{}|{}|{}|{}",
@@ -139,12 +178,13 @@ pub fn status_message_events(
     ctx: &CodexVisualContext,
     response_id: &str,
     ttfs_ms: i64,
+    client: CodexClientKind,
 ) -> Vec<String> {
     let item_id = format!(
         "vibe_route_{}",
         response_id.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
     );
-    let text = status_message_text(ctx, ttfs_ms);
+    let text = status_message_text(ctx, ttfs_ms, client);
     let item = serde_json::json!({
         "id": item_id,
         "type": "message",
@@ -404,9 +444,21 @@ fn format_tokens(n: i64) -> String {
     }
 }
 
+fn format_plain_tokens(n: i64) -> String {
+    let n = n.max(0) as f64;
+    if n >= 1_000_000.0 {
+        format!("{:.1}M", n / 1_000_000.0)
+    } else if n >= 1_000.0 {
+        format!("{:.1}k", n / 1_000.0)
+    } else {
+        format!("{n:.0}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex_summary::CodexClientKind;
 
     fn ctx() -> CodexVisualContext {
         CodexVisualContext {
@@ -423,7 +475,7 @@ mod tests {
 
     #[test]
     fn status_includes_alias_when_models_differ() {
-        let text = status_message_text(&ctx(), 842);
+        let text = status_message_text(&ctx(), 842, CodexClientKind::App);
         assert!(text.contains("\\scriptsize"));
         assert!(text.contains("#38bdf8"));
         assert!(text.contains("\\textsf{TTFS}=842\\textsf{ms}"));
@@ -436,7 +488,7 @@ mod tests {
     fn status_omits_alias_when_models_match() {
         let mut ctx = ctx();
         ctx.upstream_model = ctx.requested_model.clone();
-        let text = status_message_text(&ctx, 10);
+        let text = status_message_text(&ctx, 10, CodexClientKind::App);
         assert!(!text.contains("\\textsf{alias}="));
         assert!(text.contains("\\textsf{model}="));
     }
@@ -449,8 +501,18 @@ mod tests {
             remaining: 2_100_000,
             limit: 3_000_000,
         });
-        assert!(status_message_text(&ctx, 1).contains("\\textsf{Token}=2.1\\textsf{M}"));
-        assert!(coding_plan_rate_limit_event(&ctx).is_none());
+        assert!(
+            status_message_text(&ctx, 1, CodexClientKind::App).contains("\\textsf{Token}=2.1\\textsf{M}")
+        );
+    }
+
+    #[test]
+    fn cli_status_is_plain_text() {
+        let text = status_message_text(&ctx(), 842, CodexClientKind::Cli);
+        assert!(text.starts_with("↯ Vibe+ · "));
+        assert!(text.contains("TTFS=842ms"));
+        assert!(!text.contains("$$"));
+        assert!(!text.contains("\\textsf"));
     }
 
     #[test]

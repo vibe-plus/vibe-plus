@@ -1056,6 +1056,7 @@ pub(super) async fn build_dashboard_stats(
         window_hours: hours,
         window_label,
         requests_in_window: window_totals.requests,
+        estimated_cost_usd_in_window: window_totals.estimated_cost_usd,
         success_rate_in_window: success_rate(window_totals.successes, window_totals.requests),
         input_tokens_in_window: window_totals.input_tokens,
         output_tokens_in_window: window_totals.output_tokens,

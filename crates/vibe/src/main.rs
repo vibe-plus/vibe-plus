@@ -9,7 +9,7 @@ use vibe_i18n::text_env;
 #[command(
     name = "vibe",
     version,
-    about = "vibe+ — local AI API gateway (control via the dashboard)",
+    about = "Vibe Plus — local AI API gateway (control via the dashboard)",
     arg_required_else_help = false
 )]
 struct Cli {
@@ -25,8 +25,8 @@ enum CcSwitchCommand {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start the local proxy daemon.
-    Start(cmd::start::StartArgs),
+    /// Bring up Vibe Plus: gateway, client takeover, and dashboard.
+    Up(cmd::up::UpArgs),
     /// Stop the running daemon.
     Stop,
     /// Show running status.
@@ -59,8 +59,8 @@ async fn main() -> Result<()> {
         Cli::from_arg_matches(&cmd.get_matches()).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     init_tracing();
     match cli.command {
-        None => cmd::up::run().await,
-        Some(Command::Start(a)) => cmd::start::run(a).await,
+        None => cmd::up::run(cmd::up::UpArgs::default()).await,
+        Some(Command::Up(a)) => cmd::up::run(a).await,
         Some(Command::Stop) => cmd::stop::run().await,
         Some(Command::Status) => cmd::status::run().await,
         Some(Command::Statusline) => cmd::statusline::run(),

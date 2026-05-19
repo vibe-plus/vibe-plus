@@ -57,7 +57,7 @@ const LOADING_HTML: &str = r#"<!DOCTYPE html>
 <div class="wrap">
   <div class="logo">Vibe Plus</div>
   <div class="ring"></div>
-  <p>Starting gateway…</p>
+  <p>Bringing up gateway…</p>
 </div>
 </body>
 </html>"#;
@@ -93,7 +93,7 @@ struct Args {
     #[arg(long)]
     min_height: Option<u32>,
 
-    /// Start as a compact floating utility window.
+    /// Open as a compact floating utility window.
     #[arg(long)]
     floating: bool,
 

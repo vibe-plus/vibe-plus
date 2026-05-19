@@ -7,10 +7,10 @@ desktop-tray-quit = 退出 Vibe Plus
 desktop-gateway-ready = 网关已就绪
 desktop-gateway-unavailable = 网关不可用
 
-cli-start-already-running = vibe 已在运行。
-cli-start-started-background = vibe 已在后台启动。
-cli-stop-not-running = vibe 未在运行。
-cli-stop-stopped = vibe 已停止。
-cli-doctor-title = vibe 检查
+cli-up-already-running = Vibe Plus 已在运行。
+cli-up-running-background = Vibe Plus 已在后台运行。
+cli-stop-not-running = Vibe Plus 未在运行。
+cli-stop-stopped = Vibe Plus 已停止。
+cli-doctor-title = Vibe Plus 检查
 
 gateway-no-credentials = 已经没有可用的凭证。所有凭证都已被禁用（通常是因为上游 401/403 鉴权失败）。请到面板中手动启用一个凭证后再重试。

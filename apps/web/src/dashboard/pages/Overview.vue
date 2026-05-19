@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { RouterLink, useRoute } from "vue-router";
 import { useProxyStatus } from "../composables/useProxy.ts";
+import { useRealtimeStream } from "../composables/useRealtimeStream.ts";
 import {
   api,
   type DashboardStats,
@@ -12,13 +13,16 @@ import {
   type ProviderAuthPoolSummary,
   type ProviderCodexPlanItem,
   type ProvidersOverview,
-  type RealtimeSnapshot,
 } from "../api/client.ts";
 import ClientTakeoverCard from "../components/ClientTakeoverCard.vue";
 import MetricTicker from "../components/dashboard/MetricTicker.vue";
 import LogsPanel from "../components/logs-panel.vue";
 import VpIcon from "../components/vp-icon.vue";
 import ProviderLogo from "../components/provider-logo.vue";
+import Card from "../components/ui/card.vue";
+import Badge from "../components/ui/badge.vue";
+import Progress from "../components/ui/progress.vue";
+import { cn } from "../../lib/utils.ts";
 import { CLIENT_TOOLS, toolProxyExample } from "../utils/client-tools.ts";
 import {
   isUnknownProviderName,
@@ -30,6 +34,11 @@ import {
   workspaceViewFromQuery,
   type WorkspaceView,
 } from "../utils/workspace-view.ts";
+import {
+  buildProviderRowTags,
+  STATUS_TAG_CLASS,
+  type ProviderRowTagLabels,
+} from "../utils/provider-status-tags.ts";
 
 const route = useRoute();
 const { t } = useI18n();
@@ -46,13 +55,14 @@ const providers = ref<Provider[]>([]);
 const pools = ref<ProviderAuthPoolSummary[]>([]);
 const codexPlans = ref<Record<string, ProviderCodexPlanItem[]>>({});
 const loading = ref(true);
-const realtime = ref<RealtimeSnapshot | null>(null);
+const {
+  snapshot: realtime,
+  transport: realtimeTransport,
+  refresh: refreshRealtime,
+} = useRealtimeStream();
 const OVERVIEW_REFRESH_INTERVAL_MS = 5_000;
-const REALTIME_REFRESH_INTERVAL_MS = 1_000;
 let overviewRefreshTimer: number | null = null;
-let realtimeRefreshTimer: number | null = null;
 let loadInFlight: Promise<void> | null = null;
-let realtimeLoadInFlight: Promise<void> | null = null;
 const takeoverStatus = ref<Record<"claude" | "codex", boolean | null>>({
   claude: null,
   codex: null,
@@ -62,10 +72,9 @@ async function load(options: { silent?: boolean } = {}) {
   if (loadInFlight) return loadInFlight;
   if (!options.silent) loading.value = true;
 
-  loadInFlight = Promise.all([api.stats(1), api.providers.overview(1), api.realtime()])
-    .then(([s, providerOverview, realtimeSnapshot]) => {
+  loadInFlight = Promise.all([api.stats(1), api.providers.overview(1)])
+    .then(([s, providerOverview]) => {
       stats.value = s;
-      realtime.value = realtimeSnapshot;
       applyProvidersOverview(providerOverview);
     })
     .catch(() => {
@@ -75,7 +84,6 @@ async function load(options: { silent?: boolean } = {}) {
         providers.value = [];
         pools.value = [];
         codexPlans.value = {};
-        realtime.value = null;
       }
     })
     .finally(() => {
@@ -92,10 +100,6 @@ function startOverviewPolling() {
     if (document.visibilityState === "hidden") return;
     void load({ silent: true });
   }, OVERVIEW_REFRESH_INTERVAL_MS);
-  realtimeRefreshTimer = window.setInterval(() => {
-    if (document.visibilityState === "hidden") return;
-    void loadRealtime();
-  }, REALTIME_REFRESH_INTERVAL_MS);
 }
 
 function stopOverviewPolling() {
@@ -103,23 +107,6 @@ function stopOverviewPolling() {
     window.clearInterval(overviewRefreshTimer);
     overviewRefreshTimer = null;
   }
-  if (realtimeRefreshTimer !== null) {
-    window.clearInterval(realtimeRefreshTimer);
-    realtimeRefreshTimer = null;
-  }
-}
-
-async function loadRealtime() {
-  if (realtimeLoadInFlight) return realtimeLoadInFlight;
-  realtimeLoadInFlight = api
-    .realtime()
-    .then((snapshot) => {
-      realtime.value = snapshot;
-    })
-    .finally(() => {
-      realtimeLoadInFlight = null;
-    });
-  return realtimeLoadInFlight;
 }
 
 function applyProvidersOverview(overview: ProvidersOverview) {
@@ -550,24 +537,32 @@ function insightToneClass(tone: OverviewInsight["tone"]) {
   return "border-vp-border bg-vp-surface text-vp-text";
 }
 
-function providerStatusLabel(row: DashboardStats["per_provider"][number]) {
-  const pool = poolByProviderId.value.get(row.provider_id);
-  const circuit = providerCircuitState(row);
-  if (circuit === "open") return t("providers.status.circuit");
-  if (circuit === "half-open") return t("providers.status.recovering");
-  if (pool?.rate_limited_credentials) return t("providers.status.limited");
-  if (row.success_rate < 0.9) return t("providers.status.degraded");
-  return t("providers.status.operational");
-}
+const providerRowTagLabels = computed<ProviderRowTagLabels>(() => ({
+  operational: t("providers.status.operational"),
+  paused: t("providers.status.paused"),
+  limited: t("providers.status.limited"),
+  circuit: t("providers.status.circuit"),
+  recovering: t("providers.status.recovering"),
+  degraded: t("providers.status.degraded"),
+  readyCount: (count) => t("providers.readyCount", { count }),
+  disabledCreds: (count) => t("providers.tag.disabledCreds", { count }),
+  noReady: t("providers.tag.noReady"),
+}));
 
-function providerStatusClass(row: DashboardStats["per_provider"][number]) {
+function providerRowTags(row: DashboardStats["per_provider"][number]) {
   const pool = poolByProviderId.value.get(row.provider_id);
-  const circuit = providerCircuitState(row);
-  if (circuit === "open" || row.success_rate < 0.9)
-    return "bg-red-50 text-red-700 ring-1 ring-red-200";
-  if (circuit === "half-open" || pool?.rate_limited_credentials)
-    return "bg-amber-50 text-amber-800 ring-1 ring-amber-200";
-  return "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200";
+  const provider = providerById.value.get(row.provider_id);
+  return buildProviderRowTags({
+    providerEnabled: provider?.enabled ?? true,
+    circuit: providerCircuitState(row),
+    availableCredentials: pool?.available_credentials ?? 0,
+    enabledCredentials: pool?.enabled_credentials ?? 0,
+    totalCredentials: pool?.total_credentials ?? 0,
+    rateLimitedCredentials: pool?.rate_limited_credentials ?? 0,
+    openCircuitCredentials: pool?.open_circuit_credentials ?? 0,
+    successRate: poolSuccessRate(row.provider_id) ?? row.success_rate,
+    labels: providerRowTagLabels.value,
+  });
 }
 
 const liveStateLabel = computed(() => {
@@ -640,20 +635,6 @@ function providerCircuitState(row: DashboardStats["per_provider"][number]): stri
   return "closed";
 }
 
-function credentialPulse(row: DashboardStats["per_provider"][number]): string {
-  const pool = poolByProviderId.value.get(row.provider_id);
-  if (!pool) return "—";
-  const provider = providerById.value.get(row.provider_id);
-  if (provider && !provider.enabled) return t("providers.status.paused");
-  if (pool.provider_circuit_open || pool.open_circuit_credentials)
-    return t("providers.status.circuit");
-  if (pool.rate_limited_credentials) return t("providers.status.limited");
-  if (pool.open_circuit_credentials || pool.rate_limited_credentials) {
-    return `${pool.available_credentials}/${pool.enabled_credentials}`;
-  }
-  return t("providers.readyCount", { count: pool.available_credentials });
-}
-
 function rateOr(n: unknown, fallback = 1): number {
   const x = typeof n === "number" ? n : Number(n);
   return Number.isFinite(x) ? x : fallback;
@@ -669,6 +650,33 @@ function rateOr(n: unknown, fallback = 1): number {
           {{ liveStateLabel }}
         </span>
         <span class="hidden truncate text-xs text-vp-muted md:block">{{ liveStateDetail }}</span>
+        <Badge
+          variant="outline"
+          class="hidden shrink-0 gap-1 px-2 py-0 font-mono text-[10px] uppercase tracking-wide sm:inline-flex"
+          :title="
+            realtimeTransport === 'stream'
+              ? t('realtime.transport.streamHint')
+              : realtimeTransport === 'polling'
+                ? t('realtime.transport.pollingHint')
+                : realtimeTransport === 'connecting'
+                  ? t('realtime.transport.connectingHint')
+                  : t('realtime.transport.offlineHint')
+          "
+        >
+          <span
+            class="size-1.5 rounded-full"
+            :class="
+              realtimeTransport === 'stream'
+                ? 'bg-emerald-500'
+                : realtimeTransport === 'polling'
+                  ? 'bg-amber-500'
+                  : realtimeTransport === 'connecting'
+                    ? 'bg-sky-400 live-dot'
+                    : 'bg-red-500'
+            "
+          />
+          {{ t(`realtime.transport.${realtimeTransport}`) }}
+        </Badge>
         <code class="hidden truncate font-mono text-xs text-vp-muted sm:block">{{
           workspaceBaseUrl
         }}</code>
@@ -689,7 +697,12 @@ function rateOr(n: unknown, fallback = 1): number {
           :disabled="loading"
           :aria-label="t('actions.refresh')"
           :title="t('actions.refresh')"
-          @click="load()"
+          @click="
+            () => {
+              void load();
+              void refreshRealtime();
+            }
+          "
         >
           <VpIcon name="refresh-cw" size-class="size-5" :spin="loading" />
         </button>
@@ -704,12 +717,20 @@ function rateOr(n: unknown, fallback = 1): number {
 
     <template v-else>
       <section class="grid gap-3 md:order-2 md:col-span-2">
-        <div class="card-base overflow-hidden">
+        <Card class="overflow-hidden">
           <div class="flex items-center justify-between border-b border-vp-border px-4 py-3">
             <div class="flex items-center gap-2">
               <VpIcon name="activity" size-class="size-4 text-emerald-600" />
               <span class="text-sm font-semibold text-vp-text">{{ t("realtime.title") }}</span>
             </div>
+            <Badge
+              v-if="realtimeTransport === 'stream'"
+              variant="secondary"
+              class="hidden gap-1 font-mono text-[10px] uppercase tracking-wide text-emerald-700 sm:inline-flex"
+            >
+              <span class="size-1.5 rounded-full bg-emerald-500 live-dot" />
+              SSE
+            </Badge>
           </div>
           <div class="grid grid-cols-2 gap-px bg-vp-border lg:grid-cols-4">
             <div class="bg-vp-surface p-3">
@@ -762,11 +783,12 @@ function rateOr(n: unknown, fallback = 1): number {
                   <span class="truncate text-sm font-semibold text-vp-text">
                     {{ providerById.get(provider.provider_id)?.name ?? provider.provider_name }}
                   </span>
-                  <span
-                    class="rounded-full bg-emerald-100 px-2 py-0.5 font-mono text-[11px] text-emerald-700"
+                  <Badge
+                    variant="secondary"
+                    class="bg-emerald-100 font-mono text-[11px] text-emerald-700 hover:bg-emerald-100"
                   >
                     {{ provider.active_requests }} {{ t("realtime.requests") }}
-                  </span>
+                  </Badge>
                 </div>
                 <div class="mt-1 truncate font-mono text-xs text-vp-muted">
                   {{
@@ -787,7 +809,7 @@ function rateOr(n: unknown, fallback = 1): number {
               {{ t("realtime.noActive") }}
             </div>
           </div>
-        </div>
+        </Card>
       </section>
 
       <div
@@ -801,7 +823,7 @@ function rateOr(n: unknown, fallback = 1): number {
         <section
           class="grid gap-3 md:order-1 md:col-span-2 md:grid-cols-[minmax(0,1.08fr)_minmax(17rem,0.72fr)]"
         >
-          <div class="card-base overflow-hidden md:order-3">
+          <Card class="overflow-hidden md:order-3">
             <div class="flex items-center justify-between border-b border-vp-border px-4 py-3">
               <div class="flex items-center gap-2">
                 <VpIcon name="compass" size-class="size-4 text-amber-600" />
@@ -823,9 +845,9 @@ function rateOr(n: unknown, fallback = 1): number {
                 </span>
               </RouterLink>
             </div>
-          </div>
+          </Card>
 
-          <div class="card-base overflow-hidden md:order-2">
+          <Card class="overflow-hidden md:order-2">
             <div class="flex items-center justify-between border-b border-vp-border px-4 py-3">
               <div class="flex items-center gap-2">
                 <VpIcon name="server" size-class="size-4 text-teal-600" />
@@ -864,15 +886,18 @@ function rateOr(n: unknown, fallback = 1): number {
                   "
                 />
                 <span class="min-w-0 flex-1">
-                  <span class="flex min-w-0 items-center gap-2">
+                  <span class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                     <span class="truncate text-sm font-semibold text-vp-text">
                       {{ resolveProviderLabel(p.provider_id, p.provider_name, providerNamesById) }}
                     </span>
-                    <span
-                      class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
-                      :class="providerStatusClass(p)"
-                    >
-                      {{ providerStatusLabel(p) }}
+                    <span class="flex min-w-0 flex-wrap items-center gap-1">
+                      <Badge
+                        v-for="tag in providerRowTags(p)"
+                        :key="`${p.provider_id}-${tag.key}`"
+                        :class="cn('shrink-0 px-1.5 py-0 text-[10px]', STATUS_TAG_CLASS[tag.tone])"
+                      >
+                        {{ tag.label }}
+                      </Badge>
                     </span>
                   </span>
                   <span class="mt-1 block truncate font-mono text-[11px] text-vp-muted">
@@ -882,9 +907,16 @@ function rateOr(n: unknown, fallback = 1): number {
                         latency: fmt(p.avg_latency_ms),
                       })
                     }}
-                    ·
-                    {{ credentialPulse(p) }}
                   </span>
+                  <Progress
+                    class="mt-1.5 h-1"
+                    :value="(poolSuccessRate(p.provider_id) ?? p.success_rate) * 100"
+                    :tone="
+                      (poolSuccessRate(p.provider_id) ?? p.success_rate) < 0.9
+                        ? 'warning'
+                        : 'success'
+                    "
+                  />
                 </span>
                 <span
                   class="hidden shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[11px] sm:inline"
@@ -906,9 +938,9 @@ function rateOr(n: unknown, fallback = 1): number {
             <div v-else class="px-4 py-8 text-center text-sm text-vp-muted">
               {{ t("providers.emptyInView") }}
             </div>
-          </div>
+          </Card>
 
-          <div class="card-base overflow-hidden md:order-6 md:col-span-2">
+          <Card class="overflow-hidden md:order-6 md:col-span-2">
             <div class="flex items-center justify-between border-b border-vp-border px-4 py-3">
               <div class="flex items-center gap-2">
                 <VpIcon name="activity" size-class="size-4 text-vp-muted" />
@@ -919,7 +951,7 @@ function rateOr(n: unknown, fallback = 1): number {
             <div class="max-h-[18rem] w-full overflow-auto">
               <LogsPanel compact />
             </div>
-          </div>
+          </Card>
         </section>
       </div>
     </template>
@@ -1010,6 +1042,10 @@ function rateOr(n: unknown, fallback = 1): number {
     "providers": {
       "emptyInView": "no providers in this view",
       "readyCount": "{count} ready",
+      "tag": {
+        "disabledCreds": "{count} disabled",
+        "noReady": "not ready"
+      },
       "requestSuccessRate": "request success rate",
       "rowMeta": "{requests} req · {latency} avg",
       "status": {
@@ -1035,6 +1071,16 @@ function rateOr(n: unknown, fallback = 1): number {
       "requests": "Requests",
       "title": "Live now",
       "tokenFlow": "Token flow",
+      "transport": {
+        "stream": "live",
+        "polling": "poll",
+        "connecting": "…",
+        "offline": "off",
+        "streamHint": "Receiving live updates via SSE",
+        "pollingHint": "Fell back to HTTP polling (gateway too old or stream blocked)",
+        "connectingHint": "Connecting to the realtime stream…",
+        "offlineHint": "Stream unavailable; check gateway status"
+      },
       "waitingForToken": "waiting for first token"
     },
     "takeover": {
@@ -1110,6 +1156,10 @@ function rateOr(n: unknown, fallback = 1): number {
     "providers": {
       "emptyInView": "当前视图没有供应商",
       "readyCount": "{count} 个就绪",
+      "tag": {
+        "disabledCreds": "{count} 已禁用",
+        "noReady": "无就绪"
+      },
       "requestSuccessRate": "请求成功率",
       "rowMeta": "{requests} 请求 · {latency} 平均",
       "status": {
@@ -1135,6 +1185,16 @@ function rateOr(n: unknown, fallback = 1): number {
       "requests": "请求",
       "title": "实时状态",
       "tokenFlow": "流速",
+      "transport": {
+        "stream": "实时",
+        "polling": "轮询",
+        "connecting": "连接中",
+        "offline": "离线",
+        "streamHint": "正在通过 SSE 接收实时更新",
+        "pollingHint": "已回退到 HTTP 轮询（网关版本过旧或流被阻断）",
+        "connectingHint": "正在连接实时流…",
+        "offlineHint": "流不可用；请检查网关状态"
+      },
       "waitingForToken": "等待首 token"
     },
     "takeover": { "claudeExperimentalTitle": "Claude Code · 实验性", "codexTitle": "Codex CLI" },
