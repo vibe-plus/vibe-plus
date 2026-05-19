@@ -33,10 +33,18 @@ const linkClass =
 const chipClass =
   "inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] font-medium text-foreground hover:bg-muted";
 const inlineClass = "font-mono text-[11px] text-muted-foreground";
+const inlineLinkClass =
+  "font-mono text-[11px] text-sky-700 underline decoration-sky-400/70 decoration-dotted underline-offset-2 hover:text-sky-500 dark:text-sky-300";
 
 const computedClass = computed(() =>
   cn(
-    props.variant === "link" ? linkClass : props.variant === "chip" ? chipClass : inlineClass,
+    props.variant === "link"
+      ? linkClass
+      : props.variant === "chip"
+        ? chipClass
+        : route.value
+          ? inlineLinkClass
+          : inlineClass,
     props.class,
   ),
 );

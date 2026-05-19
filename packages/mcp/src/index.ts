@@ -75,7 +75,7 @@ server.registerTool(
     credential_id?: string;
     upstream_id?: string;
   }) => {
-    return jsonToolResult(await gatewayGet("/_vp/stats/usage-rollups", args));
+    return jsonToolResult(await gatewayGet("/_vp/observability/usage-rollups", args));
   },
 );
 
@@ -90,7 +90,7 @@ server.registerTool(
     },
   },
   async (args: { limit?: number; since?: number }) => {
-    return jsonToolResult(await gatewayGet("/_vp/logs/app", args));
+    return jsonToolResult(await gatewayGet("/_vp/observability/app-logs", args));
   },
 );
 
@@ -113,7 +113,7 @@ server.registerTool(
     provider_id?: string;
     status_ok?: boolean;
   }) => {
-    return jsonToolResult(await gatewayGet("/_vp/records/requests", args));
+    return jsonToolResult(await gatewayGet("/_vp/observability/requests", args));
   },
 );
 
@@ -126,7 +126,7 @@ server.registerTool(
   },
   async (args: { request_id: string }) => {
     return jsonToolResult(
-      await gatewayGet(`/_vp/records/requests/${encodeURIComponent(args.request_id)}`),
+      await gatewayGet(`/_vp/observability/requests/${encodeURIComponent(args.request_id)}`),
     );
   },
 );
@@ -140,7 +140,9 @@ server.registerTool(
   },
   async (args: { request_id: string }) => {
     return jsonToolResult(
-      await gatewayGet(`/_vp/records/requests/${encodeURIComponent(args.request_id)}/network`),
+      await gatewayGet(
+        `/_vp/observability/requests/${encodeURIComponent(args.request_id)}/network`,
+      ),
     );
   },
 );
@@ -153,7 +155,7 @@ server.registerTool(
     inputSchema: pageSchema,
   },
   async (args: { limit?: number; offset?: number }) => {
-    return jsonToolResult(await gatewayGet("/_vp/records/network-attempts", args));
+    return jsonToolResult(await gatewayGet("/_vp/observability/network-attempts", args));
   },
 );
 

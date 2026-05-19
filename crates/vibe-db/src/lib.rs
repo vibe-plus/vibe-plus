@@ -11,9 +11,11 @@ use std::sync::{Arc, Mutex};
 
 pub mod body_store;
 pub mod dao;
+pub mod maintenance;
 
 pub use body_store::*;
 pub use dao::*;
+pub use maintenance::*;
 
 #[derive(Clone)]
 pub struct Db {
@@ -47,8 +49,46 @@ impl Db {
         })
     }
 
+    pub fn open_observability(path: impl AsRef<Path>) -> Result<Self> {
+        if let Some(parent) = path.as_ref().parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut conn = Connection::open(path.as_ref()).with_context(|| {
+            format!(
+                "opening observability sqlite at {}",
+                path.as_ref().display()
+            )
+        })?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Self::migrations().to_latest(&mut conn)?;
+        let short_conn = Connection::open(path.as_ref()).with_context(|| {
+            format!(
+                "opening observability sqlite at {}",
+                path.as_ref().display()
+            )
+        })?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            short_conn: Arc::new(Mutex::new(short_conn)),
+            body_store: default_body_store_for_db(path.as_ref()),
+        })
+    }
+
     /// In-memory db for tests.
     pub fn memory() -> Result<Self> {
+        let mut conn = Connection::open_in_memory()?;
+        Self::migrations().to_latest(&mut conn)?;
+        let mut short_conn = Connection::open_in_memory()?;
+        Self::migrations().to_latest(&mut short_conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            short_conn: Arc::new(Mutex::new(short_conn)),
+            body_store: None,
+        })
+    }
+
+    pub fn observability_memory() -> Result<Self> {
         let mut conn = Connection::open_in_memory()?;
         Self::migrations().to_latest(&mut conn)?;
         let mut short_conn = Connection::open_in_memory()?;
@@ -104,6 +144,9 @@ impl Db {
             M::up(include_str!(
                 "../migrations/026_request_log_cost_micros.sql"
             )),
+            M::up(include_str!(
+                "../migrations/027_observability_thread_usage_quota.sql"
+            )),
         ])
     }
 
@@ -135,6 +178,26 @@ impl Db {
         let mut conn = self.short_conn.lock().unwrap();
         f(&mut conn)
     }
+
+    pub fn copy_observability_from_path(&self, source_path: impl AsRef<Path>) -> Result<()> {
+        self.with_short_mut(|c| copy_observability_tables_from_attached(c, source_path.as_ref()))
+    }
+
+    pub fn copy_observability_from(&self, legacy: &Db) -> Result<()> {
+        let request_logs = legacy.log_list(i64::MAX / 4, 0)?.items;
+        for log in request_logs {
+            self.log_insert(&log)?;
+        }
+        let attempts = legacy.upstream_attempt_list(i64::MAX / 4, 0)?;
+        for attempt in attempts {
+            self.upstream_attempt_insert(&attempt)?;
+        }
+        let app_logs = legacy.app_log_list(i64::MAX / 4, None)?;
+        for event in app_logs {
+            self.app_log_insert(&event)?;
+        }
+        Ok(())
+    }
 }
 
 fn migrate_short_logs_from_main(
@@ -142,17 +205,7 @@ fn migrate_short_logs_from_main(
     short_conn: &mut Connection,
     main_path: &Path,
 ) -> Result<()> {
-    let main_path = main_path.to_string_lossy().to_string();
-    short_conn.execute("ATTACH DATABASE ?1 AS main_db", [&main_path])?;
-    let copy_result = short_conn.execute_batch(
-        "INSERT OR IGNORE INTO request_logs SELECT * FROM main_db.request_logs;
-         INSERT OR IGNORE INTO upstream_attempt_logs SELECT * FROM main_db.upstream_attempt_logs;
-         INSERT OR IGNORE INTO app_logs (id, ts, level, category, message, detail, event_type, payload_json)
-            SELECT id, ts, level, category, message, detail, event_type, payload_json
-            FROM main_db.app_logs;",
-    );
-    short_conn.execute_batch("DETACH DATABASE main_db").ok();
-    copy_result?;
+    copy_observability_tables_from_attached(short_conn, main_path)?;
 
     // Raw logs are now owned by the short-retention DB. Keep long-lived business
     // metadata and daily rollups in the main DB, but remove duplicated heavy rows
@@ -162,6 +215,52 @@ fn migrate_short_logs_from_main(
          DELETE FROM app_logs;
          DELETE FROM request_logs;",
     )?;
+    Ok(())
+}
+
+fn copy_observability_tables_from_attached(
+    conn: &mut Connection,
+    source_path: &Path,
+) -> Result<()> {
+    let source_path = source_path.to_string_lossy().to_string();
+    conn.execute("ATTACH DATABASE ?1 AS source_db", [&source_path])?;
+    let source_tables = conn
+        .prepare("SELECT name FROM source_db.sqlite_master WHERE type = 'table'")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+
+    let copy_result = if source_tables.contains("request_logs") {
+        conn.execute("INSERT OR REPLACE INTO request_logs SELECT * FROM source_db.request_logs", [])
+            .map(|_| ())
+    } else {
+        Ok(())
+    }
+    .and_then(|_| {
+        if source_tables.contains("upstream_attempt_logs") {
+            conn.execute(
+                "INSERT OR REPLACE INTO upstream_attempt_logs SELECT * FROM source_db.upstream_attempt_logs",
+                [],
+            )
+            .map(|_| ())
+        } else {
+            Ok(())
+        }
+    })
+    .and_then(|_| {
+        if source_tables.contains("app_logs") {
+            conn.execute(
+                "INSERT OR REPLACE INTO app_logs (id, ts, level, category, message, detail, event_type, payload_json)
+                 SELECT id, ts, level, category, message, detail, event_type, payload_json
+                 FROM source_db.app_logs",
+                [],
+            )
+            .map(|_| ())
+        } else {
+            Ok(())
+        }
+    });
+    conn.execute_batch("DETACH DATABASE source_db").ok();
+    copy_result?;
     Ok(())
 }
 

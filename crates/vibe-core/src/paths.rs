@@ -48,6 +48,10 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(vibe_dir()?.join("vibe.db"))
 }
 
+pub fn observability_db_path() -> Result<PathBuf> {
+    Ok(vibe_dir()?.join("observability.db"))
+}
+
 pub fn bodies_dir() -> Result<PathBuf> {
     let p = vibe_dir()?.join("bodies");
     std::fs::create_dir_all(&p).ok();

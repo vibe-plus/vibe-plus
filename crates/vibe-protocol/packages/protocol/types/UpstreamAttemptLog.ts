@@ -6,10 +6,26 @@ export type UpstreamAttemptLog = {
   attempt_id: string;
   request_id: string;
   attempt_index: number;
+  /**
+   * Zero-based scheduler wave for this user request. Attempts in the same wave are concurrent.
+   */
+  wave_index: number;
+  /**
+   * Number of upstreams dispatched in this wave.
+   */
+  wave_size: number;
+  /**
+   * Minimal runtime upstream id used by gateway scheduling.
+   */
+  upstream_id: string | null;
   started_at: bigint;
   ended_at: bigint | null;
   provider_id: string | null;
   credential_id: string | null;
+  thread_id: string | null;
+  turn_id: string | null;
+  trace_id: string | null;
+  session_id: string | null;
   wire: string | null;
   route_prefix: string | null;
   requested_model: string | null;
@@ -25,6 +41,18 @@ export type UpstreamAttemptLog = {
   output_tokens: bigint;
   cache_read_tokens: bigint;
   cache_creation_tokens: bigint;
+  reasoning_tokens: bigint;
+  cache_creation_5m_tokens: bigint;
+  cache_creation_1h_tokens: bigint;
+  audio_input_tokens: bigint;
+  audio_output_tokens: bigint;
+  accepted_prediction_tokens: bigint;
+  rejected_prediction_tokens: bigint;
+  cost_items: string | null;
+  /**
+   * Stored as decimal USD string for money stability.
+   */
+  estimated_cost_usd: string;
   upstream_first_byte_ms: bigint | null;
   client_first_write_ms: bigint | null;
   last_upstream_event_ms: bigint | null;

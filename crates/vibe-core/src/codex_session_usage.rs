@@ -196,6 +196,14 @@ pub fn usage_from_reader(reader: impl BufRead) -> std::io::Result<Option<CodexSe
                     output_tokens: delta.output_tokens,
                     cache_read_tokens: delta.cache_read_tokens,
                     cache_creation_tokens: 0,
+                    reasoning_tokens: 0,
+                    cache_creation_5m_tokens: 0,
+                    cache_creation_1h_tokens: 0,
+                    audio_input_tokens: 0,
+                    audio_output_tokens: 0,
+                    accepted_prediction_tokens: 0,
+                    rejected_prediction_tokens: 0,
+                    cost_items: None,
                 })
                 .cost_usd(&current_model)
                 {

@@ -1,0 +1,21 @@
+[package]
+name = "vibe-observability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Built-in observability plugin for Vibe Plus."
+
+[dependencies]
+vibe-db = { workspace = true }
+vibe-plugin-api = { workspace = true }
+vibe-protocol = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.27.0"

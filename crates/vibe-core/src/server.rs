@@ -32,17 +32,17 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use vibe_protocol::{
     AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexPlanRefreshResult,
-    Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats,
-    Health, HealthSummary, Meta, Provider, ProviderAuthPoolSummary, ProviderCodexPlanItem,
-    ProviderHealth, ProviderHealthSummary, ProviderInput, ProviderUpstreamSummary, LocalCandidate,
-    ProvidersOverview, RealtimeSnapshot, RequestLog, Status, Upstream, UpstreamAttemptLog,
+    Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus,
+    CredentialQuotaStatus, DashboardStats, Health, HealthSummary, LocalCandidate, Meta, Provider,
+    ProviderAuthPoolSummary, ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary,
+    ProviderInput, ProviderUpstreamSummary, ProvidersOverview, RealtimeSnapshot, Status, Upstream,
     UsageSummary,
 };
 
 mod clients;
-mod config;
 mod codex_http;
 mod codex_ws;
+mod config;
 mod dashboard;
 mod fetch;
 mod files;
@@ -50,12 +50,11 @@ mod import;
 mod models;
 mod providers;
 mod proxy;
-mod records;
 
 use clients::*;
-use config::*;
 use codex_http::*;
 use codex_ws::*;
+use config::*;
 use dashboard::*;
 use fetch::*;
 use files::*;
@@ -63,7 +62,6 @@ use import::*;
 use models::*;
 use providers::*;
 use proxy::*;
-use records::*;
 
 pub fn router(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -139,6 +137,14 @@ pub fn router(state: AppState) -> Router {
         // credentials
         .route("/_vp/credentials", get(list_credentials_all))
         .route(
+            "/_vp/credentials/quota-status",
+            get(list_credential_quota_statuses),
+        )
+        .route(
+            "/_vp/credentials/:id/quota-status",
+            get(get_credential_quota_status),
+        )
+        .route(
             "/_vp/providers/:id/credentials",
             get(list_credentials).post(create_credential),
         )
@@ -186,19 +192,7 @@ pub fn router(state: AppState) -> Router {
         .route("/_vp/stats/dashboard", get(dashboard_stats))
         .route("/_vp/realtime", get(realtime_snapshot))
         .route("/_vp/stream/realtime", get(realtime_stream))
-        .route("/_vp/app-logs", get(list_app_logs))
-        .route("/_vp/logs/app", get(list_app_log_records))
-        .route("/_vp/records/requests", get(list_request_records))
-        .route("/_vp/records/requests/:id", get(get_request_record))
-        .route(
-            "/_vp/records/requests/:id/network",
-            get(list_request_network_records),
-        )
-        .route(
-            "/_vp/records/network-attempts",
-            get(list_network_attempt_records),
-        )
-        .route("/_vp/stats/usage-rollups", get(list_usage_rollups))
+        .merge(observability_routes(&state))
         .route("/_vp/codex-history/preview", get(get_codex_history_preview))
         .route("/_vp/codex-history/unify", post(post_codex_history_unify))
         // sandboxed read/write of ~/.codex and ~/.claude
@@ -219,6 +213,24 @@ pub fn router(state: AppState) -> Router {
         // framework-level 413 before the handler runs.
         .layer(DefaultBodyLimit::disable())
         .with_state(state)
+}
+
+fn observability_routes(state: &AppState) -> Router<AppState> {
+    let Some(observability) = state.observability.clone() else {
+        return Router::new().route("/_vp/observability/*path", any(observability_unavailable));
+    };
+
+    Router::new().nest(
+        "/_vp/observability",
+        vibe_observability::router().with_state(observability),
+    )
+}
+
+async fn observability_unavailable() -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "observability plugin is not enabled",
+    )
 }
 
 pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
@@ -558,6 +570,118 @@ mod request_body_limit_tests {
             disabled_reason: None,
             disabled_at: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod observability_route_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use tower::ServiceExt;
+    use vibe_observability::ObservabilityStore;
+    use vibe_protocol::{LogPage, RequestLog};
+
+    fn sample_request(id: &str) -> RequestLog {
+        RequestLog {
+            id: id.to_string(),
+            started_at: 1,
+            app: None,
+            provider_id: Some("p1".into()),
+            thread_id: None,
+            turn_id: None,
+            trace_id: None,
+            session_id: None,
+            requested_model: Some("m".into()),
+            upstream_model: Some("m".into()),
+            status_code: Some(200),
+            error: None,
+            latency_ms: Some(10),
+            first_token_ms: None,
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            audio_input_tokens: 0,
+            audio_output_tokens: 0,
+            accepted_prediction_tokens: 0,
+            rejected_prediction_tokens: 0,
+            cost_items: None,
+            estimated_cost_usd: "0".into(),
+            wire: Some("openai-responses".into()),
+            route_prefix: None,
+            credential_id: None,
+            cb_key: None,
+            upstream_http_status: Some(200),
+            upstream_error_preview: None,
+            dedupe_key: None,
+            client_transport: None,
+            request_headers: None,
+            request_body: None,
+            response_body: None,
+            client_response_body: None,
+            stream_kind: None,
+            stream_terminal_seen: None,
+            stream_end_reason: None,
+            stream_error_detail: None,
+            upstream_first_byte_ms: None,
+            client_first_write_ms: None,
+            last_upstream_event_ms: None,
+            last_client_write_ms: None,
+            upstream_chunk_count: 0,
+            upstream_bytes: 0,
+            client_chunk_count: 0,
+            client_bytes: 0,
+            sse_event_count: 0,
+            sse_data_count: 0,
+            sse_comment_count: 0,
+            sse_keepalive_count: 0,
+            sse_done_count: 0,
+            parse_error_count: 0,
+            first_keepalive_ms: None,
+            last_keepalive_ms: None,
+            max_gap_between_upstream_events_ms: None,
+            max_gap_between_data_events_ms: None,
+            keepalive_after_last_data_count: 0,
+            last_data_event_ms: None,
+            bridge_mode: None,
+            status_injected: false,
+            terminal_injected: false,
+            upstream_terminal_type: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_records_and_observability_routes_share_store() {
+        let obs = ObservabilityStore::memory().expect("obs");
+        obs.insert_request(&sample_request("r-route"))
+            .expect("insert");
+        let state = AppState::init_with_observability(
+            vibe_db::Db::memory().expect("db"),
+            crate::config::Config::default(),
+            0,
+            obs,
+        )
+        .expect("state");
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/_vp/observability/requests")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let page: LogPage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, "r-route");
     }
 }
 

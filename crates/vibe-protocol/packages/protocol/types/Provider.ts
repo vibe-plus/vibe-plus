@@ -3,6 +3,8 @@ import type { ModelAlias } from "./ModelAlias.js";
 import type { ProviderKind } from "./ProviderKind.js";
 import type { ProviderProtocol } from "./ProviderProtocol.js";
 import type { ProviderSpeedtestResult } from "./ProviderSpeedtestResult.js";
+import type { ProviderUpstreamSummary } from "./ProviderUpstreamSummary.js";
+import type { Upstream } from "./Upstream.js";
 
 /**
  * A configured upstream provider.
@@ -21,6 +23,12 @@ export type Provider = {
    * Optional custom avatar/logo URL for the provider, typically discovered from the upstream site.
    */
   avatar_url: string | null;
+  /**
+   * Provider is a UI-facing profile/pool. Runtime routing expands it into
+   * [`Upstream`] units by crossing endpoints/protocols with credentials.
+   */
+  upstreams: Array<Upstream>;
+  upstream_summary: ProviderUpstreamSummary | null;
   kind: ProviderKind;
   base_url: string;
   /**

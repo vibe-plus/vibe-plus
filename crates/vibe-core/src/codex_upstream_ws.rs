@@ -104,6 +104,10 @@ pub async fn try_forward_official_codex_ws(
         prepared.started_at,
         Some(prepared.provider.id.as_str()),
         prepared.credential_id.as_deref(),
+        prepared.log_ctx.thread_id.as_deref(),
+        prepared.log_ctx.turn_id.as_deref(),
+        prepared.log_ctx.trace_id.as_deref(),
+        prepared.log_ctx.session_id.as_deref(),
         &prepared.requested_model,
         &prepared.upstream_model,
     );

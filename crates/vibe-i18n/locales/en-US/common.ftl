@@ -14,3 +14,4 @@ cli-stop-stopped = Vibe Plus stopped.
 cli-doctor-title = Vibe Plus doctor
 
 gateway-no-credentials = No usable credentials. All have been disabled (typically after upstream 401/403 auth errors). Re-enable one in the dashboard before retrying.
+gateway-all-providers-blocked = All providers are temporarily unavailable because the circuit breaker is open. Reset one provider in the dashboard or wait for recovery.

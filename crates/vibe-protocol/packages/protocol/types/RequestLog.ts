@@ -5,6 +5,10 @@ export type RequestLog = {
   started_at: bigint;
   app: string | null;
   provider_id: string | null;
+  thread_id: string | null;
+  turn_id: string | null;
+  trace_id: string | null;
+  session_id: string | null;
   requested_model: string | null;
   upstream_model: string | null;
   status_code: number | null;
@@ -15,6 +19,14 @@ export type RequestLog = {
   output_tokens: bigint;
   cache_read_tokens: bigint;
   cache_creation_tokens: bigint;
+  reasoning_tokens: bigint;
+  cache_creation_5m_tokens: bigint;
+  cache_creation_1h_tokens: bigint;
+  audio_input_tokens: bigint;
+  audio_output_tokens: bigint;
+  accepted_prediction_tokens: bigint;
+  rejected_prediction_tokens: bigint;
+  cost_items: string | null;
   /**
    * Stored as a decimal string because we don't want float drift in money.
    */

@@ -4,6 +4,8 @@ members = [
   "apps/desktop",
   "crates/vibe",
   "crates/vibe-core",
+  "crates/vibe-observability",
+  "crates/vibe-plugin-api",
   "crates/vibe-db",
   "crates/vibe-i18n",
   "crates/vibe-protocol",
@@ -20,6 +22,8 @@ rust-version = "1.82"
 vibe-core = { path = "crates/vibe-core" }
 vibe-db = { path = "crates/vibe-db" }
 vibe-i18n = { path = "crates/vibe-i18n" }
+vibe-observability = { path = "crates/vibe-observability" }
+vibe-plugin-api = { path = "crates/vibe-plugin-api" }
 vibe-protocol = { path = "crates/vibe-protocol" }
 
 # async runtime + http
@@ -69,6 +73,7 @@ base64 = "0.22"
 url = "2"
 rand = "0.8"
 png = "0.18"
+flate2 = "1"
 
 # desktop shell
 tao = "0.35"

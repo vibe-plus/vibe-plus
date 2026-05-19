@@ -5,12 +5,17 @@
 //! configured directory). Old inline DB body fields remain readable as fallback.
 
 use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const REF_PREFIX: &str = "file:";
 const BODY_EXT: &str = "body";
+const GZIP_MAGIC: &[u8; 2] = b"\x1f\x8b";
 
 #[derive(Debug, Clone)]
 pub struct BodyStore {
@@ -61,7 +66,10 @@ impl BodyStore {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("tmp");
-        fs::write(&tmp, text.as_bytes())
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(text.as_bytes())?;
+        let compressed = encoder.finish()?;
+        fs::write(&tmp, compressed)
             .with_context(|| format!("writing body temp file {}", tmp.display()))?;
         fs::rename(&tmp, &path)
             .with_context(|| format!("committing body file {}", path.display()))?;
@@ -88,7 +96,17 @@ impl BodyStore {
         }
         let bytes =
             fs::read(&path).with_context(|| format!("reading body file {}", path.display()))?;
-        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+        let decoded = if bytes.starts_with(GZIP_MAGIC) {
+            let mut decoder = GzDecoder::new(bytes.as_slice());
+            let mut out = Vec::new();
+            decoder
+                .read_to_end(&mut out)
+                .with_context(|| format!("decompressing body file {}", path.display()))?;
+            out
+        } else {
+            bytes
+        };
+        Ok(Some(String::from_utf8_lossy(&decoded).into_owned()))
     }
 
     pub fn prune(&self, opts: BodyPruneOptions) -> Result<BodyPruneStats> {

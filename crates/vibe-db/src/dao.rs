@@ -42,6 +42,34 @@ pub struct ShortLogPruneStats {
     pub body_bytes: u64,
 }
 
+fn default_usage_summary(
+    range: String,
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_creation_tokens: i64,
+    estimated_cost_usd: String,
+) -> UsageSummary {
+    UsageSummary {
+        range,
+        requests,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        reasoning_tokens: 0,
+        cache_creation_5m_tokens: 0,
+        cache_creation_1h_tokens: 0,
+        audio_input_tokens: 0,
+        audio_output_tokens: 0,
+        accepted_prediction_tokens: 0,
+        rejected_prediction_tokens: 0,
+        cost_items: None,
+        estimated_cost_usd,
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ProviderConfig {
     #[serde(default = "default_passthrough_mode")]
@@ -295,11 +323,23 @@ fn upsert_usage_rollup(
     wire: Option<&str>,
     route_prefix: Option<&str>,
     upstream_model: Option<&str>,
+    thread_id: Option<&str>,
+    turn_id: Option<&str>,
+    trace_id: Option<&str>,
+    session_id: Option<&str>,
     success: bool,
     input_tokens: i64,
     output_tokens: i64,
     cache_read_tokens: i64,
     cache_creation_tokens: i64,
+    reasoning_tokens: i64,
+    cache_creation_5m_tokens: i64,
+    cache_creation_1h_tokens: i64,
+    audio_input_tokens: i64,
+    audio_output_tokens: i64,
+    accepted_prediction_tokens: i64,
+    rejected_prediction_tokens: i64,
+    cost_items: Option<&str>,
     estimated_cost_usd: &str,
     latency_ms: Option<i64>,
     first_token_ms: Option<i64>,
@@ -310,14 +350,18 @@ fn upsert_usage_rollup(
     c.execute(
         "INSERT INTO usage_daily_rollups (
             day, scope, provider_id, credential_id, upstream_id, wire, route_prefix, upstream_model,
+            thread_id, turn_id, trace_id, session_id,
             requests, successes, failures,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-            estimated_cost_micros, latency_sum_ms, latency_count, first_token_sum_ms, first_token_count, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                   1, ?9, ?10,
-                   ?11, ?12, ?13, ?14,
-                   ?15, ?16, ?17, ?18, ?19, ?20)
-         ON CONFLICT(day, scope, provider_id, credential_id, upstream_id, wire, route_prefix, upstream_model)
+            reasoning_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens,
+            audio_input_tokens, audio_output_tokens, accepted_prediction_tokens, rejected_prediction_tokens,
+            cost_items_json, estimated_cost_micros, latency_sum_ms, latency_count, first_token_sum_ms, first_token_count, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                   1, ?13, ?14,
+                   ?15, ?16, ?17, ?18,
+                   ?19, ?20, ?21, ?22, ?23, ?24, ?25,
+                   ?26, ?27, ?28, ?29, ?30, ?31, ?32)
+         ON CONFLICT(day, scope, provider_id, credential_id, upstream_id, wire, route_prefix, upstream_model, thread_id, turn_id, trace_id, session_id)
          DO UPDATE SET
             requests = requests + 1,
             successes = successes + excluded.successes,
@@ -326,6 +370,14 @@ fn upsert_usage_rollup(
             output_tokens = output_tokens + excluded.output_tokens,
             cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
             cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+            reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
+            cache_creation_5m_tokens = cache_creation_5m_tokens + excluded.cache_creation_5m_tokens,
+            cache_creation_1h_tokens = cache_creation_1h_tokens + excluded.cache_creation_1h_tokens,
+            audio_input_tokens = audio_input_tokens + excluded.audio_input_tokens,
+            audio_output_tokens = audio_output_tokens + excluded.audio_output_tokens,
+            accepted_prediction_tokens = accepted_prediction_tokens + excluded.accepted_prediction_tokens,
+            rejected_prediction_tokens = rejected_prediction_tokens + excluded.rejected_prediction_tokens,
+            cost_items_json = excluded.cost_items_json,
             estimated_cost_micros = estimated_cost_micros + excluded.estimated_cost_micros,
             latency_sum_ms = latency_sum_ms + excluded.latency_sum_ms,
             latency_count = latency_count + excluded.latency_count,
@@ -341,12 +393,24 @@ fn upsert_usage_rollup(
             wire.unwrap_or(""),
             route_prefix.unwrap_or(""),
             upstream_model.unwrap_or(""),
+            thread_id.unwrap_or(""),
+            turn_id.unwrap_or(""),
+            trace_id.unwrap_or(""),
+            session_id.unwrap_or(""),
             i64::from(success),
             i64::from(!success),
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
+            reasoning_tokens,
+            cache_creation_5m_tokens,
+            cache_creation_1h_tokens,
+            audio_input_tokens,
+            audio_output_tokens,
+            accepted_prediction_tokens,
+            rejected_prediction_tokens,
+            cost_items.unwrap_or(""),
             usd_to_micros(estimated_cost_usd),
             latency_ms.unwrap_or(0),
             latency_count,
@@ -645,6 +709,19 @@ impl Db {
             .context("updated provider missing on read-back")
     }
 
+    /// Decide whether a body string goes inline (DB column) or externalised
+    /// (filesystem via `BodyStore`).
+    ///
+    /// Invariant: production callers always have a `BodyStore` configured
+    /// (`Db::open` sets it via `default_body_store_for_db`), so any non-empty
+    /// body goes to the body store, which gzips on write
+    /// (`body_store::write_text`). Reads transparently handle both the new
+    /// gzip-on-disk format and any older raw bytes that predate compression
+    /// (`body_store::read_text` checks the gzip magic prefix).
+    ///
+    /// The inline fallback is reserved for `Db::memory()` / tests. If we hit
+    /// it in production with a non-empty body something is misconfigured —
+    /// log a warning so the operator notices.
     fn body_value_for_insert(
         &self,
         kind: &str,
@@ -653,6 +730,13 @@ impl Db {
     ) -> Result<(Option<String>, Option<String>)> {
         match (self.body_store(), value.as_deref()) {
             (Some(store), Some(text)) => Ok((None, Some(store.write_text(kind, owner_id, text)?))),
+            (None, Some(text)) if !text.is_empty() => {
+                tracing::warn!(
+                    %kind, %owner_id, len = text.len(),
+                    "body_store unavailable; persisting raw body inline (test config?)"
+                );
+                Ok((value.clone(), None))
+            }
             _ => Ok((value.clone(), None)),
         }
     }
@@ -690,9 +774,11 @@ impl Db {
         self.with_short(|c| {
             c.execute(
                 "INSERT INTO request_logs (
-                    id, started_at, app, provider_id, requested_model, upstream_model,
+                    id, started_at, app, provider_id, thread_id, turn_id, trace_id, session_id, requested_model, upstream_model,
                     status_code, error, latency_ms, first_token_ms,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    reasoning_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens,
+                    audio_input_tokens, audio_output_tokens, accepted_prediction_tokens, rejected_prediction_tokens, cost_items,
                     estimated_cost_usd, estimated_cost_usd_micros,
                     wire, route_prefix, credential_id, cb_key, upstream_http_status,
                     upstream_error_preview, dedupe_key,
@@ -713,11 +799,16 @@ impl Db {
                            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28,
                            ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39,
                            ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51,
-                           ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59)
+                           ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59, ?60, ?61, ?62, ?63,
+                           ?64, ?65, ?66, ?67, ?68, ?69, ?70, ?71)
                  ON CONFLICT(id) DO UPDATE SET
                     started_at = excluded.started_at,
                     app = excluded.app,
                     provider_id = excluded.provider_id,
+                    thread_id = excluded.thread_id,
+                    turn_id = excluded.turn_id,
+                    trace_id = excluded.trace_id,
+                    session_id = excluded.session_id,
                     requested_model = excluded.requested_model,
                     upstream_model = excluded.upstream_model,
                     status_code = excluded.status_code,
@@ -728,6 +819,14 @@ impl Db {
                     output_tokens = excluded.output_tokens,
                     cache_read_tokens = excluded.cache_read_tokens,
                     cache_creation_tokens = excluded.cache_creation_tokens,
+                    reasoning_tokens = excluded.reasoning_tokens,
+                    cache_creation_5m_tokens = excluded.cache_creation_5m_tokens,
+                    cache_creation_1h_tokens = excluded.cache_creation_1h_tokens,
+                    audio_input_tokens = excluded.audio_input_tokens,
+                    audio_output_tokens = excluded.audio_output_tokens,
+                    accepted_prediction_tokens = excluded.accepted_prediction_tokens,
+                    rejected_prediction_tokens = excluded.rejected_prediction_tokens,
+                    cost_items = excluded.cost_items,
                     estimated_cost_usd = excluded.estimated_cost_usd,
                     estimated_cost_usd_micros = excluded.estimated_cost_usd_micros,
                     wire = excluded.wire,
@@ -778,6 +877,10 @@ impl Db {
                     log.started_at,
                     log.app,
                     log.provider_id,
+                    log.thread_id,
+                    log.turn_id,
+                    log.trace_id,
+                    log.session_id,
                     log.requested_model,
                     log.upstream_model,
                     log.status_code,
@@ -788,6 +891,14 @@ impl Db {
                     log.output_tokens,
                     log.cache_read_tokens,
                     log.cache_creation_tokens,
+                    log.reasoning_tokens,
+                    log.cache_creation_5m_tokens,
+                    log.cache_creation_1h_tokens,
+                    log.audio_input_tokens,
+                    log.audio_output_tokens,
+                    log.accepted_prediction_tokens,
+                    log.rejected_prediction_tokens,
+                    log.cost_items,
                     log.estimated_cost_usd,
                     usd_to_micros(&log.estimated_cost_usd),
                     log.wire,
@@ -853,11 +964,23 @@ impl Db {
                 log.wire.as_deref(),
                 log.route_prefix.as_deref(),
                 log.upstream_model.as_deref(),
+                log.thread_id.as_deref(),
+                log.turn_id.as_deref(),
+                log.trace_id.as_deref(),
+                log.session_id.as_deref(),
                 success,
                 log.input_tokens,
                 log.output_tokens,
                 log.cache_read_tokens,
                 log.cache_creation_tokens,
+                log.reasoning_tokens,
+                log.cache_creation_5m_tokens,
+                log.cache_creation_1h_tokens,
+                log.audio_input_tokens,
+                log.audio_output_tokens,
+                log.accepted_prediction_tokens,
+                log.rejected_prediction_tokens,
+                log.cost_items.as_deref(),
                 &log.estimated_cost_usd,
                 log.latency_ms,
                 log.first_token_ms,
@@ -1002,15 +1125,15 @@ impl Db {
                     params![since],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )?;
-            Ok(UsageSummary {
-                range: format!("last_{hours}h"),
+            Ok(default_usage_summary(
+                format!("last_{hours}h"),
                 requests,
-                input_tokens: input,
-                output_tokens: output,
-                cache_read_tokens: cache_read,
-                cache_creation_tokens: cache_create,
-                estimated_cost_usd: "0".into(),
-            })
+                input,
+                output,
+                cache_read,
+                cache_create,
+                "0".into(),
+            ))
         })
     }
 
@@ -1097,6 +1220,10 @@ impl Db {
         since: Option<i64>,
         provider_id: Option<&str>,
         status_ok: Option<bool>,
+        thread_id: Option<&str>,
+        turn_id: Option<&str>,
+        trace_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<LogPage> {
         self.with_short(|c| {
             // Build dynamic WHERE
@@ -1113,6 +1240,19 @@ impl Db {
                 } else {
                     conditions.push("(status_code IS NULL OR status_code >= 400)".into());
                 }
+            }
+            let esc = |v: &str| v.replace('\'', "''");
+            if let Some(v) = thread_id.filter(|v| !v.is_empty()) {
+                conditions.push(format!("thread_id = '{}'", esc(v)));
+            }
+            if let Some(v) = turn_id.filter(|v| !v.is_empty()) {
+                conditions.push(format!("turn_id = '{}'", esc(v)));
+            }
+            if let Some(v) = trace_id.filter(|v| !v.is_empty()) {
+                conditions.push(format!("trace_id = '{}'", esc(v)));
+            }
+            if let Some(v) = session_id.filter(|v| !v.is_empty()) {
+                conditions.push(format!("session_id = '{}'", esc(v)));
             }
             let where_clause = if conditions.is_empty() {
                 String::new()
@@ -1154,9 +1294,9 @@ impl Db {
             ))?;
             let mut rows = stmt.query_map(params![id], |r| {
                 let mut log = row_to_log_detail(r)?;
-                let request_body_ref: Option<String> = r.get(55)?;
-                let response_body_ref: Option<String> = r.get(56)?;
-                let client_response_body_ref: Option<String> = r.get(57)?;
+                let request_body_ref: Option<String> = r.get(67)?;
+                let response_body_ref: Option<String> = r.get(68)?;
+                let client_response_body_ref: Option<String> = r.get(69)?;
                 log.request_body = self.hydrate_body_value(log.request_body, request_body_ref);
                 log.response_body = self.hydrate_body_value(log.response_body, response_body_ref);
                 log.client_response_body =
@@ -1180,12 +1320,15 @@ impl Db {
         )?;
         self.with_short(|c| {
             c.execute(
-                "INSERT INTO upstream_attempt_logs (
+                "INSERT OR REPLACE INTO upstream_attempt_logs (
                     attempt_id, request_id, attempt_index, wave_index, wave_size, upstream_id, started_at, ended_at,
-                    provider_id, credential_id, wire, route_prefix, requested_model, upstream_model,
+                    provider_id, credential_id, thread_id, turn_id, trace_id, session_id, wire, route_prefix, requested_model, upstream_model,
                     phase, outcome, status_code, upstream_http_status, error_summary,
                     latency_ms, first_token_ms, input_tokens, output_tokens,
-                    cache_read_tokens, cache_creation_tokens, estimated_cost_usd,
+                    cache_read_tokens, cache_creation_tokens,
+                    reasoning_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens,
+                    audio_input_tokens, audio_output_tokens, accepted_prediction_tokens, rejected_prediction_tokens, cost_items,
+                    estimated_cost_usd,
                     upstream_first_byte_ms, client_first_write_ms,
                     last_upstream_event_ms, last_client_write_ms,
                     upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
@@ -1199,30 +1342,30 @@ impl Db {
                     request_headers, request_body, response_headers, response_body,
                     request_body_ref, response_body_ref
                  ) VALUES (
-                    ?1, ?2, ?3, ?53, ?54, ?55, ?4, ?5,
-                    ?6, ?7, ?8, ?9, ?10, ?11,
-                    ?12, ?13, ?14, ?15, ?16,
-                    ?17, ?18, ?19, ?20,
-                    ?21, ?22, ?56,
-                    ?23, ?24,
-                    ?25, ?26,
-                    ?27, ?28, ?29, ?30,
-                    ?31, ?32, ?33, ?34,
-                    ?35, ?36,
-                    ?37, ?38,
-                    ?39, ?40,
-                    ?41, ?42,
-                    ?43, ?44, ?45, ?46,
-                    ?47, ?48, ?49, ?50, ?51, ?52, ?57, ?58
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                    ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                    ?19, ?20, ?21, ?22, ?23,
+                    ?24, ?25, ?26, ?27,
+                    ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37,
+                    ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50,
+                    ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59, ?60, ?61, ?62,
+                    ?63, ?64, ?65, ?66, ?67, ?68, ?69, ?70
                  )",
                 params![
                     attempt.attempt_id,
                     attempt.request_id,
                     attempt.attempt_index,
+                    attempt.wave_index,
+                    attempt.wave_size,
+                    attempt.upstream_id,
                     attempt.started_at,
                     attempt.ended_at,
                     attempt.provider_id,
                     attempt.credential_id,
+                    attempt.thread_id,
+                    attempt.turn_id,
+                    attempt.trace_id,
+                    attempt.session_id,
                     attempt.wire,
                     attempt.route_prefix,
                     attempt.requested_model,
@@ -1238,6 +1381,15 @@ impl Db {
                     attempt.output_tokens,
                     attempt.cache_read_tokens,
                     attempt.cache_creation_tokens,
+                    attempt.reasoning_tokens,
+                    attempt.cache_creation_5m_tokens,
+                    attempt.cache_creation_1h_tokens,
+                    attempt.audio_input_tokens,
+                    attempt.audio_output_tokens,
+                    attempt.accepted_prediction_tokens,
+                    attempt.rejected_prediction_tokens,
+                    attempt.cost_items,
+                    attempt.estimated_cost_usd,
                     attempt.upstream_first_byte_ms,
                     attempt.client_first_write_ms,
                     attempt.last_upstream_event_ms,
@@ -1268,10 +1420,6 @@ impl Db {
                     request_body_inline,
                     attempt.response_headers,
                     response_body_inline,
-                    attempt.wave_index,
-                    attempt.wave_size,
-                    attempt.upstream_id,
-                    attempt.estimated_cost_usd,
                     request_body_ref,
                     response_body_ref,
                 ],
@@ -1295,11 +1443,23 @@ impl Db {
                 attempt.wire.as_deref(),
                 attempt.route_prefix.as_deref(),
                 attempt.upstream_model.as_deref(),
+                attempt.thread_id.as_deref(),
+                attempt.turn_id.as_deref(),
+                attempt.trace_id.as_deref(),
+                attempt.session_id.as_deref(),
                 success,
                 attempt.input_tokens,
                 attempt.output_tokens,
                 attempt.cache_read_tokens,
                 attempt.cache_creation_tokens,
+                attempt.reasoning_tokens,
+                attempt.cache_creation_5m_tokens,
+                attempt.cache_creation_1h_tokens,
+                attempt.audio_input_tokens,
+                attempt.audio_output_tokens,
+                attempt.accepted_prediction_tokens,
+                attempt.rejected_prediction_tokens,
+                attempt.cost_items.as_deref(),
                 &attempt.estimated_cost_usd,
                 attempt.latency_ms,
                 attempt.first_token_ms,
@@ -1360,8 +1520,8 @@ impl Db {
 
     fn row_to_attempt_hydrated(&self, r: &rusqlite::Row) -> rusqlite::Result<UpstreamAttemptLog> {
         let mut attempt = row_to_attempt(r)?;
-        let request_body_ref: Option<String> = r.get(56)?;
-        let response_body_ref: Option<String> = r.get(57)?;
+        let request_body_ref: Option<String> = r.get(68)?;
+        let response_body_ref: Option<String> = r.get(69)?;
         attempt.request_body = self.hydrate_body_value(attempt.request_body, request_body_ref);
         attempt.response_body = self.hydrate_body_value(attempt.response_body, response_body_ref);
         Ok(attempt)
@@ -1377,6 +1537,12 @@ impl Db {
         provider_id: Option<&str>,
         credential_id: Option<&str>,
         upstream_id: Option<&str>,
+        wire: Option<&str>,
+        route_prefix: Option<&str>,
+        thread_id: Option<&str>,
+        turn_id: Option<&str>,
+        trace_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<vibe_protocol::UsageRollupPage> {
         self.with(|c| {
             let mut conditions = Vec::<String>::new();
@@ -1396,9 +1562,13 @@ impl Db {
             if let Some(v) = credential_id.filter(|v| !v.is_empty()) {
                 conditions.push(format!("credential_id = '{}'", esc(v)));
             }
-            if let Some(v) = upstream_id.filter(|v| !v.is_empty()) {
-                conditions.push(format!("upstream_id = '{}'", esc(v)));
-            }
+            if let Some(v) = upstream_id.filter(|v| !v.is_empty()) { conditions.push(format!("upstream_id = '{}'", esc(v))); }
+            if let Some(v) = wire.filter(|v| !v.is_empty()) { conditions.push(format!("wire = '{}'", esc(v))); }
+            if let Some(v) = route_prefix.filter(|v| !v.is_empty()) { conditions.push(format!("route_prefix = '{}'", esc(v))); }
+            if let Some(v) = thread_id.filter(|v| !v.is_empty()) { conditions.push(format!("thread_id = '{}'", esc(v))); }
+            if let Some(v) = turn_id.filter(|v| !v.is_empty()) { conditions.push(format!("turn_id = '{}'", esc(v))); }
+            if let Some(v) = trace_id.filter(|v| !v.is_empty()) { conditions.push(format!("trace_id = '{}'", esc(v))); }
+            if let Some(v) = session_id.filter(|v| !v.is_empty()) { conditions.push(format!("session_id = '{}'", esc(v))); }
             let where_clause = if conditions.is_empty() {
                 String::new()
             } else {
@@ -1407,8 +1577,11 @@ impl Db {
             let fetch = limit + 1;
             let mut stmt = c.prepare(&format!(
                 "SELECT day, scope, provider_id, credential_id, upstream_id, wire, route_prefix, upstream_model,
+                        thread_id, turn_id, trace_id, session_id,
                         requests, successes, failures,
                         input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                        reasoning_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens,
+                        audio_input_tokens, audio_output_tokens, accepted_prediction_tokens, rejected_prediction_tokens, cost_items_json,
                         estimated_cost_micros,
                         CASE WHEN latency_count > 0 THEN CAST(latency_sum_ms AS REAL) / latency_count ELSE NULL END,
                         CASE WHEN first_token_count > 0 THEN CAST(first_token_sum_ms AS REAL) / first_token_count ELSE NULL END
@@ -1416,7 +1589,7 @@ impl Db {
                  ORDER BY day DESC, scope ASC, requests DESC LIMIT {fetch} OFFSET {offset}"
             ))?;
             let rows = stmt.query_map([], |r| {
-                let micros: i64 = r.get(15)?;
+                let micros: i64 = r.get(27)?;
                 Ok(vibe_protocol::UsageDailyRollup {
                     day: r.get(0)?,
                     scope: r.get(1)?,
@@ -1426,16 +1599,20 @@ impl Db {
                     wire: r.get(5)?,
                     route_prefix: r.get(6)?,
                     upstream_model: r.get(7)?,
-                    requests: r.get(8)?,
-                    successes: r.get(9)?,
-                    failures: r.get(10)?,
-                    input_tokens: r.get(11)?,
-                    output_tokens: r.get(12)?,
-                    cache_read_tokens: r.get(13)?,
-                    cache_creation_tokens: r.get(14)?,
+                    thread_id: r.get(8)?,
+                    turn_id: r.get(9)?,
+                    trace_id: r.get(10)?,
+                    session_id: r.get(11)?,
+                    requests: r.get(12)?,
+                    successes: r.get(13)?,
+                    failures: r.get(14)?,
+                    input_tokens: r.get(15)?,
+                    output_tokens: r.get(16)?,
+                    cache_read_tokens: r.get(17)?,
+                    cache_creation_tokens: r.get(18)?,
                     estimated_cost_usd: micros_to_usd(micros),
-                    latency_avg_ms: r.get(16)?,
-                    first_token_avg_ms: r.get(17)?,
+                    latency_avg_ms: r.get(28)?,
+                    first_token_avg_ms: r.get(29)?,
                 })
             })?;
             let mut items = Vec::new();
@@ -2347,9 +2524,11 @@ impl Db {
     // 38 disabled_reason, 39 disabled_at
 
     const LOG_COLS_LIST: &'static str =
-        "id, started_at, app, provider_id, requested_model, upstream_model,
+        "id, started_at, app, provider_id, thread_id, turn_id, trace_id, session_id, requested_model, upstream_model,
          status_code, error, latency_ms, first_token_ms,
          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+         reasoning_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens,
+         audio_input_tokens, audio_output_tokens, accepted_prediction_tokens, rejected_prediction_tokens, cost_items,
          estimated_cost_usd,
          wire, route_prefix, credential_id, cb_key, upstream_http_status,
          upstream_error_preview, dedupe_key,
@@ -2366,9 +2545,11 @@ impl Db {
          bridge_mode, status_injected, terminal_injected, upstream_terminal_type";
 
     const LOG_COLS_FULL: &'static str =
-        "id, started_at, app, provider_id, requested_model, upstream_model,
+        "id, started_at, app, provider_id, thread_id, turn_id, trace_id, session_id, requested_model, upstream_model,
          status_code, error, latency_ms, first_token_ms,
          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+         reasoning_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens,
+         audio_input_tokens, audio_output_tokens, accepted_prediction_tokens, rejected_prediction_tokens, cost_items,
          estimated_cost_usd,
          wire, route_prefix, credential_id, cb_key, upstream_http_status,
          upstream_error_preview, dedupe_key,
@@ -2388,10 +2569,13 @@ impl Db {
 
     const ATTEMPT_COLS: &'static str =
         "attempt_id, request_id, attempt_index, wave_index, wave_size, upstream_id, started_at, ended_at,
-         provider_id, credential_id, wire, route_prefix, requested_model, upstream_model,
+         provider_id, credential_id, thread_id, turn_id, trace_id, session_id, wire, route_prefix, requested_model, upstream_model,
          phase, outcome, status_code, upstream_http_status, error_summary,
          latency_ms, first_token_ms, input_tokens, output_tokens,
-         cache_read_tokens, cache_creation_tokens, estimated_cost_usd,
+         cache_read_tokens, cache_creation_tokens,
+         reasoning_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens,
+         audio_input_tokens, audio_output_tokens, accepted_prediction_tokens, rejected_prediction_tokens, cost_items,
+         estimated_cost_usd,
          upstream_first_byte_ms, client_first_write_ms,
          last_upstream_event_ms, last_client_write_ms,
          upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
@@ -2569,8 +2753,10 @@ impl Db {
         if n == 0 {
             anyhow::bail!("credential {id} not found");
         }
-        self.credential_get(id)?
-            .context("updated credential missing on read-back")
+        let cred = self
+            .credential_get(id)?
+            .context("updated credential missing on read-back")?;
+        Ok(cred)
     }
 
     /// Read the upstream_session token (write-sensitive, not included in Credential).
@@ -2715,6 +2901,88 @@ impl Db {
         })
     }
 
+    pub fn credential_quota_status_list(
+        &self,
+    ) -> Result<Vec<vibe_protocol::CredentialQuotaStatus>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT credential_id, provider_id, status, ready, source, reason, quota_data_json,
+                        next_reset_at, last_checked_at, updated_at
+                 FROM credential_quota_statuses ORDER BY provider_id, credential_id",
+            )?;
+            let rows = stmt.query_map([], row_to_credential_quota_status)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn credential_quota_status_get(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<vibe_protocol::CredentialQuotaStatus>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT credential_id, provider_id, status, ready, source, reason, quota_data_json,
+                        next_reset_at, last_checked_at, updated_at
+                 FROM credential_quota_statuses WHERE credential_id = ?1",
+                params![credential_id],
+                row_to_credential_quota_status,
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn credential_quota_status_upsert(
+        &self,
+        credential_id: &str,
+        provider_id: &str,
+        status: vibe_protocol::CredentialQuotaState,
+        ready: bool,
+        source: vibe_protocol::CredentialQuotaSource,
+        reason: Option<&str>,
+        quota_data_json: Option<&str>,
+        next_reset_at: Option<i64>,
+        last_checked_at: Option<i64>,
+    ) -> Result<()> {
+        let now = now_secs();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO credential_quota_statuses (
+                    credential_id, provider_id, status, ready, source, reason, quota_data_json,
+                    next_reset_at, last_checked_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, '{}'), ?8, ?9, ?10)
+                 ON CONFLICT(credential_id) DO UPDATE SET
+                    provider_id = excluded.provider_id,
+                    status = excluded.status,
+                    ready = excluded.ready,
+                    source = excluded.source,
+                    reason = excluded.reason,
+                    quota_data_json = excluded.quota_data_json,
+                    next_reset_at = excluded.next_reset_at,
+                    last_checked_at = excluded.last_checked_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    credential_id,
+                    provider_id,
+                    credential_quota_state_to_str(status),
+                    i64::from(ready),
+                    credential_quota_source_to_str(source),
+                    reason,
+                    quota_data_json,
+                    next_reset_at,
+                    last_checked_at.or(Some(now)),
+                    now,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn credential_delete(&self, id: &str) -> Result<()> {
         self.with(|c| {
             let n = c.execute("DELETE FROM credentials WHERE id=?1", params![id])?;
@@ -2756,8 +3024,29 @@ impl Db {
             }
             Ok(())
         })?;
-        self.credential_get(id)?
-            .context("updated credential missing on read-back")
+        let cred = self
+            .credential_get(id)?
+            .context("updated credential missing on read-back")?;
+        let _ = self.credential_quota_status_upsert(
+            id,
+            &cred.provider_id,
+            if enabled {
+                vibe_protocol::CredentialQuotaState::Unknown
+            } else {
+                vibe_protocol::CredentialQuotaState::Disabled
+            },
+            enabled,
+            vibe_protocol::CredentialQuotaSource::Manual,
+            if enabled {
+                None
+            } else {
+                Some("credential disabled manually")
+            },
+            None,
+            None,
+            Some(now),
+        );
+        Ok(cred)
     }
 
     /// Auto-disable a credential after a fatal upstream error (e.g. 401/403).
@@ -2817,7 +3106,43 @@ impl Db {
                 ],
             )?;
             Ok(())
-        })
+        })?;
+        if let Ok(Some(cred)) = self.credential_get(id) {
+            let limited = rl_requests_remaining == Some(0) || rl_tokens_remaining == Some(0);
+            let next_reset = [rl_requests_reset_at, rl_tokens_reset_at]
+                .into_iter()
+                .flatten()
+                .min();
+            let quota = serde_json::json!({
+                "requests_limit": rl_requests_limit,
+                "requests_remaining": rl_requests_remaining,
+                "requests_reset_at": rl_requests_reset_at,
+                "tokens_limit": rl_tokens_limit,
+                "tokens_remaining": rl_tokens_remaining,
+                "tokens_reset_at": rl_tokens_reset_at
+            })
+            .to_string();
+            let _ = self.credential_quota_status_upsert(
+                id,
+                &cred.provider_id,
+                if limited {
+                    vibe_protocol::CredentialQuotaState::RateLimited
+                } else {
+                    vibe_protocol::CredentialQuotaState::Available
+                },
+                !limited,
+                vibe_protocol::CredentialQuotaSource::ResponseHeaders,
+                if limited {
+                    Some("rate limit or quota remaining reached zero")
+                } else {
+                    None
+                },
+                Some(&quota),
+                next_reset,
+                Some(now),
+            );
+        }
+        Ok(())
     }
 
     /// Record a successful use: update last_used_at, clear consecutive_failures and last_error.
@@ -2905,6 +3230,65 @@ fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
         model_aliases: serde_json::from_str(&aliases_json).unwrap_or_default(),
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
+    })
+}
+
+fn credential_quota_state_to_str(v: vibe_protocol::CredentialQuotaState) -> &'static str {
+    match v {
+        vibe_protocol::CredentialQuotaState::Available => "available",
+        vibe_protocol::CredentialQuotaState::Warning => "warning",
+        vibe_protocol::CredentialQuotaState::Exhausted => "exhausted",
+        vibe_protocol::CredentialQuotaState::RateLimited => "rate-limited",
+        vibe_protocol::CredentialQuotaState::Disabled => "disabled",
+        vibe_protocol::CredentialQuotaState::Unknown => "unknown",
+    }
+}
+
+fn credential_quota_state_from_str(v: &str) -> vibe_protocol::CredentialQuotaState {
+    match v {
+        "available" => vibe_protocol::CredentialQuotaState::Available,
+        "warning" => vibe_protocol::CredentialQuotaState::Warning,
+        "exhausted" => vibe_protocol::CredentialQuotaState::Exhausted,
+        "rate-limited" => vibe_protocol::CredentialQuotaState::RateLimited,
+        "disabled" => vibe_protocol::CredentialQuotaState::Disabled,
+        _ => vibe_protocol::CredentialQuotaState::Unknown,
+    }
+}
+
+fn credential_quota_source_to_str(v: vibe_protocol::CredentialQuotaSource) -> &'static str {
+    match v {
+        vibe_protocol::CredentialQuotaSource::ResponseHeaders => "response-headers",
+        vibe_protocol::CredentialQuotaSource::CodexPlan => "codex-plan",
+        vibe_protocol::CredentialQuotaSource::CredentialState => "credential-state",
+        vibe_protocol::CredentialQuotaSource::Manual => "manual",
+    }
+}
+
+fn credential_quota_source_from_str(v: &str) -> vibe_protocol::CredentialQuotaSource {
+    match v {
+        "response-headers" => vibe_protocol::CredentialQuotaSource::ResponseHeaders,
+        "codex-plan" => vibe_protocol::CredentialQuotaSource::CodexPlan,
+        "manual" => vibe_protocol::CredentialQuotaSource::Manual,
+        _ => vibe_protocol::CredentialQuotaSource::CredentialState,
+    }
+}
+
+fn row_to_credential_quota_status(
+    r: &rusqlite::Row,
+) -> rusqlite::Result<vibe_protocol::CredentialQuotaStatus> {
+    let status: String = r.get(2)?;
+    let source: String = r.get(4)?;
+    Ok(vibe_protocol::CredentialQuotaStatus {
+        credential_id: r.get(0)?,
+        provider_id: r.get(1)?,
+        status: credential_quota_state_from_str(&status),
+        ready: r.get::<_, i64>(3)? != 0,
+        source: credential_quota_source_from_str(&source),
+        reason: r.get(5)?,
+        quota_data_json: r.get(6)?,
+        next_reset_at: r.get(7)?,
+        last_checked_at: r.get(8)?,
+        updated_at: r.get(9)?,
     })
 }
 
@@ -3011,8 +3395,8 @@ fn row_to_plan_snapshot(
 }
 
 fn row_to_attempt(r: &rusqlite::Row) -> rusqlite::Result<UpstreamAttemptLog> {
-    let phase_s: String = r.get(14)?;
-    let outcome_s: String = r.get(15)?;
+    let phase_s: String = r.get(18)?;
+    let outcome_s: String = r.get(19)?;
     Ok(UpstreamAttemptLog {
         attempt_id: r.get(0)?,
         request_id: r.get(1)?,
@@ -3024,56 +3408,68 @@ fn row_to_attempt(r: &rusqlite::Row) -> rusqlite::Result<UpstreamAttemptLog> {
         ended_at: r.get(7)?,
         provider_id: r.get(8)?,
         credential_id: r.get(9)?,
-        wire: r.get(10)?,
-        route_prefix: r.get(11)?,
-        requested_model: r.get(12)?,
-        upstream_model: r.get(13)?,
+        thread_id: r.get(10)?,
+        turn_id: r.get(11)?,
+        trace_id: r.get(12)?,
+        session_id: r.get(13)?,
+        wire: r.get(14)?,
+        route_prefix: r.get(15)?,
+        requested_model: r.get(16)?,
+        upstream_model: r.get(17)?,
         phase: upstream_attempt_phase_from_str(&phase_s).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(14, rusqlite::types::Type::Text, e.into())
+            rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, e.into())
         })?,
         outcome: upstream_attempt_outcome_from_str(&outcome_s).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, e.into())
+            rusqlite::Error::FromSqlConversionFailure(19, rusqlite::types::Type::Text, e.into())
         })?,
-        status_code: r.get(16)?,
-        upstream_http_status: r.get(17)?,
-        error_summary: r.get(18)?,
-        latency_ms: r.get(19)?,
-        first_token_ms: r.get(20)?,
-        input_tokens: r.get(21)?,
-        output_tokens: r.get(22)?,
-        cache_read_tokens: r.get(23)?,
-        cache_creation_tokens: r.get(24)?,
-        estimated_cost_usd: r.get(25)?,
-        upstream_first_byte_ms: r.get(26)?,
-        client_first_write_ms: r.get(27)?,
-        last_upstream_event_ms: r.get(28)?,
-        last_client_write_ms: r.get(29)?,
-        upstream_chunk_count: r.get(30)?,
-        upstream_bytes: r.get(31)?,
-        client_chunk_count: r.get(32)?,
-        client_bytes: r.get(33)?,
-        sse_event_count: r.get(34)?,
-        sse_data_count: r.get(35)?,
-        sse_comment_count: r.get(36)?,
-        sse_keepalive_count: r.get(37)?,
-        sse_done_count: r.get(38)?,
-        parse_error_count: r.get(39)?,
-        first_keepalive_ms: r.get(40)?,
-        last_keepalive_ms: r.get(41)?,
-        max_gap_between_upstream_events_ms: r.get(42)?,
-        max_gap_between_data_events_ms: r.get(43)?,
-        keepalive_after_last_data_count: r.get(44)?,
-        last_data_event_ms: r.get(45)?,
-        bridge_mode: r.get(46)?,
-        status_injected: r.get::<_, i32>(47)? != 0,
-        terminal_injected: r.get::<_, i32>(48)? != 0,
-        upstream_terminal_type: r.get(49)?,
-        active_upstream_decode_tps_peak: r.get(50)?,
-        active_downstream_emit_tps_peak: r.get(51)?,
-        request_headers: r.get(52)?,
-        request_body: r.get(53)?,
-        response_headers: r.get(54)?,
-        response_body: r.get(55)?,
+        status_code: r.get(20)?,
+        upstream_http_status: r.get(21)?,
+        error_summary: r.get(22)?,
+        latency_ms: r.get(23)?,
+        first_token_ms: r.get(24)?,
+        input_tokens: r.get(25)?,
+        output_tokens: r.get(26)?,
+        cache_read_tokens: r.get(27)?,
+        cache_creation_tokens: r.get(28)?,
+        reasoning_tokens: r.get(29)?,
+        cache_creation_5m_tokens: r.get(30)?,
+        cache_creation_1h_tokens: r.get(31)?,
+        audio_input_tokens: r.get(32)?,
+        audio_output_tokens: r.get(33)?,
+        accepted_prediction_tokens: r.get(34)?,
+        rejected_prediction_tokens: r.get(35)?,
+        cost_items: r.get(36)?,
+        estimated_cost_usd: r.get(37)?,
+        upstream_first_byte_ms: r.get(38)?,
+        client_first_write_ms: r.get(39)?,
+        last_upstream_event_ms: r.get(40)?,
+        last_client_write_ms: r.get(41)?,
+        upstream_chunk_count: r.get(42)?,
+        upstream_bytes: r.get(43)?,
+        client_chunk_count: r.get(44)?,
+        client_bytes: r.get(45)?,
+        sse_event_count: r.get(46)?,
+        sse_data_count: r.get(47)?,
+        sse_comment_count: r.get(48)?,
+        sse_keepalive_count: r.get(49)?,
+        sse_done_count: r.get(50)?,
+        parse_error_count: r.get(51)?,
+        first_keepalive_ms: r.get(52)?,
+        last_keepalive_ms: r.get(53)?,
+        max_gap_between_upstream_events_ms: r.get(54)?,
+        max_gap_between_data_events_ms: r.get(55)?,
+        keepalive_after_last_data_count: r.get(56)?,
+        last_data_event_ms: r.get(57)?,
+        bridge_mode: r.get(58)?,
+        status_injected: r.get::<_, i32>(59)? != 0,
+        terminal_injected: r.get::<_, i32>(60)? != 0,
+        upstream_terminal_type: r.get(61)?,
+        active_upstream_decode_tps_peak: r.get(62)?,
+        active_downstream_emit_tps_peak: r.get(63)?,
+        request_headers: r.get(64)?,
+        request_body: r.get(65)?,
+        response_headers: r.get(66)?,
+        response_body: r.get(67)?,
     })
 }
 
@@ -3083,57 +3479,69 @@ fn row_to_log_list(r: &rusqlite::Row) -> rusqlite::Result<RequestLog> {
         started_at: r.get(1)?,
         app: r.get(2)?,
         provider_id: r.get(3)?,
-        requested_model: r.get(4)?,
-        upstream_model: r.get(5)?,
-        status_code: r.get(6)?,
-        error: r.get(7)?,
-        latency_ms: r.get(8)?,
-        first_token_ms: r.get(9)?,
-        input_tokens: r.get(10)?,
-        output_tokens: r.get(11)?,
-        cache_read_tokens: r.get(12)?,
-        cache_creation_tokens: r.get(13)?,
-        estimated_cost_usd: r.get(14)?,
-        wire: r.get(15)?,
-        route_prefix: r.get(16)?,
-        credential_id: r.get(17)?,
-        cb_key: r.get(18)?,
-        upstream_http_status: r.get(19)?,
-        upstream_error_preview: r.get(20)?,
-        dedupe_key: r.get(21)?,
-        client_transport: r.get(22)?,
+        thread_id: r.get(4)?,
+        turn_id: r.get(5)?,
+        trace_id: r.get(6)?,
+        session_id: r.get(7)?,
+        requested_model: r.get(8)?,
+        upstream_model: r.get(9)?,
+        status_code: r.get(10)?,
+        error: r.get(11)?,
+        latency_ms: r.get(12)?,
+        first_token_ms: r.get(13)?,
+        input_tokens: r.get(14)?,
+        output_tokens: r.get(15)?,
+        cache_read_tokens: r.get(16)?,
+        cache_creation_tokens: r.get(17)?,
+        reasoning_tokens: r.get(18)?,
+        cache_creation_5m_tokens: r.get(19)?,
+        cache_creation_1h_tokens: r.get(20)?,
+        audio_input_tokens: r.get(21)?,
+        audio_output_tokens: r.get(22)?,
+        accepted_prediction_tokens: r.get(23)?,
+        rejected_prediction_tokens: r.get(24)?,
+        cost_items: r.get(25)?,
+        estimated_cost_usd: r.get(26)?,
+        wire: r.get(27)?,
+        route_prefix: r.get(28)?,
+        credential_id: r.get(29)?,
+        cb_key: r.get(30)?,
+        upstream_http_status: r.get(31)?,
+        upstream_error_preview: r.get(32)?,
+        dedupe_key: r.get(33)?,
+        client_transport: r.get(34)?,
         request_headers: None,
         request_body: None,
         response_body: None,
         client_response_body: None,
-        stream_kind: r.get(24)?,
-        stream_terminal_seen: opt_bool(r.get::<_, Option<i32>>(25)?),
-        stream_end_reason: r.get(26)?,
-        stream_error_detail: r.get(27)?,
-        upstream_first_byte_ms: r.get(28)?,
-        client_first_write_ms: r.get(29)?,
-        last_upstream_event_ms: r.get(30)?,
-        last_client_write_ms: r.get(31)?,
-        upstream_chunk_count: r.get(32)?,
-        upstream_bytes: r.get(33)?,
-        client_chunk_count: r.get(34)?,
-        client_bytes: r.get(35)?,
-        sse_event_count: r.get(36)?,
-        sse_data_count: r.get(37)?,
-        sse_comment_count: r.get(38)?,
-        sse_keepalive_count: r.get(39)?,
-        sse_done_count: r.get(40)?,
-        parse_error_count: r.get(41)?,
-        first_keepalive_ms: r.get(42)?,
-        last_keepalive_ms: r.get(43)?,
-        max_gap_between_upstream_events_ms: r.get(44)?,
-        max_gap_between_data_events_ms: r.get(45)?,
-        keepalive_after_last_data_count: r.get(46)?,
-        last_data_event_ms: r.get(47)?,
-        bridge_mode: r.get(48)?,
-        status_injected: r.get::<_, i32>(49)? != 0,
-        terminal_injected: r.get::<_, i32>(50)? != 0,
-        upstream_terminal_type: r.get(51)?,
+        stream_kind: r.get(36)?,
+        stream_terminal_seen: opt_bool(r.get::<_, Option<i32>>(37)?),
+        stream_end_reason: r.get(38)?,
+        stream_error_detail: r.get(39)?,
+        upstream_first_byte_ms: r.get(40)?,
+        client_first_write_ms: r.get(41)?,
+        last_upstream_event_ms: r.get(42)?,
+        last_client_write_ms: r.get(43)?,
+        upstream_chunk_count: r.get(44)?,
+        upstream_bytes: r.get(45)?,
+        client_chunk_count: r.get(46)?,
+        client_bytes: r.get(47)?,
+        sse_event_count: r.get(48)?,
+        sse_data_count: r.get(49)?,
+        sse_comment_count: r.get(50)?,
+        sse_keepalive_count: r.get(51)?,
+        sse_done_count: r.get(52)?,
+        parse_error_count: r.get(53)?,
+        first_keepalive_ms: r.get(54)?,
+        last_keepalive_ms: r.get(55)?,
+        max_gap_between_upstream_events_ms: r.get(56)?,
+        max_gap_between_data_events_ms: r.get(57)?,
+        keepalive_after_last_data_count: r.get(58)?,
+        last_data_event_ms: r.get(59)?,
+        bridge_mode: r.get(60)?,
+        status_injected: r.get::<_, i32>(61)? != 0,
+        terminal_injected: r.get::<_, i32>(62)? != 0,
+        upstream_terminal_type: r.get(63)?,
     })
 }
 
@@ -3143,57 +3551,69 @@ fn row_to_log_detail(r: &rusqlite::Row) -> rusqlite::Result<RequestLog> {
         started_at: r.get(1)?,
         app: r.get(2)?,
         provider_id: r.get(3)?,
-        requested_model: r.get(4)?,
-        upstream_model: r.get(5)?,
-        status_code: r.get(6)?,
-        error: r.get(7)?,
-        latency_ms: r.get(8)?,
-        first_token_ms: r.get(9)?,
-        input_tokens: r.get(10)?,
-        output_tokens: r.get(11)?,
-        cache_read_tokens: r.get(12)?,
-        cache_creation_tokens: r.get(13)?,
-        estimated_cost_usd: r.get(14)?,
-        wire: r.get(15)?,
-        route_prefix: r.get(16)?,
-        credential_id: r.get(17)?,
-        cb_key: r.get(18)?,
-        upstream_http_status: r.get(19)?,
-        upstream_error_preview: r.get(20)?,
-        dedupe_key: r.get(21)?,
-        client_transport: r.get(22)?,
-        request_headers: r.get(23)?,
-        request_body: r.get(24)?,
-        response_body: r.get(25)?,
-        client_response_body: r.get(26)?,
-        stream_kind: r.get(27)?,
-        stream_terminal_seen: opt_bool(r.get::<_, Option<i32>>(28)?),
-        stream_end_reason: r.get(29)?,
-        stream_error_detail: r.get(30)?,
-        upstream_first_byte_ms: r.get(31)?,
-        client_first_write_ms: r.get(32)?,
-        last_upstream_event_ms: r.get(33)?,
-        last_client_write_ms: r.get(34)?,
-        upstream_chunk_count: r.get(35)?,
-        upstream_bytes: r.get(36)?,
-        client_chunk_count: r.get(37)?,
-        client_bytes: r.get(38)?,
-        sse_event_count: r.get(39)?,
-        sse_data_count: r.get(40)?,
-        sse_comment_count: r.get(41)?,
-        sse_keepalive_count: r.get(42)?,
-        sse_done_count: r.get(43)?,
-        parse_error_count: r.get(44)?,
-        first_keepalive_ms: r.get(45)?,
-        last_keepalive_ms: r.get(46)?,
-        max_gap_between_upstream_events_ms: r.get(47)?,
-        max_gap_between_data_events_ms: r.get(48)?,
-        keepalive_after_last_data_count: r.get(49)?,
-        last_data_event_ms: r.get(50)?,
-        bridge_mode: r.get(51)?,
-        status_injected: r.get::<_, i32>(52)? != 0,
-        terminal_injected: r.get::<_, i32>(53)? != 0,
-        upstream_terminal_type: r.get(54)?,
+        thread_id: r.get(4)?,
+        turn_id: r.get(5)?,
+        trace_id: r.get(6)?,
+        session_id: r.get(7)?,
+        requested_model: r.get(8)?,
+        upstream_model: r.get(9)?,
+        status_code: r.get(10)?,
+        error: r.get(11)?,
+        latency_ms: r.get(12)?,
+        first_token_ms: r.get(13)?,
+        input_tokens: r.get(14)?,
+        output_tokens: r.get(15)?,
+        cache_read_tokens: r.get(16)?,
+        cache_creation_tokens: r.get(17)?,
+        reasoning_tokens: r.get(18)?,
+        cache_creation_5m_tokens: r.get(19)?,
+        cache_creation_1h_tokens: r.get(20)?,
+        audio_input_tokens: r.get(21)?,
+        audio_output_tokens: r.get(22)?,
+        accepted_prediction_tokens: r.get(23)?,
+        rejected_prediction_tokens: r.get(24)?,
+        cost_items: r.get(25)?,
+        estimated_cost_usd: r.get(26)?,
+        wire: r.get(27)?,
+        route_prefix: r.get(28)?,
+        credential_id: r.get(29)?,
+        cb_key: r.get(30)?,
+        upstream_http_status: r.get(31)?,
+        upstream_error_preview: r.get(32)?,
+        dedupe_key: r.get(33)?,
+        client_transport: r.get(34)?,
+        request_headers: r.get(35)?,
+        request_body: r.get(36)?,
+        response_body: r.get(37)?,
+        client_response_body: r.get(38)?,
+        stream_kind: r.get(39)?,
+        stream_terminal_seen: opt_bool(r.get::<_, Option<i32>>(40)?),
+        stream_end_reason: r.get(41)?,
+        stream_error_detail: r.get(42)?,
+        upstream_first_byte_ms: r.get(43)?,
+        client_first_write_ms: r.get(44)?,
+        last_upstream_event_ms: r.get(45)?,
+        last_client_write_ms: r.get(46)?,
+        upstream_chunk_count: r.get(47)?,
+        upstream_bytes: r.get(48)?,
+        client_chunk_count: r.get(49)?,
+        client_bytes: r.get(50)?,
+        sse_event_count: r.get(51)?,
+        sse_data_count: r.get(52)?,
+        sse_comment_count: r.get(53)?,
+        sse_keepalive_count: r.get(54)?,
+        sse_done_count: r.get(55)?,
+        parse_error_count: r.get(56)?,
+        first_keepalive_ms: r.get(57)?,
+        last_keepalive_ms: r.get(58)?,
+        max_gap_between_upstream_events_ms: r.get(59)?,
+        max_gap_between_data_events_ms: r.get(60)?,
+        keepalive_after_last_data_count: r.get(61)?,
+        last_data_event_ms: r.get(62)?,
+        bridge_mode: r.get(63)?,
+        status_injected: r.get::<_, i32>(64)? != 0,
+        terminal_injected: r.get::<_, i32>(65)? != 0,
+        upstream_terminal_type: r.get(66)?,
     })
 }
 
@@ -3255,6 +3675,10 @@ mod tests {
             started_at,
             app: Some("claude-code".into()),
             provider_id: provider_id.map(str::to_string),
+            thread_id: None,
+            turn_id: None,
+            trace_id: None,
+            session_id: None,
             requested_model: Some("high".into()),
             upstream_model: Some("claude-sonnet-4-6".into()),
             status_code,
@@ -3269,6 +3693,14 @@ mod tests {
             output_tokens: 20,
             cache_read_tokens: 3,
             cache_creation_tokens: 4,
+            reasoning_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            audio_input_tokens: 0,
+            audio_output_tokens: 0,
+            accepted_prediction_tokens: 0,
+            rejected_prediction_tokens: 0,
+            cost_items: None,
             estimated_cost_usd: "0.001".into(),
             wire: Some("anthropic".into()),
             route_prefix: Some("codex-v1".into()),
@@ -3419,11 +3851,31 @@ mod tests {
         assert_eq!(page.items[0].request_body, None);
 
         let filtered_ok = db
-            .log_list_filtered(10, 0, Some(base + 5), Some(&p1.id), Some(true))
+            .log_list_filtered(
+                10,
+                0,
+                Some(base + 5),
+                Some(&p1.id),
+                Some(true),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(filtered_ok.items.is_empty());
         let filtered_fail = db
-            .log_list_filtered(10, 0, Some(base + 5), Some(&p1.id), Some(false))
+            .log_list_filtered(
+                10,
+                0,
+                Some(base + 5),
+                Some(&p1.id),
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(
             filtered_fail

@@ -7,5 +7,13 @@ export type UsageSummary = {
   output_tokens: bigint;
   cache_read_tokens: bigint;
   cache_creation_tokens: bigint;
+  reasoning_tokens: bigint;
+  cache_creation_5m_tokens: bigint;
+  cache_creation_1h_tokens: bigint;
+  audio_input_tokens: bigint;
+  audio_output_tokens: bigint;
+  accepted_prediction_tokens: bigint;
+  rejected_prediction_tokens: bigint;
+  cost_items: string | null;
   estimated_cost_usd: string;
 };

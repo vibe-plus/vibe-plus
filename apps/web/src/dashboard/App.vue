@@ -44,6 +44,7 @@ const views: SidebarView[] = [
 const topTabs: { to: string; labelKey: string; icon: vp_icon_name; scoped?: boolean }[] = [
   { to: "/ui/overview", labelKey: "tabs.overview", icon: "layout-dashboard", scoped: true },
   { to: "/ui/providers", labelKey: "tabs.providers", icon: "server", scoped: true },
+  { to: "/ui/observability", labelKey: "tabs.observability", icon: "activity" },
   { to: "/ui/settings", labelKey: "tabs.settings", icon: "settings", scoped: true },
 ];
 
@@ -323,6 +324,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
     "tabs": {
       "overview": "Overview",
       "providers": "Providers",
+      "observability": "Observability",
       "settings": "Settings"
     },
     "views": {
@@ -348,6 +350,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
     "tabs": {
       "overview": "概览",
       "providers": "供应商",
+      "observability": "观测",
       "settings": "设置"
     },
     "views": {

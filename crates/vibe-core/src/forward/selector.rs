@@ -204,59 +204,94 @@ pub fn shuffle_candidates(
 }
 
 // ---------------------------------------------------------------------------
-// Wave bucketing (病患先 → 健康兜底)
+// Wave bucketing (123 race schedule)
 // ---------------------------------------------------------------------------
 
-/// Group sizes for the health buckets, in **dispatch order**.
+/// Maximum number of scheduler waves for the 123 policy.
 ///
-/// The forwarder runs waves病患先（CB Open / 最近熔断）→ 半健康（HalfOpen）→
-/// 健康（Closed）. The sicker the bucket, the wider the concurrent fanout —
-/// because the prior round already told us those providers are likely to
-/// fail, so we'd rather race a few of them than serialize the wait.
-///
-/// Closed sits last as a single "safety net" pick: when every病患 has been
-/// exhausted, one healthy upstream finishes the request alone.
-pub const WAVE_SIZE_OPEN: usize = 4;
-pub const WAVE_SIZE_HALF_OPEN: usize = 2;
-pub const WAVE_SIZE_CLOSED: usize = 1;
+/// Wave 0 is a single pick chosen by the caller's existing load-balancing /
+/// sticky-priority ordering. Wave 1 races up to two picks (prefer 1 sick + 1
+/// healthy). Wave 2 races up to three picks (prefer 1 sick + 2 healthy). Any
+/// remaining candidates are intentionally not dispatched; the forwarder will
+/// aggregate the collected retry / circuit-skip failures into its normal 503.
+const MAX_123_WAVES: usize = 3;
 
-/// Partition picks into health buckets, then chunk each bucket into waves of
-/// the size dictated by [`WAVE_SIZE_OPEN`] / [`WAVE_SIZE_HALF_OPEN`] /
-/// [`WAVE_SIZE_CLOSED`].
+/// Build scheduler waves using Vibe Plus's 123 policy.
 ///
-/// Within a single bucket the relative ordering of `picks` is preserved, so
-/// the caller's prior `shuffle_candidates` randomization (or sticky route
-/// pinning) still applies inside each wave.
+/// The input is already ordered by routing, CB-aware shuffling, credential
+/// expansion, and sticky priority. We therefore preserve the very first pick as
+/// the solo first wave so load-balancing / sticky routing decides the first
+/// upstream. Remaining picks are split into sick (CB Open or HalfOpen) and
+/// healthy (CB Closed) queues while preserving relative order inside each queue.
+///
+/// Wave 1 prefers `1 sick + 1 healthy`; wave 2 prefers `1 sick + 2 healthy`.
+/// If a preferred bucket is short, the wave is backfilled from whatever
+/// remaining candidates are available, up to the wave's cap. No wave is
+/// generated after wave 2.
 pub fn build_waves(picks: Vec<ExpandedPick>, cb: &CircuitBreakers) -> Vec<Vec<ExpandedPick>> {
     use crate::circuit_breaker::State;
+    use std::collections::VecDeque;
 
-    let mut open = Vec::new();
-    let mut half_open = Vec::new();
-    let mut closed = Vec::new();
-    for pick in picks {
+    let mut iter = picks.into_iter();
+    let Some(first) = iter.next() else {
+        return Vec::new();
+    };
+
+    let mut waves = Vec::with_capacity(MAX_123_WAVES);
+    waves.push(vec![first]);
+
+    let mut sick = VecDeque::new();
+    let mut healthy = VecDeque::new();
+    for pick in iter {
         match cb.state_of(&pick.upstream.cb_key) {
-            State::Open => open.push(pick),
-            State::HalfOpen => half_open.push(pick),
-            State::Closed => closed.push(pick),
+            State::Open | State::HalfOpen => sick.push_back(pick),
+            State::Closed => healthy.push_back(pick),
         }
     }
 
-    let mut waves = Vec::new();
-    push_chunks(&mut waves, open, WAVE_SIZE_OPEN);
-    push_chunks(&mut waves, half_open, WAVE_SIZE_HALF_OPEN);
-    push_chunks(&mut waves, closed, WAVE_SIZE_CLOSED);
+    push_123_wave(&mut waves, &mut sick, &mut healthy, 1, 1, 2);
+    push_123_wave(&mut waves, &mut sick, &mut healthy, 1, 2, 3);
     waves
 }
 
-fn push_chunks(out: &mut Vec<Vec<ExpandedPick>>, src: Vec<ExpandedPick>, size: usize) {
-    let size = size.max(1);
-    let mut iter = src.into_iter();
-    loop {
-        let chunk: Vec<_> = iter.by_ref().take(size).collect();
-        if chunk.is_empty() {
+fn push_123_wave(
+    waves: &mut Vec<Vec<ExpandedPick>>,
+    sick: &mut std::collections::VecDeque<ExpandedPick>,
+    healthy: &mut std::collections::VecDeque<ExpandedPick>,
+    preferred_sick: usize,
+    preferred_healthy: usize,
+    cap: usize,
+) {
+    let mut wave = Vec::with_capacity(cap);
+
+    take_from_queue(&mut wave, sick, preferred_sick, cap);
+    take_from_queue(&mut wave, healthy, preferred_healthy, cap);
+
+    // Backfill shortages without exceeding the cap. Prefer sick first here so
+    // an all-sick pool still uses the full wave width, then fill any remaining
+    // slots with healthy picks.
+    take_from_queue(&mut wave, sick, cap, cap);
+    take_from_queue(&mut wave, healthy, cap, cap);
+
+    if !wave.is_empty() {
+        waves.push(wave);
+    }
+}
+
+fn take_from_queue(
+    wave: &mut Vec<ExpandedPick>,
+    queue: &mut std::collections::VecDeque<ExpandedPick>,
+    count: usize,
+    cap: usize,
+) {
+    for _ in 0..count {
+        if wave.len() >= cap {
             return;
         }
-        out.push(chunk);
+        let Some(pick) = queue.pop_front() else {
+            return;
+        };
+        wave.push(pick);
     }
 }
 
@@ -710,7 +745,7 @@ mod tests {
         assert_eq!(result[0].provider.id, "p-good");
     }
 
-    // ─── build_waves: 病患先 → 健康兜底 layering ─────────────────────────
+    // ─── build_waves: 123 race schedule ────────────────────────────────
 
     fn cb_for_tests() -> CircuitBreakers {
         use crate::config::FailoverConfig;
@@ -722,8 +757,22 @@ mod tests {
         })
     }
 
+    fn cb_for_half_open_tests() -> CircuitBreakers {
+        use crate::config::FailoverConfig;
+        CircuitBreakers::new(FailoverConfig {
+            failure_threshold: 1,
+            success_threshold: 1,
+            open_timeout_secs: 0,
+            inject_cache: false,
+        })
+    }
+
     fn ids(wave: &[ExpandedPick]) -> Vec<String> {
         wave.iter().map(|p| p.provider.id.clone()).collect()
+    }
+
+    fn wave_ids(waves: &[Vec<ExpandedPick>]) -> Vec<Vec<String>> {
+        waves.iter().map(|w| ids(w)).collect()
     }
 
     #[test]
@@ -736,125 +785,119 @@ mod tests {
     fn build_waves_one_healthy_pick_is_one_wave_of_one() {
         let cb = cb_for_tests();
         let waves = build_waves(vec![make_epick("p", None)], &cb);
-        assert_eq!(waves.len(), 1);
-        assert_eq!(waves[0].len(), 1);
-        assert_eq!(waves[0][0].provider.id, "p");
+        assert_eq!(wave_ids(&waves), vec![vec!["p".to_string()]]);
     }
 
     #[test]
-    fn build_waves_chunks_open_at_size_4() {
+    fn build_waves_healthy_only_uses_1_2_3_then_drops_rest() {
         let cb = cb_for_tests();
-        // Trip CB for all 7 picks so they all bucket as Open.
-        let mut picks = Vec::new();
-        for i in 0..7 {
-            let id = format!("p-open-{i}");
-            cb.force_open(&id);
-            picks.push(make_epick(&id, None));
-        }
-        let waves = build_waves(picks, &cb);
-        assert_eq!(waves.len(), 2, "7 open picks should chunk into 4+3");
-        assert_eq!(waves[0].len(), 4);
-        assert_eq!(waves[1].len(), 3);
-    }
-
-    #[test]
-    fn build_waves_chunks_closed_one_at_a_time() {
-        let cb = cb_for_tests();
-        let picks: Vec<ExpandedPick> = (0..3)
-            .map(|i| make_epick(&format!("p-ok-{i}"), None))
+        let picks: Vec<ExpandedPick> = (0..8)
+            .map(|i| make_epick(&format!("h-{i}"), None))
             .collect();
-        let waves = build_waves(picks, &cb);
-        assert_eq!(waves.len(), 3, "3 healthy picks must become 3 solo waves");
-        for w in &waves {
-            assert_eq!(w.len(), 1);
-        }
-    }
-
-    #[test]
-    fn build_waves_orders_sick_before_healthy() {
-        // Mix: 1 healthy + 1 CB-open → expect order [open, healthy].
-        let cb = cb_for_tests();
-        cb.force_open("p-sick");
-        let waves = build_waves(
-            vec![make_epick("p-healthy", None), make_epick("p-sick", None)],
-            &cb,
-        );
-        assert_eq!(waves.len(), 2, "one wave per bucket");
-        assert_eq!(ids(&waves[0]), vec!["p-sick".to_string()]);
-        assert_eq!(ids(&waves[1]), vec!["p-healthy".to_string()]);
-    }
-
-    #[test]
-    fn build_waves_chunks_half_open_at_size_2() {
-        // Reach HalfOpen by using a 0-second open timeout, then calling
-        // `allow()` once after `force_open` — this is the CB's probe path.
-        use crate::config::FailoverConfig;
-        let cb = CircuitBreakers::new(FailoverConfig {
-            failure_threshold: 1,
-            success_threshold: 1,
-            open_timeout_secs: 0,
-            inject_cache: false,
-        });
-        let mut picks = Vec::new();
-        for i in 0..5 {
-            let id = format!("p-half-{i}");
-            cb.force_open(&id);
-            assert!(cb.allow(&id), "expected HalfOpen probe to be allowed");
-            picks.push(make_epick(&id, None));
-        }
         let waves = build_waves(picks, &cb);
         assert_eq!(
-            waves.iter().map(|w| w.len()).collect::<Vec<_>>(),
-            vec![2, 2, 1],
-            "5 half-open picks must chunk into 2+2+1"
+            wave_ids(&waves),
+            vec![
+                vec!["h-0".to_string()],
+                vec!["h-1".to_string(), "h-2".to_string()],
+                vec!["h-3".to_string(), "h-4".to_string(), "h-5".to_string()],
+            ]
         );
     }
 
     #[test]
-    fn build_waves_layers_open_then_half_then_closed() {
-        use crate::config::FailoverConfig;
-        let cb = CircuitBreakers::new(FailoverConfig {
-            failure_threshold: 1,
-            success_threshold: 1,
-            open_timeout_secs: 0,
-            inject_cache: false,
-        });
-        // 4 Open → 1 wave of 4
-        // 2 HalfOpen → 1 wave of 2
-        // 2 Closed → 2 waves of 1
-        let mut picks = Vec::new();
-        for i in 0..4 {
-            let id = format!("a-open-{i}");
-            cb.force_open(&id);
-            picks.push(make_epick(&id, None));
-        }
-        // HalfOpen via force_open + allow (0-timeout flips immediately).
-        for i in 0..2 {
-            let id = format!("b-half-{i}");
-            cb.force_open(&id);
-            let _ = cb.allow(&id);
-            picks.push(make_epick(&id, None));
-        }
-        for i in 0..2 {
-            picks.push(make_epick(&format!("c-ok-{i}"), None));
-        }
+    fn build_waves_mixed_respects_first_pick_then_1_sick_1_healthy_then_1_sick_2_healthy() {
+        let cb = cb_for_tests();
+        cb.force_open("s-0");
+        cb.force_open("s-1");
+        cb.force_open("s-2");
+        let picks = vec![
+            make_epick("h-first", None),
+            make_epick("s-0", None),
+            make_epick("h-0", None),
+            make_epick("s-1", None),
+            make_epick("h-1", None),
+            make_epick("h-2", None),
+            make_epick("s-2", None),
+            make_epick("h-dropped", None),
+        ];
 
         let waves = build_waves(picks, &cb);
 
-        // Wave sizes encode the bucket boundary.
-        let sizes: Vec<usize> = waves.iter().map(|w| w.len()).collect();
-        assert_eq!(sizes, vec![4, 2, 1, 1], "got {sizes:?}");
+        assert_eq!(
+            wave_ids(&waves),
+            vec![
+                vec!["h-first".to_string()],
+                vec!["s-0".to_string(), "h-0".to_string()],
+                vec!["s-1".to_string(), "h-1".to_string(), "h-2".to_string()],
+            ]
+        );
+    }
 
-        // Ordering: a-open-* first, then b-half-*, then c-ok-*.
-        let flat: Vec<String> = waves
-            .iter()
-            .flat_map(|w| w.iter().map(|p| p.provider.id.clone()))
+    #[test]
+    fn build_waves_backfills_when_preferred_bucket_is_short() {
+        let cb = cb_for_tests();
+        cb.force_open("s-0");
+        cb.force_open("s-1");
+        cb.force_open("s-2");
+        cb.force_open("s-3");
+        let picks = vec![
+            make_epick("h-first", None),
+            make_epick("s-0", None),
+            make_epick("s-1", None),
+            make_epick("s-2", None),
+            make_epick("s-3", None),
+        ];
+
+        let waves = build_waves(picks, &cb);
+
+        assert_eq!(
+            wave_ids(&waves),
+            vec![
+                vec!["h-first".to_string()],
+                vec!["s-0".to_string(), "s-1".to_string()],
+                vec!["s-2".to_string(), "s-3".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn build_waves_treats_open_and_half_open_as_sick() {
+        let cb = cb_for_half_open_tests();
+        cb.force_open("s-open");
+        cb.force_open("s-half");
+        assert!(cb.allow("s-half"), "expected HalfOpen probe to be allowed");
+        let picks = vec![
+            make_epick("h-first", None),
+            make_epick("s-open", None),
+            make_epick("h-0", None),
+            make_epick("s-half", None),
+            make_epick("h-1", None),
+        ];
+
+        let waves = build_waves(picks, &cb);
+
+        assert_eq!(
+            wave_ids(&waves),
+            vec![
+                vec!["h-first".to_string()],
+                vec!["s-open".to_string(), "h-0".to_string()],
+                vec!["s-half".to_string(), "h-1".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn build_waves_never_generates_fourth_wave() {
+        let cb = cb_for_tests();
+        let picks: Vec<ExpandedPick> = (0..20)
+            .map(|i| make_epick(&format!("p-{i}"), None))
             .collect();
-        let last_open = flat.iter().rposition(|s| s.starts_with("a-open-")).unwrap();
-        let first_half = flat.iter().position(|s| s.starts_with("b-half-")).unwrap();
-        let last_half = flat.iter().rposition(|s| s.starts_with("b-half-")).unwrap();
-        let first_ok = flat.iter().position(|s| s.starts_with("c-ok-")).unwrap();
-        assert!(last_open < first_half, "open must precede half-open");
-        assert!(last_half < first_ok, "half-open must precede closed");
+        let waves = build_waves(picks, &cb);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(
+            waves.iter().map(|w| w.len()).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 }

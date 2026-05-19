@@ -105,9 +105,25 @@ pub async fn run_server(port: u16) -> Result<()> {
     // `vibe_core::config::Config::default()`. The CLI `--port` flag below is
     // the one user-visible knob still in play.
     let db_path = paths::db_path()?;
+    let observability_db_path = paths::observability_db_path()?;
     let body_dir = paths::bodies_dir()?;
     let mut cfg = Config::default();
     cfg.server.port = port;
+    let observability = match vibe_observability::ObservabilityStore::open(&observability_db_path) {
+        Ok(store) => {
+            if let Err(e) = store.migrate_from_legacy_path(&db_path) {
+                tracing::warn!(
+                    ?e,
+                    "legacy observability migration failed; continuing without historical copy"
+                );
+            }
+            Some(store)
+        }
+        Err(e) => {
+            tracing::warn!(?e, "observability plugin unavailable; gateway will run without persistent observability");
+            None
+        }
+    };
     let db = Db::open(&db_path)?.with_body_store(body_dir);
     match db.migrate_inline_bodies_to_body_refs(10_000) {
         Ok(n) if n > 0 => tracing::info!(
@@ -117,10 +133,19 @@ pub async fn run_server(port: u16) -> Result<()> {
         Ok(_) => {}
         Err(e) => tracing::warn!(?e, "legacy inline body migration failed on gateway up"),
     }
-    if let Err(e) = db.prune_short_logs(&vibe_db::ShortLogRetentionPolicy::default()) {
-        tracing::warn!(?e, "short log retention prune failed on gateway up");
+    let retention = vibe_db::ShortLogRetentionPolicy::default();
+    if let Err(e) = db.prune_short_logs(&retention) {
+        tracing::warn!(
+            ?e,
+            "business DB short log retention prune failed on gateway up"
+        );
     }
-    let state = AppState::init(db, cfg, port)?;
+    if let Some(obs) = observability.as_ref() {
+        if let Err(e) = obs.prune(&retention) {
+            tracing::warn!(?e, "observability retention prune failed on gateway up");
+        }
+    }
+    let state = AppState::init_with_optional_observability(db, cfg, port, observability)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
     write_pid()?;
     vibe_core::server::serve(addr, state).await?;

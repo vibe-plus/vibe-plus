@@ -1023,6 +1023,90 @@ fn frame_has_output_text(frame_json: &str) -> bool {
     }
 }
 
+fn usage_i64(u: &Value, pointers: &[&str]) -> Option<i64> {
+    pointers
+        .iter()
+        .find_map(|p| u.pointer(p).and_then(Value::as_i64))
+}
+
+fn apply_detailed_usage(u: &Value, usage: &mut Usage) {
+    if let Some(n) = usage_i64(
+        u,
+        &[
+            "/output_tokens_details/reasoning_tokens",
+            "/completion_tokens_details/reasoning_tokens",
+            "/reasoning_tokens",
+        ],
+    ) {
+        usage.reasoning_tokens = n;
+    }
+    if let Some(n) = usage_i64(
+        u,
+        &[
+            "/input_tokens_details/cache_creation_5m_tokens",
+            "/cache_creation_5m_tokens",
+        ],
+    ) {
+        usage.cache_creation_5m_tokens = n;
+    }
+    if let Some(n) = usage_i64(
+        u,
+        &[
+            "/input_tokens_details/cache_creation_1h_tokens",
+            "/cache_creation_1h_tokens",
+        ],
+    ) {
+        usage.cache_creation_1h_tokens = n;
+    }
+    if let Some(n) = usage_i64(
+        u,
+        &[
+            "/input_tokens_details/audio_tokens",
+            "/prompt_tokens_details/audio_tokens",
+            "/audio_input_tokens",
+        ],
+    ) {
+        usage.audio_input_tokens = n;
+    }
+    if let Some(n) = usage_i64(
+        u,
+        &[
+            "/output_tokens_details/audio_tokens",
+            "/completion_tokens_details/audio_tokens",
+            "/audio_output_tokens",
+        ],
+    ) {
+        usage.audio_output_tokens = n;
+    }
+    if let Some(n) = usage_i64(
+        u,
+        &[
+            "/output_tokens_details/accepted_prediction_tokens",
+            "/completion_tokens_details/accepted_prediction_tokens",
+            "/accepted_prediction_tokens",
+        ],
+    ) {
+        usage.accepted_prediction_tokens = n;
+    }
+    if let Some(n) = usage_i64(
+        u,
+        &[
+            "/output_tokens_details/rejected_prediction_tokens",
+            "/completion_tokens_details/rejected_prediction_tokens",
+            "/rejected_prediction_tokens",
+        ],
+    ) {
+        usage.rejected_prediction_tokens = n;
+    }
+    if let Some(items) = u
+        .get("cost_items")
+        .or_else(|| u.get("cost_breakdown"))
+        .or_else(|| u.get("cost_items_json"))
+    {
+        usage.cost_items = Some(items.to_string());
+    }
+}
+
 pub fn apply_usage_from_frame(frame_json: &str, usage: &mut Usage) {
     let Ok(v) = serde_json::from_str::<Value>(frame_json) else {
         return;
@@ -1059,6 +1143,7 @@ pub fn apply_usage_from_frame(frame_json: &str, usage: &mut Usage) {
     {
         usage.cache_creation_tokens = n;
     }
+    apply_detailed_usage(u, usage);
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> String {
