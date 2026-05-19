@@ -1,4 +1,5 @@
 import type { Provider } from "../api/client.ts";
+import { providerHasKind } from "./provider-protocols.ts";
 
 export type WorkspaceView = "overview" | "codex" | "claude";
 
@@ -16,6 +17,6 @@ export function workspaceViewFromQuery(value: unknown): WorkspaceView {
 
 export function providerMatchesWorkspaceView(provider: Provider, view: WorkspaceView): boolean {
   if (view === "overview") return true;
-  if (view === "claude") return provider.kind === "anthropic";
-  return provider.kind === "openai-responses" || provider.kind === "openai-chat";
+  if (view === "claude") return providerHasKind(provider, "anthropic");
+  return providerHasKind(provider, "openai-responses");
 }

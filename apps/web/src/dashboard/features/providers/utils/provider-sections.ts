@@ -9,6 +9,7 @@ import {
   type ClientToolInfo,
 } from "../../../utils/client-tools.ts";
 import { displayProviderName } from "../../../utils/providers-display.ts";
+import { providerHasKind } from "../../../utils/provider-protocols.ts";
 import type {
   ProviderCardProtocolBadge,
   ProviderCardView,
@@ -71,7 +72,7 @@ export function buildProviderSections(input: BuildProviderSectionsInput): Provid
     .map((provider) => rankProviderCard(provider, input))
     .filter((card) => {
       if (!input.selectedTool) return true;
-      return input.selectedTool.consumesKinds.includes(card.provider.kind);
+      return input.selectedTool.consumesKinds.some((kind) => providerHasKind(card.provider, kind));
     })
     .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
@@ -194,7 +195,9 @@ function providerSectionDescription(
 }
 
 function providerCardBadges(provider: Provider): ProviderCardProtocolBadge[] {
-  return CLIENT_TOOLS.filter((tool) => tool.consumesKinds.includes(provider.kind)).map((tool) => ({
+  return CLIENT_TOOLS.filter((tool) =>
+    tool.consumesKinds.some((kind) => providerHasKind(provider, kind)),
+  ).map((tool) => ({
     toolId: tool.id,
     toolLabel: tool.shortLabel,
     toolIcon: tool.icon,

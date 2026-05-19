@@ -1,5 +1,6 @@
 import type { Provider, ProviderKind } from "../api/client.ts";
 import { PORT } from "../api/client.ts";
+import { providerHasKind } from "./provider-protocols.ts";
 
 /** Tool dimension used when local CLI / IDE plugins connect to the vibe gateway; distinct from provider kind. */
 export type ClientToolId = "codex" | "claude-code" | "opencode";
@@ -36,7 +37,7 @@ export const CLIENT_TOOLS: readonly ClientToolInfo[] = [
     shortLabel: "Codex",
     icon: "i-[lucide--terminal]",
     pathPrefix: "/codex/v1",
-    consumesKinds: ["openai-responses", "openai-chat"],
+    consumesKinds: ["openai-responses"],
     /** Preferred path: OAuth uses the gateway credential pool; CLI only connects locally. */
     setupHint: "/codex/v1",
   },
@@ -72,14 +73,14 @@ export function getCodexClientTool(): ClientToolInfo {
 
 /** Upstream kinds routable through gateway path prefixes usable by Codex CLI, such as `/codex/v1`. */
 export function providerServesCodexCliRoute(p: Provider): boolean {
-  return getCodexClientTool().consumesKinds.includes(p.kind);
+  return providerHasKind(p, "openai-responses");
 }
 
 export function getToolProtocolSupport(
   provider: Pick<Provider, "kind">,
   tool: ClientToolInfo,
 ): ProtocolSupportInfo {
-  if (!tool.consumesKinds.includes(provider.kind)) {
+  if (!tool.consumesKinds.some((kind) => providerHasKind(provider, kind))) {
     return {
       mode: "unsupported",
       label: "none",
@@ -89,7 +90,7 @@ export function getToolProtocolSupport(
   }
 
   if (tool.id === "codex") {
-    if (provider.kind === "openai-responses") {
+    if (providerHasKind(provider, "openai-responses")) {
       return {
         mode: "native",
         label: "native",
@@ -97,7 +98,10 @@ export function getToolProtocolSupport(
         order: 0,
       };
     }
-    if (provider.kind === "openai-chat") {
+    if (
+      providerHasKind(provider, "openai-chat") &&
+      !providerHasKind(provider, "openai-responses")
+    ) {
       return {
         mode: "bridged",
         label: "bridge",
@@ -108,7 +112,7 @@ export function getToolProtocolSupport(
   }
 
   if (tool.id === "opencode") {
-    if (provider.kind === "openai-chat") {
+    if (providerHasKind(provider, "openai-chat")) {
       return {
         mode: "native",
         label: "native",
@@ -116,7 +120,7 @@ export function getToolProtocolSupport(
         order: 0,
       };
     }
-    if (provider.kind === "openai-responses") {
+    if (providerHasKind(provider, "openai-responses")) {
       return {
         mode: "native",
         label: "native",
@@ -126,7 +130,7 @@ export function getToolProtocolSupport(
     }
   }
 
-  if (tool.id === "claude-code" && provider.kind === "anthropic") {
+  if (tool.id === "claude-code" && providerHasKind(provider, "anthropic")) {
     return {
       mode: "native",
       label: "native",
@@ -153,8 +157,7 @@ export function toolProxyExample(tool: ClientToolInfo, port: number = PORT): str
 
 /** Providers related to this tool, matched by kind; used to compute toggle state. */
 export function providersForTool(providers: readonly Provider[], tool: ClientToolInfo): Provider[] {
-  const set = new Set(tool.consumesKinds);
-  return providers.filter((p) => set.has(p.kind));
+  return providers.filter((p) => tool.consumesKinds.some((kind) => providerHasKind(p, kind)));
 }
 
 export function toolProviderStats(providers: readonly Provider[], tool: ClientToolInfo) {

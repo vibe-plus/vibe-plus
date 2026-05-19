@@ -531,6 +531,21 @@ function startEdit(p: Provider) {
   showForm.value = true;
 }
 
+async function saveCredentialOnly(providerId: string, credentialAuthRef: string) {
+  try {
+    await api.credentials.create(providerId, {
+      ...emptyCredForm(),
+      label: t("credentials.defaultApiKeyLabel"),
+      auth_ref: normalizeAuthRef(credentialAuthRef.trim()),
+      notes: t("credentials.createdFromWizard"),
+    });
+    showForm.value = false;
+    await load();
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
 async function save(payload: ProviderInput, credentialAuthRef: string | null = null) {
   const providerPayload: ProviderInput = { ...payload, auth_ref: null };
   try {
@@ -869,6 +884,7 @@ watch(
     <ProviderSmartModal
       :open="showForm"
       :edit-target="editTarget"
+      :existing-providers="providers"
       :creds="editTarget ? (credsByProvider[editTarget.id] ?? []) : []"
       :loading-creds="!!(editTarget && loadingCreds[editTarget.id])"
       :cred-toggle-busy="credToggleBusy"
@@ -876,6 +892,7 @@ watch(
       :speed-label="editProviderSpeedLabel"
       @close="showForm = false"
       @save="(form, credKey) => save(form, credKey)"
+      @save-credential-only="saveCredentialOnly"
       @refresh-models="editTarget && refreshProviderModels(editTarget.id)"
       @add-credential="editTarget && startAddCred(editTarget.id)"
       @reload-creds="editTarget && reloadProviderCreds(editTarget.id)"

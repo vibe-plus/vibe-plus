@@ -590,6 +590,12 @@ export interface LocalCandidate {
   source_path: string;
   default_aliases: ModelAlias[];
   extra_credentials: ExtraCredential[];
+  protocols?: ProviderProtocol[];
+}
+
+export interface CodexGatewaySettings {
+  summary: CodexSummaryConfig;
+  route_status_enabled: boolean;
 }
 
 export interface CcsProfileExportBundle {
@@ -824,5 +830,13 @@ export const api = {
     open: () => req<CodexAppActionResult>("/_vp/codex-app/open", { method: "POST" }),
     quit: () => req<CodexAppActionResult>("/_vp/codex-app/quit", { method: "POST" }),
     restart: () => req<CodexAppActionResult>("/_vp/codex-app/restart", { method: "POST" }),
+  },
+  config: {
+    getCodex: () => req<CodexGatewaySettings>("/_vp/config/codex"),
+    saveCodex: (input: CodexGatewaySettings) =>
+      req<CodexGatewaySettings>("/_vp/config/codex", {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
   },
 };

@@ -5,18 +5,21 @@ import type {
   Provider,
   ProviderInput,
   ProviderKind,
+  ProviderProtocol,
   Credential,
   ModelAlias,
 } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderLogo from "../../../components/provider-logo.vue";
 import { credentialPrimaryAccountLabel } from "../../../utils/providers-display.ts";
+import { normalizeBaseUrl, providerHasKind } from "../../../utils/provider-protocols.ts";
 
 const { t } = useI18n();
 
 const props = defineProps<{
   open: boolean;
   editTarget: Provider | null;
+  existingProviders: Provider[];
   creds: Credential[];
   loadingCreds: boolean;
   credToggleBusy: Record<string, boolean>;
@@ -26,10 +29,13 @@ const props = defineProps<{
 
 /** API keys are never stored on the provider — only as credentials. */
 const pendingCredentialAuthRef = ref<string | null>(null);
+/** When set, Save only adds a credential to this provider (paste-key flow). */
+const credentialTargetId = ref<string | null>(null);
 
 const emit = defineEmits<{
   close: [];
   save: [form: ProviderInput, credentialAuthRef: string | null];
+  saveCredentialOnly: [providerId: string, credentialAuthRef: string];
   addCredential: [];
   reloadCreds: [];
   editCredential: [cred: Credential];
@@ -126,8 +132,10 @@ function emptyForm(): ProviderInput {
     name: "",
     group_name: null,
     avatar_url: null,
-    kind: "openai-chat",
+    kind: "openai-responses",
     base_url: "",
+    protocols: [],
+    host: null,
     auth_ref: null,
     enabled: true,
     priority: 100,
@@ -144,6 +152,8 @@ function providerToForm(p: Provider): ProviderInput {
     avatar_url: p.avatar_url ?? null,
     kind: p.kind,
     base_url: p.base_url,
+    protocols: [...(p.protocols ?? [])],
+    host: p.host ?? null,
     auth_ref: null,
     enabled: p.enabled,
     priority: p.priority,
@@ -161,6 +171,7 @@ watch(
     parseNote.value = "";
     parseError.value = "";
     pendingCredentialAuthRef.value = null;
+    credentialTargetId.value = null;
     showAdvanced.value = false;
     showAliases.value = false;
     showCreds.value = false;
@@ -179,8 +190,15 @@ watch(
 const URL_RE = /https?:\/\/[^\s"'<>，,；;\])}]+/i;
 const API_KEY_RE =
   /(?:sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{30,}|AIza[A-Za-z0-9_-]{25,}|gsk_[A-Za-z0-9_-]{20,})/;
+const CODEX_CONFIG_BASE_URL_RE = /base_url\s*=\s*["']([^"']+)["']/i;
+const CODEX_CONFIG_WIRE_API_RE = /wire_api\s*=\s*["']([^"']+)["']/i;
 
-const WELL_KNOWN: Array<{ urlPart: string; kind: ProviderKind; name: string; base_url: string }> = [
+const WELL_KNOWN: Array<{
+  urlPart: string;
+  kind: ProviderKind;
+  name: string;
+  base_url: string;
+}> = [
   {
     urlPart: "api.anthropic.com",
     kind: "anthropic",
@@ -237,25 +255,38 @@ const WELL_KNOWN: Array<{ urlPart: string; kind: ProviderKind; name: string; bas
   },
 ];
 
-const KEY_PREFIXES: Array<{ prefix: string; kind: ProviderKind; name: string; base_url: string }> =
-  [
-    {
-      prefix: "sk-ant-",
-      kind: "anthropic",
-      name: "Anthropic",
-      base_url: "https://api.anthropic.com",
-    },
-    {
-      prefix: "AIza",
-      kind: "gemini-native",
-      name: "Google Gemini",
-      base_url: "https://generativelanguage.googleapis.com/v1beta",
-    },
-    { prefix: "gsk_", kind: "openai-chat", name: "Groq", base_url: "https://api.groq.com/openai" },
-  ];
+const KEY_PREFIXES: Array<{
+  prefix: string;
+  kind: ProviderKind;
+  name: string;
+  base_url: string;
+}> = [
+  {
+    prefix: "sk-ant-",
+    kind: "anthropic",
+    name: "Anthropic",
+    base_url: "https://api.anthropic.com",
+  },
+  {
+    prefix: "AIza",
+    kind: "gemini-native",
+    name: "Google Gemini",
+    base_url: "https://generativelanguage.googleapis.com/v1beta",
+  },
+  {
+    prefix: "gsk_",
+    kind: "openai-chat",
+    name: "Groq",
+    base_url: "https://api.groq.com/openai",
+  },
+];
 
 const ENV_KEY_MAP: Record<string, { kind: ProviderKind; name: string; base_url: string }> = {
-  OPENAI_API_KEY: { kind: "openai-responses", name: "OpenAI", base_url: "https://api.openai.com" },
+  OPENAI_API_KEY: {
+    kind: "openai-responses",
+    name: "OpenAI",
+    base_url: "https://api.openai.com",
+  },
   ANTHROPIC_API_KEY: {
     kind: "anthropic",
     name: "Anthropic",
@@ -266,7 +297,11 @@ const ENV_KEY_MAP: Record<string, { kind: ProviderKind; name: string; base_url: 
     name: "Google Gemini",
     base_url: "https://generativelanguage.googleapis.com/v1beta",
   },
-  DEEPSEEK_API_KEY: { kind: "openai-chat", name: "DeepSeek", base_url: "https://api.deepseek.com" },
+  DEEPSEEK_API_KEY: {
+    kind: "openai-chat",
+    name: "DeepSeek",
+    base_url: "https://api.deepseek.com",
+  },
   DASHSCOPE_API_KEY: {
     kind: "openai-chat",
     name: "Qwen",
@@ -284,17 +319,108 @@ const ENV_KEY_MAP: Record<string, { kind: ProviderKind; name: string; base_url: 
   },
 };
 
-function detectFromUrl(url: string): { kind: ProviderKind; name: string; base_url: string } {
+function detectFromUrl(url: string): {
+  kind: ProviderKind;
+  name: string;
+  base_url: string;
+} {
   const lower = url.toLowerCase();
   for (const p of WELL_KNOWN) {
     if (lower.includes(p.urlPart)) return { kind: p.kind, name: p.name, base_url: p.base_url };
   }
   try {
     const host = new URL(url.includes("://") ? url : `https://${url}`).hostname;
-    return { kind: "openai-chat", name: host, base_url: url };
+    return { kind: "openai-responses", name: host, base_url: url };
   } catch {
-    return { kind: "openai-chat", name: "Custom", base_url: url };
+    return { kind: "openai-responses", name: "Custom", base_url: url };
   }
+}
+
+function dedupeProtocols(protocols: ProviderProtocol[]): ProviderProtocol[] {
+  const out: ProviderProtocol[] = [];
+  const seen = new Set<string>();
+  for (const proto of protocols) {
+    const baseUrl = proto.base_url.trim();
+    if (!baseUrl) continue;
+    const key = `${proto.kind}::${baseUrl.replace(/\/+$/, "").toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      ...proto,
+      base_url: baseUrl,
+      model_aliases: [...(proto.model_aliases ?? [])],
+    });
+  }
+  return out;
+}
+
+function multiProtocolForBase(
+  baseUrl: string,
+  primaryKind: ProviderKind = "openai-responses",
+  aliases: ModelAlias[] = [],
+): ProviderProtocol[] {
+  if (primaryKind === "openai-responses" || primaryKind === "openai-chat") {
+    return dedupeProtocols([
+      {
+        kind: "openai-responses",
+        base_url: baseUrl,
+        model_aliases: [...aliases],
+      },
+      { kind: "openai-chat", base_url: baseUrl, model_aliases: [...aliases] },
+    ]);
+  }
+  return [{ kind: primaryKind, base_url: baseUrl, model_aliases: [...aliases] }];
+}
+
+function applyProviderDetection(
+  next: ProviderInput,
+  det: { kind: ProviderKind; name: string; base_url: string },
+) {
+  next.name = next.name || det.name;
+  next.kind = det.kind;
+  next.base_url = det.base_url;
+  next.protocols = multiProtocolForBase(det.base_url, det.kind, next.model_aliases);
+  if (next.protocols[0]) next.kind = next.protocols[0].kind;
+}
+
+function findProvidersForDetection(det: { kind: ProviderKind; base_url: string }): Provider[] {
+  const base = normalizeBaseUrl(det.base_url);
+  return props.existingProviders.filter(
+    (p) => providerHasKind(p, det.kind) && normalizeBaseUrl(p.base_url) === base,
+  );
+}
+
+function tryAttachCredentialToExisting(
+  key: string,
+  det: { kind: ProviderKind; name: string; base_url: string },
+): boolean {
+  if (props.editTarget) {
+    stashCredentialKey(key);
+    form.value = providerToForm(props.editTarget);
+    parseNote.value = t("parseNotes.addKeyToEditing");
+    phase.value = "review";
+    return true;
+  }
+  const matches = findProvidersForDetection(det);
+  if (matches.length === 1) {
+    stashCredentialKey(key);
+    credentialTargetId.value = matches[0].id;
+    form.value = providerToForm(matches[0]);
+    parseNote.value = t("parseNotes.addKeyToExisting", { name: matches[0].name });
+    phase.value = "review";
+    return true;
+  }
+  return false;
+}
+
+function parseCodexConfig(raw: string): { base_url: string; kind: ProviderKind } | null {
+  const baseUrl = raw.match(CODEX_CONFIG_BASE_URL_RE)?.[1]?.trim();
+  if (!baseUrl) return null;
+  const wire = raw.match(CODEX_CONFIG_WIRE_API_RE)?.[1]?.trim().toLowerCase();
+  return {
+    base_url: baseUrl,
+    kind: wire === "chat" || wire === "chat_completions" ? "openai-chat" : "openai-responses",
+  };
 }
 
 function stashCredentialKey(raw: string) {
@@ -306,7 +432,11 @@ function detectFromKey(key: string): { kind: ProviderKind; name: string; base_ur
     if (key.startsWith(m.prefix)) return { kind: m.kind, name: m.name, base_url: m.base_url };
   }
   if (key.startsWith("sk-"))
-    return { kind: "openai-responses", name: "OpenAI", base_url: "https://api.openai.com" };
+    return {
+      kind: "openai-responses",
+      name: "OpenAI",
+      base_url: "https://api.openai.com",
+    };
   return null;
 }
 
@@ -320,6 +450,24 @@ function tryParse(raw: string): boolean {
   if (trimmed.startsWith("{")) {
     try {
       const obj = JSON.parse(trimmed) as Record<string, unknown>;
+
+      // Codex auth.json (or any pure key object) should import as a credential on
+      // the matching provider preset, not as a custom provider profile.
+      for (const [envKey, preset] of Object.entries(ENV_KEY_MAP)) {
+        const val = obj[envKey];
+        if (typeof val === "string" && val.trim()) {
+          if (tryAttachCredentialToExisting(val.trim(), preset)) return true;
+          const next = emptyForm();
+          applyProviderDetection(next, preset);
+          stashCredentialKey(val.trim());
+          form.value = next;
+          parseNote.value = t("parseNotes.detectedFromEnv", {
+            name: preset.name,
+            envKey,
+          });
+          return true;
+        }
+      }
 
       // ProviderInput-shaped JSON
       if (
@@ -345,6 +493,26 @@ function tryParse(raw: string): boolean {
         if (typeof obj.priority === "number") next.priority = Math.round(obj.priority);
         if (typeof obj.enabled === "boolean") next.enabled = obj.enabled;
         if (typeof obj.passthrough_mode === "boolean") next.passthrough_mode = obj.passthrough_mode;
+        if (Array.isArray(obj.protocols)) {
+          const protocols: ProviderProtocol[] = [];
+          for (const row of obj.protocols) {
+            if (row && typeof row === "object") {
+              const r = row as Record<string, unknown>;
+              if (
+                typeof r.kind === "string" &&
+                PROVIDER_KINDS.includes(r.kind as ProviderKind) &&
+                typeof r.base_url === "string"
+              ) {
+                protocols.push({
+                  kind: r.kind as ProviderKind,
+                  base_url: r.base_url.trim(),
+                  model_aliases: [],
+                });
+              }
+            }
+          }
+          next.protocols = dedupeProtocols(protocols);
+        }
         if (Array.isArray(obj.model_aliases)) {
           const aliases: ModelAlias[] = [];
           for (const row of obj.model_aliases) {
@@ -359,26 +527,14 @@ function tryParse(raw: string): boolean {
           }
           if (aliases.length) next.model_aliases = aliases;
         }
+        if (!next.protocols?.length && next.base_url) {
+          next.protocols = multiProtocolForBase(next.base_url, next.kind, next.model_aliases);
+        }
         form.value = next;
         parseNote.value = pendingCredentialAuthRef.value
           ? t("parseNotes.providerProfileWithKey")
           : t("parseNotes.providerProfile");
         return true;
-      }
-
-      // Env-key JSON (e.g. { OPENAI_API_KEY: "sk-..." })
-      for (const [envKey, preset] of Object.entries(ENV_KEY_MAP)) {
-        const val = obj[envKey];
-        if (typeof val === "string" && val.trim()) {
-          const next = emptyForm();
-          next.name = preset.name;
-          next.kind = preset.kind;
-          next.base_url = preset.base_url;
-          stashCredentialKey(val.trim());
-          form.value = next;
-          parseNote.value = t("parseNotes.detectedFromEnv", { name: preset.name, envKey });
-          return true;
-        }
       }
     } catch {
       // not valid JSON — continue to other patterns
@@ -392,15 +548,35 @@ function tryParse(raw: string): boolean {
     const envVal = envLineMatch[2].trim().replace(/^["']|["']$/g, "");
     const preset = ENV_KEY_MAP[envKey];
     if (preset && envVal) {
+      if (tryAttachCredentialToExisting(envVal, preset)) return true;
       const next = emptyForm();
-      next.name = preset.name;
-      next.kind = preset.kind;
-      next.base_url = preset.base_url;
+      applyProviderDetection(next, preset);
       stashCredentialKey(envVal);
       form.value = next;
-      parseNote.value = t("parseNotes.detectedFromEnv", { name: preset.name, envKey });
+      parseNote.value = t("parseNotes.detectedFromEnv", {
+        name: preset.name,
+        envKey,
+      });
       return true;
     }
+  }
+
+  const codexConfig = parseCodexConfig(trimmed);
+  if (codexConfig) {
+    const det = detectFromUrl(codexConfig.base_url);
+    const next = emptyForm();
+    applyProviderDetection(next, {
+      ...det,
+      kind: codexConfig.kind,
+      base_url: codexConfig.base_url,
+    });
+    const keyMatch = trimmed.match(API_KEY_RE);
+    if (keyMatch) stashCredentialKey(keyMatch[0]);
+    form.value = next;
+    parseNote.value = keyMatch
+      ? t("parseNotes.detectedFromUrlKey", { name: next.name })
+      : t("parseNotes.detectedFromUrl", { name: next.name });
+    return true;
   }
 
   // URL + optional API key
@@ -410,9 +586,7 @@ function tryParse(raw: string): boolean {
     const url = urlMatch[0].replace(/[),.;，。；、\])}]+$/, "");
     const det = detectFromUrl(url);
     const next = emptyForm();
-    next.name = det.name;
-    next.kind = det.kind;
-    next.base_url = det.base_url;
+    applyProviderDetection(next, det);
     if (keyMatch) {
       stashCredentialKey(keyMatch[0]);
       parseNote.value = t("parseNotes.detectedFromUrlKey", { name: det.name });
@@ -423,15 +597,14 @@ function tryParse(raw: string): boolean {
     return true;
   }
 
-  // Bare API key
-  if (keyMatch) {
+  // Bare API key (no URL / config) — prefer adding to an existing provider
+  if (keyMatch && !urlMatch && !codexConfig && !trimmed.startsWith("{")) {
     const key = keyMatch[0];
     const det = detectFromKey(key);
     if (det) {
+      if (tryAttachCredentialToExisting(key, det)) return true;
       const next = emptyForm();
-      next.name = det.name;
-      next.kind = det.kind;
-      next.base_url = det.base_url;
+      applyProviderDetection(next, det);
       stashCredentialKey(key);
       form.value = next;
       parseNote.value = t("parseNotes.detectedFromApiKey", { name: det.name });
@@ -477,6 +650,8 @@ function applyPreset(p: Preset) {
     group_name: p.group_name,
     kind: p.kind,
     base_url: p.base_url,
+    protocols: multiProtocolForBase(p.base_url, p.kind),
+    host: null,
     auth_ref: null,
     avatar_url: null,
     enabled: true,
@@ -549,18 +724,36 @@ function normalizeAuthRef(raw: string | null | undefined): string | null {
 }
 
 function handleSave() {
+  const authRef = normalizeAuthRef(pendingCredentialAuthRef.value);
+  if (credentialTargetId.value && authRef) {
+    emit("saveCredentialOnly", credentialTargetId.value, authRef);
+    return;
+  }
   const payload: ProviderInput = {
     ...form.value,
     name: form.value.name.trim(),
     group_name: form.value.group_name?.trim() || null,
     avatar_url: form.value.avatar_url?.trim() || null,
     base_url: form.value.base_url.trim(),
+    protocols: dedupeProtocols(
+      form.value.protocols?.length
+        ? form.value.protocols
+        : multiProtocolForBase(
+            form.value.base_url.trim(),
+            form.value.kind,
+            form.value.model_aliases,
+          ),
+    ),
+    host: form.value.host?.trim() || null,
     auth_ref: null,
     model_aliases: form.value.model_aliases
-      .map((a) => ({ alias: a.alias.trim(), upstream_model: a.upstream_model.trim() }))
+      .map((a) => ({
+        alias: a.alias.trim(),
+        upstream_model: a.upstream_model.trim(),
+      }))
       .filter((a) => a.alias && a.upstream_model),
   };
-  emit("save", payload, pendingCredentialAuthRef.value);
+  emit("save", payload, authRef);
 }
 </script>
 
@@ -624,7 +817,9 @@ function handleSave() {
             @paste="onTextareaPaste"
           />
 
-          <p v-if="parseError" class="mt-2 text-xs text-red-600">{{ parseError }}</p>
+          <p v-if="parseError" class="mt-2 text-xs text-red-600">
+            {{ parseError }}
+          </p>
 
           <div class="mt-3 flex flex-wrap gap-2">
             <button
@@ -681,14 +876,16 @@ function handleSave() {
             v-if="hasLegacyProviderKey"
             class="rounded-xl border border-amber-200 bg-amber-50/80 px-3 py-2.5 text-xs text-amber-950"
           >
-            {{ t("hints.legacyKeyBefore") }} <strong>{{ t("sections.credentials") }}</strong>
+            {{ t("hints.legacyKeyBefore") }}
+            <strong>{{ t("sections.credentials") }}</strong>
             {{ t("hints.legacyKeyAfter") }}
           </p>
           <p
             v-else-if="pendingCredentialAuthRef"
             class="rounded-xl border border-emerald-200 bg-emerald-50/80 px-3 py-2.5 text-xs text-emerald-950"
           >
-            {{ t("hints.detectedKeyBefore") }} <strong>{{ t("hints.credential") }}</strong>
+            {{ t("hints.detectedKeyBefore") }}
+            <strong>{{ t("hints.credential") }}</strong>
             {{ t("hints.detectedKeyAfter") }}
           </p>
 
@@ -944,7 +1141,8 @@ function handleSave() {
             v-if="!editTarget && !pendingCredentialAuthRef"
             class="rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2.5 text-xs text-amber-900"
           >
-            {{ t("hints.keysUnderBefore") }} <strong>{{ t("sections.credentials") }}</strong>
+            {{ t("hints.keysUnderBefore") }}
+            <strong>{{ t("sections.credentials") }}</strong>
             {{ t("hints.keysUnderAfter") }}
           </p>
         </div>
@@ -1039,6 +1237,8 @@ function handleSave() {
       "unrecognized": "Could not parse input. Paste JSON, base URL, env line, or URL + API key."
     },
     "parseNotes": {
+      "addKeyToEditing": "API key will be added as a credential to the provider you are editing.",
+      "addKeyToExisting": "API key will be added as a credential to “{name}” (existing provider).",
       "appliedPreset": "Applied “{label}” preset.",
       "detectedFromApiKey": "Detected {name} from API key; key will be saved as a credential.",
       "detectedFromEnv": "Detected {name} from {envKey}; key will be saved as a credential.",
@@ -1054,7 +1254,11 @@ function handleSave() {
       "credentials": "Credentials"
     },
     "states": { "loading": "Loading…", "noCredentials": "No credentials yet." },
-    "title": { "add": "Add provider", "edit": "Edit provider", "review": "Review configuration" }
+    "title": {
+      "add": "Add provider",
+      "edit": "Edit provider",
+      "review": "Review configuration"
+    }
   },
   "zh-CN": {
     "actions": {
@@ -1109,6 +1313,8 @@ function handleSave() {
       "unrecognized": "无法解析输入。请粘贴 JSON、Base URL、env 行，或 URL + API Key。"
     },
     "parseNotes": {
+      "addKeyToEditing": "将把 API Key 作为凭证添加到当前正在编辑的供应商。",
+      "addKeyToExisting": "将把 API Key 作为凭证添加到已有供应商「{name}」。",
       "appliedPreset": "已应用「{label}」预设。",
       "detectedFromApiKey": "从 API Key 识别到 {name}；Key 会保存为凭证。",
       "detectedFromEnv": "从 {envKey} 识别到 {name}；Key 会保存为凭证。",

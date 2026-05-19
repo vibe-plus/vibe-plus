@@ -7,6 +7,11 @@ import ProviderLogo from "../../../components/provider-logo.vue";
 
 const { t } = useI18n();
 import type { WorkspaceView } from "../../../utils/workspace-view.ts";
+import {
+  candidateProtocolKinds,
+  protocolKeysForCandidate,
+  protocolKeysForProvider,
+} from "../../../utils/provider-protocols.ts";
 
 const props = defineProps<{
   open: boolean;
@@ -57,32 +62,36 @@ async function scan() {
   }
 }
 
-function normalizeUrl(u: string) {
-  return u.trim().replace(/\/+$/, "").toLowerCase();
-}
-
 const existingKeys = computed(() => {
   const s = new Set<string>();
   for (const p of existingProviders.value) {
-    s.add(`${p.kind}|${normalizeUrl(p.base_url)}`);
+    for (const key of protocolKeysForProvider(p)) s.add(key);
   }
   return s;
 });
 
 function isAlreadyImported(c: LocalCandidate): boolean {
-  return existingKeys.value.has(`${c.kind}|${normalizeUrl(c.base_url)}`);
+  const keys = protocolKeysForCandidate(c);
+  return keys.some((key) => existingKeys.value.has(key));
+}
+
+function candidateKinds(c: LocalCandidate): string[] {
+  return candidateProtocolKinds(c);
 }
 
 /** Candidates filtered by workspaceView and the active protocol chip. */
 const visibleCandidates = computed(() => {
   let list = candidates.value;
   if (props.view === "claude") {
-    list = list.filter((c) => c.kind === "anthropic");
+    list = list.filter((c) => candidateKinds(c).includes("anthropic"));
   } else if (props.view === "codex") {
-    list = list.filter((c) => c.kind === "openai-responses");
+    list = list.filter((c) => candidateKinds(c).includes("openai-responses"));
   } else {
-    if (protocolFilter.value === "M") list = list.filter((c) => c.kind === "anthropic");
-    else if (protocolFilter.value === "R") list = list.filter((c) => c.kind === "openai-responses");
+    if (protocolFilter.value === "M") {
+      list = list.filter((c) => candidateKinds(c).includes("anthropic"));
+    } else if (protocolFilter.value === "R") {
+      list = list.filter((c) => candidateKinds(c).includes("openai-responses"));
+    }
   }
   return list;
 });
@@ -90,12 +99,14 @@ const visibleCandidates = computed(() => {
 /** In overview mode, show protocol filter chips only if both kinds are present. */
 const showFilterChips = computed(() => {
   if (props.view && props.view !== "overview") return false;
-  const hasM = candidates.value.some((c) => c.kind === "anthropic");
-  const hasR = candidates.value.some((c) => c.kind === "openai-responses");
+  const hasM = candidates.value.some((c) => candidateKinds(c).includes("anthropic"));
+  const hasR = candidates.value.some((c) => candidateKinds(c).includes("openai-responses"));
   return hasM && hasR;
 });
 
 async function importOne(client: string) {
+  const row = candidates.value.find((c) => c.client === client);
+  if (row && isAlreadyImported(row)) return;
   importingSet.value = new Set([...importingSet.value, client]);
   importError.value = "";
   try {
@@ -266,12 +277,14 @@ const pendingCount = computed(
                     <span class="font-semibold text-slate-900">{{ c.name }}</span>
                     <!-- Protocol badge: shows single letter, expands to full word on hover -->
                     <span
+                      v-for="kind in candidateKinds(c)"
+                      :key="`${c.client}-${kind}`"
                       class="group/kb inline-flex items-baseline overflow-hidden rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-mono text-slate-600"
                     >
-                      {{ KIND_BADGE[c.kind]?.letter ?? c.kind }}
+                      {{ KIND_BADGE[kind]?.letter ?? kind }}
                       <span
                         class="max-w-0 overflow-hidden whitespace-nowrap transition-[max-width] duration-200 ease-out group-hover/kb:max-w-[5rem]"
-                        >{{ KIND_BADGE[c.kind]?.rest ?? "" }}</span
+                        >{{ KIND_BADGE[kind]?.rest ?? "" }}</span
                       >
                     </span>
                     <!-- Auth status badge -->

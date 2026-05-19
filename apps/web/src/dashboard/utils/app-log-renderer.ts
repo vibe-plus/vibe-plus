@@ -1,9 +1,12 @@
 import type { ComposerTranslation } from "vue-i18n";
 import type { AppLogEvent, JsonValue } from "../api/client.ts";
+import {
+  entityToken as buildEntityToken,
+  type EntityKind,
+  type EntityToken,
+} from "../lib/entity-links.ts";
 
-export type AppLogToken =
-  | { type: "text"; text: string }
-  | { type: "link"; text: string; to: string };
+export type AppLogToken = EntityToken;
 
 export interface RenderedAppLog {
   title: AppLogToken[];
@@ -26,22 +29,14 @@ function numberValue(value: JsonValue | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function entityLink(kind: string, id: string): string | null {
-  if (!id) return null;
-  if (kind === "provider") return `/ui/providers?provider=${encodeURIComponent(id)}`;
-  if (kind === "credential") return `/ui/providers?credential=${encodeURIComponent(id)}`;
-  return null;
-}
-
 function entityToken(
-  kind: string,
+  kind: EntityKind,
   entity: PayloadObject | null,
   fallbackId?: string | null,
 ): AppLogToken {
   const id = stringValue(entity?.id) ?? fallbackId ?? "";
-  const text = stringValue(entity?.label) ?? stringValue(entity?.name) ?? id;
-  const to = entityLink(kind, id);
-  return to ? { type: "link", text, to } : { type: "text", text };
+  const label = stringValue(entity?.label) ?? stringValue(entity?.name) ?? undefined;
+  return buildEntityToken({ kind, id, label }, id);
 }
 
 function sentence(parts: Array<AppLogToken | string>): AppLogToken[] {
@@ -160,8 +155,13 @@ function renderCredentialEvent(event: AppLogEvent, t: ComposerTranslation): Rend
   const payload = objectValue(event.payload);
   const credential = objectValue(payload?.credential);
   const provider = objectValue(payload?.provider);
-  const credentialToken = entityToken("credential", credential);
-  const providerToken = provider ? entityToken("provider", provider) : null;
+  const credentialId = stringValue(credential?.id);
+  const providerId =
+    stringValue(provider?.id) ??
+    stringValue(credential?.provider_id) ??
+    stringValue(payload?.provider_id);
+  const credentialToken = entityToken("credential", credential, credentialId);
+  const providerToken = providerId ? entityToken("provider", provider, providerId) : null;
   const actionKey = {
     "credential.created": "events.credentialCreated",
     "credential.updated": "events.credentialUpdated",

@@ -164,6 +164,20 @@ const realtimeNetworkBytesPerSec = computed(
     (realtime.value?.active_downstream_bytes_per_sec ?? 0),
 );
 const realtimeUsdPerHour = computed(() => realtime.value?.active_cost_usd_per_hour ?? null);
+const windowUsdPerHour = computed(() => {
+  const estimatedCostUsd = Number.parseFloat(stats.value?.estimated_cost_usd_in_window ?? "");
+  const hours = Number(stats.value?.window_hours ?? 0);
+  if (
+    !Number.isFinite(estimatedCostUsd) ||
+    estimatedCostUsd <= 0 ||
+    !Number.isFinite(hours) ||
+    hours <= 0
+  ) {
+    return null;
+  }
+  return estimatedCostUsd / hours;
+});
+const visibleUsdPerHour = computed(() => realtimeUsdPerHour.value ?? windowUsdPerHour.value);
 const dashboardWindowTps = computed(() => {
   const decodeSpeed = stats.value?.decode_output_tokens_per_sec_in_window ?? 0;
   const outputSpeed = stats.value?.output_tokens_per_sec_in_window ?? 0;
@@ -732,7 +746,7 @@ function rateOr(n: unknown, fallback = 1): number {
             <div class="bg-vp-surface p-3">
               <div class="stat-label">{{ t("realtime.burnRate") }}</div>
               <div class="mt-1 truncate font-mono text-2xl font-semibold text-vp-text sm:text-3xl">
-                {{ formatUsdPerHour(realtimeUsdPerHour) }}
+                {{ formatUsdPerHour(visibleUsdPerHour) }}
               </div>
               <div class="mt-1 text-xs text-vp-muted">{{ t("realtime.burnRateHint") }}</div>
             </div>
@@ -956,7 +970,7 @@ function rateOr(n: unknown, fallback = 1): number {
         "title": "No ready credentials"
       },
       "offline": {
-        "detail": "Start the gateway before running clients.",
+        "detail": "Bring up the gateway before running clients.",
         "title": "Gateway offline"
       },
       "providerIssues": {
@@ -1016,7 +1030,7 @@ function rateOr(n: unknown, fallback = 1): number {
       "burnRateHint": "estimated USD per hour",
       "network": "Network",
       "networkHint": "up + down",
-      "noActive": "No active requests right now. Start a client request to see live routing, speed, and token flow here.",
+      "noActive": "No active requests right now. Send a client request to see live routing, speed, and token flow here.",
       "requestListHint": "Show all active requests below.",
       "requests": "Requests",
       "title": "Live now",

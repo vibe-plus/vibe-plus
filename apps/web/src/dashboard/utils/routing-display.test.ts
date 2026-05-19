@@ -55,11 +55,26 @@ describe("routing/display pure helpers", () => {
 
   test("matches providers to workspace views", () => {
     const codexProvider = { id: "p-codex", kind: "openai-responses" } as any;
+    const chatOnlyProvider = {
+      id: "p-chat",
+      kind: "openai-chat",
+      protocols: [{ kind: "openai-chat", base_url: "https://relay.example/v1" }],
+    } as any;
+    const dualProvider = {
+      id: "p-dual",
+      kind: "openai-responses",
+      protocols: [
+        { kind: "openai-responses", base_url: "https://ai98pro.xyz/v1" },
+        { kind: "openai-chat", base_url: "https://ai98pro.xyz/v1" },
+      ],
+    } as any;
     const claudeProvider = { id: "p-claude", kind: "anthropic" } as any;
 
     expect(workspaceViewFromQuery(["claude"])).toBe("claude");
     expect(workspaceViewFromQuery("bad")).toBe("overview");
     expect(providerMatchesWorkspaceView(codexProvider, "codex")).toBe(true);
+    expect(providerMatchesWorkspaceView(dualProvider, "codex")).toBe(true);
+    expect(providerMatchesWorkspaceView(chatOnlyProvider, "codex")).toBe(false);
     expect(providerMatchesWorkspaceView(claudeProvider, "codex")).toBe(false);
     expect(providerMatchesWorkspaceView(claudeProvider, "claude")).toBe(true);
   });
