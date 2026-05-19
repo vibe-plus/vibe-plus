@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed } from "vue";
 import type {
   Credential,
   CredentialPlanSnapshot,
   CredentialPoolStatus,
   Provider,
   ProviderHealthSummary,
-  Upstream,
 } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderLogo from "../../../components/provider-logo.vue";
@@ -16,7 +15,7 @@ const { t } = useI18n();
 import CredentialRow from "./provider-credential-row.vue";
 import UiBadge from "../../../components/ui/badge.vue";
 import UiButton from "../../../components/ui/button.vue";
-import { credentialPlanTierHint, primaryPlanPercent } from "../../../utils/providers-display.ts";
+import { primaryPlanPercent } from "../../../utils/providers-display.ts";
 import { brandHintFromHost } from "../../../utils/brand-hint.ts";
 
 type ProviderGroupKey = "native" | "bridged" | "other";
@@ -112,30 +111,6 @@ const providerEnabled = computed(() => props.card.provider.enabled);
 const providerUpstreamSummary = computed(() => props.card.provider.upstream_summary);
 const remoteModelCount = computed(() => props.card.provider.remote_models?.length ?? 0);
 const aliasCount = computed(() => props.card.provider.model_aliases?.length ?? 0);
-const nowTs = ref(Math.floor(Date.now() / 1000));
-let clockTimer: ReturnType<typeof setInterval> | null = null;
-
-// Track the initial remaining secs when a credential's circuit first opens,
-// so the cooldown bar can decay from 100% → 0% as time passes.
-const circuitInitialRemaining = ref<Record<string, number>>({});
-watch(
-  () => props.poolRows,
-  (rows) => {
-    const next: Record<string, number> = { ...circuitInitialRemaining.value };
-    for (const row of rows) {
-      if (row.circuit_open && row.circuit_open_remaining_secs != null) {
-        if (!(row.credential_id in next)) {
-          next[row.credential_id] = Math.max(1, Number(row.circuit_open_remaining_secs));
-        }
-      } else {
-        delete next[row.credential_id];
-      }
-    }
-    circuitInitialRemaining.value = next;
-  },
-  { deep: true },
-);
-
 const providerProtocolLabels = computed(() => {
   const protos =
     props.card.provider.protocols && props.card.provider.protocols.length > 0
@@ -307,183 +282,6 @@ const credentialSummary = computed(() => {
     pieces.push(circuitCooldownText(providerPool.value.cooldownMax));
   }
   return pieces.join(" · ");
-});
-
-function credentialLine(credential: Credential): string {
-  const parts = [];
-  const activeCount = activeCredentialCount(credential.id);
-  if (activeCount) parts.push(t("credentialDetail.active", { count: activeCount }));
-  const tier = credentialPlanTierHint(credential);
-  if (tier) parts.push(tier);
-  const plan = planLabel(credential.id);
-  if (plan) parts.push(plan);
-  const secondary = secondaryPlanLabel(credential.id);
-  if (secondary && secondary !== plan) parts.push(secondary);
-  const reset = planResetHint(credential.id);
-  if (reset) parts.push(t("credentialDetail.reset", { duration: reset.replace(/^R /, "") }));
-  if (!credential.enabled) {
-    const disabledPool = poolRowFor(credential.id);
-    const reason = disabledPool?.last_error ?? credential.last_error;
-    parts.push(reason ? t("credentialDetail.disabledWithReason", { reason }) : t("state.disabled"));
-  }
-  const pool = poolRowFor(credential.id);
-  if (pool?.circuit_open)
-    parts.push(
-      t("credentialDetail.open", {
-        detail: circuitCooldownText(pool.circuit_open_remaining_secs),
-      }),
-    );
-  if (pool?.is_rate_limited) parts.push(rateLimitResetLabel(pool));
-  return parts.join(" · ");
-}
-
-function rateLimitResetLabel(pool: CredentialPoolStatus | undefined): string {
-  if (!pool?.is_rate_limited) return "";
-  const resets = [pool.rl_requests_reset_at, pool.rl_tokens_reset_at].filter(
-    (value): value is number => typeof value === "number" && value > 0,
-  );
-  if (!resets.length) return t("credentialDetail.rateLimited");
-  const left = Math.max(0, Math.min(...resets) - nowTs.value);
-  return t("credentialDetail.rateLimitedFor", {
-    duration: formatShortDuration(left),
-  });
-}
-
-function credentialTrafficUnits(credential: Credential): number {
-  const pool = poolRowFor(credential.id);
-  return (pool?.rolling_requests ?? 0) + activeCredentialCount(credential.id) * 25;
-}
-
-const credentialTrafficMax = computed(() =>
-  Math.max(1, ...props.creds.map((credential) => credentialTrafficUnits(credential))),
-);
-
-function credentialTrafficWidth(credential: Credential): number {
-  const pool = poolRowFor(credential.id);
-  if (pool?.circuit_open) {
-    const remaining =
-      pool.circuit_open_remaining_secs == null ? 0 : Number(pool.circuit_open_remaining_secs);
-    const initial = circuitInitialRemaining.value[credential.id] ?? remaining;
-    if (initial > 0) return Math.max(3, Math.round((remaining / initial) * 100));
-    return remaining > 0 ? 100 : 3;
-  }
-  const activeCount = activeCredentialCount(credential.id);
-  const units = credentialTrafficUnits(credential);
-  if (units <= 0) return activeCount ? 18 : 0;
-  return Math.max(activeCount ? 24 : 6, Math.round((units / credentialTrafficMax.value) * 100));
-}
-
-function credentialProgressClass(credential: Credential): string {
-  const pool = poolRowFor(credential.id);
-  if (!credential.enabled) return "bg-slate-300";
-  if (pool?.circuit_open) return "bg-red-500";
-  if (pool?.is_rate_limited) return "bg-amber-500";
-  if (activeCredentialCount(credential.id)) return "bg-emerald-500";
-  return "bg-sky-400";
-}
-
-function credentialStatusText(credential: Credential): string {
-  const pool = poolRowFor(credential.id);
-  if (!credential.enabled) return t("state.disabled");
-  if (pool?.circuit_open)
-    return t("credentialDetail.open", {
-      detail: circuitCooldownText(pool.circuit_open_remaining_secs),
-    });
-  if (pool?.is_rate_limited) return rateLimitResetLabel(pool);
-  const activeCount = activeCredentialCount(credential.id);
-  if (activeCount) return t("credentialDetail.active", { count: activeCount });
-  if (pool?.rolling_requests)
-    return t("credentialDetail.requests", {
-      count: pool.rolling_requests.toLocaleString(),
-    });
-  return t("credentialDetail.standby");
-}
-
-function credentialStatusClass(credential: Credential): string {
-  const pool = poolRowFor(credential.id);
-  if (!credential.enabled) return "text-slate-500";
-  if (pool?.circuit_open) return "text-red-700";
-  if (pool?.is_rate_limited) return "text-amber-800";
-  if (activeCredentialCount(credential.id)) return "text-emerald-700";
-  return "text-slate-500";
-}
-
-function credentialTrafficText(credential: Credential): string {
-  const pool = poolRowFor(credential.id);
-  const parts = [];
-  if (pool?.rolling_requests) {
-    const ok = pool.rolling_requests
-      ? Math.round((pool.rolling_successes / Math.max(1, pool.rolling_requests)) * 100)
-      : 0;
-    parts.push(
-      t("credentialDetail.requests", {
-        count: pool.rolling_requests.toLocaleString(),
-      }),
-    );
-    parts.push(t("credentialDetail.success", { pct: ok }));
-    if (pool.rolling_avg_latency_ms != null)
-      parts.push(`${Math.round(pool.rolling_avg_latency_ms)}ms`);
-  }
-  const detail = credentialLine(credential);
-  if (detail) parts.push(detail);
-  return parts.join(" · ");
-}
-
-function formatShortDuration(totalSeconds: number): string {
-  if (totalSeconds <= 0) return t("time.now");
-  const mins = Math.floor(totalSeconds / 60);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  const remMin = mins % 60;
-  if (hours < 24) return remMin > 0 ? `${hours}h${remMin}m` : `${hours}h`;
-  const days = Math.floor(hours / 24);
-  const remHour = hours % 24;
-  return remHour > 0 ? `${days}d${remHour}h` : `${days}d`;
-}
-
-function planResetHint(credentialId: string): string | null {
-  const snap = props.planSnapByCred[credentialId];
-  if (!snap) return null;
-  const primary = primaryPlanPercent(snap);
-  const resetSeconds =
-    primary.windowLabel === "7d"
-      ? snap.codex_7d_reset_after_seconds
-      : (snap.codex_5h_reset_after_seconds ?? snap.codex_7d_reset_after_seconds);
-  if (resetSeconds == null || Number.isNaN(resetSeconds)) return null;
-  return `R ${formatShortDuration(resetSeconds)}`;
-}
-
-function planLabel(credentialId: string): string | null {
-  const snap = props.planSnapByCred[credentialId];
-  if (!snap) return null;
-  const plan = primaryPlanPercent(snap);
-  if (plan.pct == null || !plan.windowLabel) return null;
-  const shortLabel = plan.windowLabel === "W" ? "W" : plan.windowLabel.toUpperCase();
-  return `${shortLabel} ${plan.pct.toFixed(0)}%`;
-}
-
-function shortPct(value: number | null | undefined, label: string): string | null {
-  if (value == null || Number.isNaN(value)) return null;
-  return `${label} ${Math.max(0, Math.min(100, value)).toFixed(0)}%`;
-}
-
-function secondaryPlanLabel(credentialId: string): string | null {
-  const snap = props.planSnapByCred[credentialId];
-  if (!snap) return null;
-  if (snap.codex_5h_used_percent != null) return shortPct(snap.codex_5h_used_percent, "5H");
-  return null;
-}
-
-onMounted(() => {
-  clockTimer = setInterval(() => {
-    nowTs.value = Math.floor(Date.now() / 1000);
-  }, 1000);
-});
-
-onUnmounted(() => {
-  if (!clockTimer) return;
-  clearInterval(clockTimer);
-  clockTimer = null;
 });
 </script>
 

@@ -20,7 +20,6 @@ import {
   planPctClass,
   primaryPlanPercent,
   poolRowMissingLabel,
-  rlClass,
   rlPercent,
   credentialAuthShort,
 } from "../../../utils/providers-display.ts";

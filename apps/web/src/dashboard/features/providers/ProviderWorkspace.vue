@@ -9,26 +9,18 @@ import {
   type ProviderInput,
   type ProviderHealthSummary,
   type ProviderAuthPoolSummary,
-  type CredentialPoolStatus,
   type Credential,
   type CredentialInput,
   type ProvidersOverview,
   type UpstreamGroupInfo,
   isProviderHealthSummary,
 } from "../../api/client.ts";
-import {
-  CLIENT_TOOLS,
-  getCodexClientTool,
-  type ClientToolId,
-  type ClientToolInfo,
-} from "../../utils/client-tools.ts";
-import type { ProviderSectionView, ProviderTabOption } from "./types.ts";
-import { useRoute, useRouter } from "vue-router";
-import { displayProviderName } from "../../utils/providers-display.ts";
+import { CLIENT_TOOLS, type ClientToolId, type ClientToolInfo } from "../../utils/client-tools.ts";
+import type { ProviderSectionView } from "./types.ts";
+import { useRoute } from "vue-router";
 import { hintsFromAuthJsonTokens } from "../../utils/codex-oauth-hints.ts";
 import VpIcon from "../../components/vp-icon.vue";
 import UiButton from "../../components/ui/button.vue";
-import UiCard from "../../components/ui/card.vue";
 import UiSkeleton from "../../components/ui/skeleton.vue";
 import ProviderSections from "./components/ProviderSections.vue";
 import ProviderSmartModal from "./components/provider-smart-modal.vue";
@@ -48,9 +40,7 @@ const healthMap = ref<Record<string, ProviderHealthSummary>>({});
 const poolByProviderId = ref<Record<string, ProviderAuthPoolSummary>>({});
 const route = useRoute();
 const { t } = useI18n();
-const router = useRouter();
 const workspaceView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
-const codexRouteTool = computed(() => getCodexClientTool());
 /** Hours for provider health and quota snapshots (not request body logging). */
 const GATEWAY_ROLLING_STAT_HOURS = 24;
 const loading = ref(true);
@@ -81,7 +71,6 @@ const editProviderLive = computed(() => {
   return providers.value.find((x) => x.id === editTarget.value?.id) ?? editTarget.value;
 });
 
-const editProviderModelCount = computed(() => editProviderLive.value?.remote_models?.length ?? 0);
 const editProviderSpeedLabel = computed(() => {
   const result = editProviderLive.value?.last_speedtest;
   if (!result) return t("speed.notTested");
@@ -127,11 +116,6 @@ const authJsonPaste = ref("");
 const authJsonPasteErr = ref("");
 const authJsonDragActive = ref(false);
 const authJsonFileInputRef = ref<HTMLInputElement | null>(null);
-
-const credProviderKind = computed(() => {
-  const p = providers.value.find((x) => x.id === credProviderId.value);
-  return p?.kind ?? null;
-});
 
 function resetAuthJsonImportUi() {
   authJsonPaste.value = "";
@@ -383,15 +367,10 @@ async function refreshSinglePool(providerId: string) {
   }
 }
 
-const {
-  planSnapByCred,
-  codexPlanRowsByProvider,
-  codexRefreshNote,
-  codexPlanRefreshing,
-  refreshCodexPlanFromChatgpt,
-  resetCodexPlans,
-  applyCodexPlanRows,
-} = useProviderCodexPlans(providers, { loadCreds, refreshSinglePool });
+const { planSnapByCred, codexPlanRowsByProvider } = useProviderCodexPlans(providers, {
+  loadCreds,
+  refreshSinglePool,
+});
 
 async function reloadProviderCreds(providerId: string) {
   await Promise.all([loadCreds(providerId), refreshSinglePool(providerId)]);
@@ -474,56 +453,6 @@ async function refreshCredentialBalance(credentialId: string) {
   }
 }
 
-function poolCred(providerId: string, credentialId: string): CredentialPoolStatus | undefined {
-  return poolByProviderId.value[providerId]?.credentials.find(
-    (x) => x.credential_id === credentialId,
-  );
-}
-
-function formatCooldown(seconds: number | bigint | null | undefined): string {
-  if (seconds == null) return "";
-  const total = Number(seconds);
-  if (!Number.isFinite(total) || total <= 0) return "0s";
-  const mins = Math.floor(total / 60);
-  const secs = total % 60;
-  if (mins <= 0) return `${secs}s`;
-  if (secs === 0) return `${mins}m`;
-  return `${mins}m ${secs}s`;
-}
-
-function codexCliRouteAriaLabel(provider: Provider): string {
-  const t = codexRouteTool.value;
-  return `codex.route ${t.pathPrefix} -> ${displayProviderName(provider.name)} (${provider.kind})`;
-}
-
-const PROVIDER_TAB_OPTIONS: ProviderTabOption[] = [
-  {
-    id: "common",
-    label: "Common",
-    shortLabel: "all",
-    icon: "i-[lucide--compass]",
-    description: "",
-  },
-  ...CLIENT_TOOLS.map((tool) => ({
-    id: tool.id,
-    label: tool.label,
-    shortLabel: tool.shortLabel,
-    icon: tool.icon,
-    description: tool.setupHint,
-  })),
-];
-
-function providerGroupName(provider: Provider): string {
-  const trimmed = provider.group_name?.trim();
-  if (trimmed) return trimmed;
-  return t("groups.ungrouped");
-}
-
-function providerGroupKey(provider: Provider): string {
-  return providerGroupName(provider).toLowerCase();
-}
-
-const providerTabs = computed(() => PROVIDER_TAB_OPTIONS);
 const activeToolTab = computed<ClientToolInfo | null>(() => {
   if (activeProviderTab.value === "common") return null;
   return CLIENT_TOOLS.find((tool) => tool.id === activeProviderTab.value) ?? null;
@@ -838,28 +767,6 @@ async function toggleCredentialEnabled(cred: Credential) {
     const { [cred.id]: _, ...rest } = credToggleBusy.value;
     credToggleBusy.value = rest;
   }
-}
-
-function circuitBadge(state: string, remainingSecs?: number | bigint | null) {
-  if (state === "closed") {
-    return {
-      label: "ok",
-      detail: "",
-      cls: "bg-emerald-50 text-emerald-800 border-emerald-200",
-    };
-  }
-  if (state === "half-open") {
-    return {
-      label: "half-open",
-      detail: "probing",
-      cls: "bg-amber-50 text-amber-900 border-amber-200",
-    };
-  }
-  return {
-    label: "open",
-    detail: remainingSecs != null ? `cd ${formatCooldown(remainingSecs)}` : "cooling down",
-    cls: "bg-red-50 text-red-800 border-red-200",
-  };
 }
 
 watch(showForm, async (open) => {

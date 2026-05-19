@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ProviderKind } from "../api/client.ts";
 import VpIcon from "./vp-icon.vue";
@@ -243,7 +243,7 @@ const targetPlaybackRate = computed(() => {
   return Math.max(0.7, Math.min(4.6, 0.85 + Math.log10(tps + 1) * 1.15));
 });
 
-function setMotionEl(el: Element | null) {
+function setMotionEl(el: Element | ComponentPublicInstance | null) {
   motionEl.value = el instanceof HTMLElement ? el : null;
   void nextTick(updateAnimationRate);
 }

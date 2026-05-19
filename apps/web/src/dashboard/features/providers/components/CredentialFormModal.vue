@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
+import type { ComponentPublicInstance } from "vue";
 import type {
   Credential,
   CredentialInput,
@@ -54,8 +55,8 @@ function setAuthMode(mode: "apikey" | "oauth") {
   emit("update:credAuthMode", mode);
 }
 
-function setFileInput(el: HTMLInputElement | null) {
-  emit("update:authJsonFileInputRef", el);
+function setFileInput(el: Element | ComponentPublicInstance | null) {
+  emit("update:authJsonFileInputRef", el instanceof HTMLInputElement ? el : null);
 }
 </script>
 

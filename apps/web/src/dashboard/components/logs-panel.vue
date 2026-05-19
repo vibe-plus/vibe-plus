@@ -10,7 +10,7 @@ const lines = shallowRef<AppLogEvent[]>([]);
 const live = shallowRef(true);
 const loading = shallowRef(true);
 const LOG_REFRESH_INTERVAL_MS = 5_000;
-let logRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let logRefreshTimer: number | null = null;
 let loadInFlight: Promise<void> | null = null;
 const { t } = useI18n();
 

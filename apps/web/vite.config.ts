@@ -90,7 +90,8 @@ export default defineConfig({
   },
   lint: {
     options: {
-      typeAware: false,
+      typeAware: true,
+      typeCheck: true,
     },
   },
   fmt: {},

@@ -1,7 +1,7 @@
 import type { ProviderKind } from "../api/client.ts";
 
 /** Human-facing wire protocol label (not the internal slug). */
-export function protocolLabel(kind: ProviderKind | string | null | undefined): string {
+export function protocolLabel(kind: string | null | undefined): string {
   switch (kind) {
     case "anthropic":
       return "Messages";

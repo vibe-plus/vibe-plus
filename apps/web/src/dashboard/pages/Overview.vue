@@ -10,6 +10,7 @@ import {
   type ProviderHealth,
   type Provider,
   type ProviderAuthPoolSummary,
+  type ProviderCodexPlanItem,
   type ProvidersOverview,
   type RealtimeSnapshot,
 } from "../api/client.ts";
@@ -48,8 +49,8 @@ const loading = ref(true);
 const realtime = ref<RealtimeSnapshot | null>(null);
 const OVERVIEW_REFRESH_INTERVAL_MS = 5_000;
 const REALTIME_REFRESH_INTERVAL_MS = 1_000;
-let overviewRefreshTimer: ReturnType<typeof setInterval> | null = null;
-let realtimeRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let overviewRefreshTimer: number | null = null;
+let realtimeRefreshTimer: number | null = null;
 let loadInFlight: Promise<void> | null = null;
 let realtimeLoadInFlight: Promise<void> | null = null;
 const takeoverStatus = ref<Record<"claude" | "codex", boolean | null>>({
@@ -123,10 +124,11 @@ async function loadRealtime() {
 
 function applyProvidersOverview(overview: ProvidersOverview) {
   providers.value = overview.providers;
+  const cumulative = overview.health.map((h) => h.cumulative);
   health.value = {
-    providers: overview.health,
-    total_providers: overview.health.length,
-    healthy_providers: overview.health.filter((provider) => provider.is_healthy).length,
+    providers: cumulative,
+    total_providers: cumulative.length,
+    healthy_providers: cumulative.filter((provider) => provider.is_healthy).length,
   };
   pools.value = overview.pools;
   codexPlans.value = overview.codex_plans;

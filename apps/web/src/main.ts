@@ -27,6 +27,6 @@ watch(
 );
 
 createApp(App).use(createPinia()).use(router).use(i18n).mount("#app");
-router.isReady().then(() => {
+void router.isReady().then(() => {
   syncDocumentTitle(router.currentRoute.value);
 });

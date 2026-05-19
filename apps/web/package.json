@@ -8,6 +8,8 @@
     "dev": "vp dev",
     "build": "vp build",
     "preview": "vp preview",
+    "check": "vp check && bun run typecheck",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "test": "vp test",
     "test:e2e:providers-performance": "bun install --silent && node ./e2e/providers-performance.mjs"
   },
@@ -39,6 +41,7 @@
     "unplugin-caddy-localhost": "*",
     "unplugin-singleton": "*",
     "vite": "catalog:",
-    "vite-plus": "catalog:"
+    "vite-plus": "catalog:",
+    "vue-tsc": "2"
   }
 }
