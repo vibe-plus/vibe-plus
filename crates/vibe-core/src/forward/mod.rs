@@ -454,15 +454,23 @@ pub(crate) fn new_attempt_ctx(
 
 pub(crate) fn publish_upstream_attempt_started(
     state: &AppState,
-    _log_ctx: &LogCtx,
+    log_ctx: &LogCtx,
     attempt: &AttemptCtx,
     phase: UpstreamAttemptPhase,
 ) {
     state.realtime.attempt_started(
+        &attempt.attempt_id,
         &attempt.request_id,
+        attempt.attempt_index,
+        attempt.wave_index,
+        attempt.wave_size,
+        attempt.upstream_id.as_deref(),
         attempt.provider_id.as_deref(),
         attempt.credential_id.as_deref(),
-        attempt.upstream_model.as_str().into(),
+        Some(attempt.requested_model.as_str()),
+        Some(attempt.upstream_model.as_str()),
+        Some(wire_as_str(log_ctx.wire)),
+        log_ctx.route_prefix.as_deref(),
         match phase {
             UpstreamAttemptPhase::Connecting => "connecting",
             UpstreamAttemptPhase::Streaming => "streaming",
@@ -477,7 +485,7 @@ pub(crate) fn publish_upstream_attempt_started(
 pub(crate) fn publish_runtime_stats(
     state: &AppState,
     request_id: &str,
-    _attempt_id: Option<&str>,
+    attempt_id: Option<&str>,
     provider_id: Option<&str>,
     active_request_tokens_per_sec: Option<f64>,
     active_upstream_decode_tps: Option<f64>,
@@ -491,12 +499,10 @@ pub(crate) fn publish_runtime_stats(
     client_bytes_so_far: i64,
     upstream_first_byte_ms: Option<i64>,
     client_first_write_ms: Option<i64>,
-    attempt_scoped: bool,
+    _attempt_scoped: bool,
 ) {
-    if attempt_scoped {
-        return;
-    }
     state.realtime.runtime(
+        attempt_id,
         request_id,
         provider_id,
         active_request_tokens_per_sec
@@ -598,6 +604,7 @@ pub(crate) fn attempt_log_from_parts(
 }
 
 pub(crate) fn persist_upstream_attempt_log(state: &AppState, attempt: UpstreamAttemptLog) {
+    state.realtime.attempt_finished(&attempt);
     state
         .plugins
         .emit(GatewayEvent::UpstreamAttemptFinished(attempt));

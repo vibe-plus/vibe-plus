@@ -801,6 +801,40 @@ pub struct UpstreamAttemptLog {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/RealtimeAttempt.ts")]
+pub struct RealtimeAttempt {
+    pub attempt_id: String,
+    pub request_id: String,
+    pub attempt_index: i32,
+    pub wave_index: i32,
+    pub wave_size: i32,
+    pub upstream_id: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub provider_id: Option<String>,
+    pub credential_id: Option<String>,
+    pub wire: Option<String>,
+    pub route_prefix: Option<String>,
+    pub requested_model: Option<String>,
+    pub upstream_model: Option<String>,
+    pub phase: String,
+    pub status_code: Option<i32>,
+    pub upstream_http_status: Option<i32>,
+    pub error: Option<String>,
+    pub active_output_tokens_per_sec: Option<f64>,
+    pub active_cost_usd_per_hour: Option<f64>,
+    pub active_upstream_bytes_per_sec: f64,
+    pub active_downstream_bytes_per_sec: f64,
+    pub output_tokens_so_far: i64,
+    pub upstream_bytes_so_far: i64,
+    pub client_bytes_so_far: i64,
+    pub upstream_first_byte_ms: Option<i64>,
+    pub client_first_write_ms: Option<i64>,
+    pub last_upstream_event_ms: Option<i64>,
+    pub last_client_write_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/RealtimeRequest.ts")]
 pub struct RealtimeRequest {
     pub id: String,
@@ -826,6 +860,8 @@ pub struct RealtimeRequest {
     pub client_bytes_so_far: i64,
     pub upstream_first_byte_ms: Option<i64>,
     pub client_first_write_ms: Option<i64>,
+    #[serde(default)]
+    pub attempts: Vec<RealtimeAttempt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

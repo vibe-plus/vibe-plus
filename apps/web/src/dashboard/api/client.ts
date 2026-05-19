@@ -259,6 +259,38 @@ export interface RealtimeRequest {
   client_bytes_so_far: number;
   upstream_first_byte_ms: number | null;
   client_first_write_ms: number | null;
+  attempts: RealtimeAttempt[];
+}
+export interface RealtimeAttempt {
+  attempt_id: string;
+  request_id: string;
+  attempt_index: number;
+  wave_index: number;
+  wave_size: number;
+  upstream_id: string | null;
+  started_at: number;
+  updated_at: number;
+  provider_id: string | null;
+  credential_id: string | null;
+  wire: string | null;
+  route_prefix: string | null;
+  requested_model: string | null;
+  upstream_model: string | null;
+  phase: string;
+  status_code: number | null;
+  upstream_http_status: number | null;
+  error: string | null;
+  active_output_tokens_per_sec: number | null;
+  active_cost_usd_per_hour: number | null;
+  active_upstream_bytes_per_sec: number;
+  active_downstream_bytes_per_sec: number;
+  output_tokens_so_far: number;
+  upstream_bytes_so_far: number;
+  client_bytes_so_far: number;
+  upstream_first_byte_ms: number | null;
+  client_first_write_ms: number | null;
+  last_upstream_event_ms: number | null;
+  last_client_write_ms: number | null;
 }
 export interface RealtimeProvider {
   provider_id: string;

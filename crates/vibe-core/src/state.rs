@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 use vibe_db::Db;
 use vibe_observability::ObservabilityStore;
 use vibe_plugin_api::PluginRegistry;
-use vibe_protocol::{AppLogEvent, RealtimeProvider, RealtimeRequest, RealtimeSnapshot};
+use vibe_protocol::{
+    AppLogEvent, RealtimeAttempt, RealtimeProvider, RealtimeRequest, RealtimeSnapshot,
+    UpstreamAttemptLog, UpstreamAttemptPhase,
+};
 
 const MAX_IN_MEMORY_APP_LOGS: usize = 500;
 
@@ -22,6 +25,7 @@ const ACTIVE_REQUEST_STALE_SECS: i64 = 120;
 pub struct RealtimeRequests {
     active: Mutex<HashMap<String, RealtimeRequest>>,
     recent: Mutex<VecDeque<RealtimeRequest>>,
+    attempts: Mutex<HashMap<String, RealtimeAttempt>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -64,6 +68,7 @@ impl RealtimeRequests {
             client_bytes_so_far: 0,
             upstream_first_byte_ms: None,
             client_first_write_ms: None,
+            attempts: Vec::new(),
         };
         self.active
             .lock()
@@ -73,12 +78,57 @@ impl RealtimeRequests {
 
     pub fn attempt_started(
         &self,
+        attempt_id: &str,
         request_id: &str,
+        attempt_index: i32,
+        wave_index: i32,
+        wave_size: i32,
+        upstream_id: Option<&str>,
         provider_id: Option<&str>,
         credential_id: Option<&str>,
+        requested_model: Option<&str>,
         upstream_model: Option<&str>,
+        wire: Option<&str>,
+        route_prefix: Option<&str>,
         phase: &str,
     ) {
+        let now = chrono::Utc::now().timestamp();
+        let attempt = RealtimeAttempt {
+            attempt_id: attempt_id.to_owned(),
+            request_id: request_id.to_owned(),
+            attempt_index,
+            wave_index,
+            wave_size,
+            upstream_id: upstream_id.map(str::to_owned),
+            started_at: now,
+            updated_at: now,
+            provider_id: provider_id.map(str::to_owned),
+            credential_id: credential_id.map(str::to_owned),
+            wire: wire.map(str::to_owned),
+            route_prefix: route_prefix.map(str::to_owned),
+            requested_model: requested_model.and_then(|m| (!m.is_empty()).then(|| m.to_owned())),
+            upstream_model: upstream_model.and_then(|m| (!m.is_empty()).then(|| m.to_owned())),
+            phase: phase.to_owned(),
+            status_code: None,
+            upstream_http_status: None,
+            error: None,
+            active_output_tokens_per_sec: None,
+            active_cost_usd_per_hour: None,
+            active_upstream_bytes_per_sec: 0.0,
+            active_downstream_bytes_per_sec: 0.0,
+            output_tokens_so_far: 0,
+            upstream_bytes_so_far: 0,
+            client_bytes_so_far: 0,
+            upstream_first_byte_ms: None,
+            client_first_write_ms: None,
+            last_upstream_event_ms: None,
+            last_client_write_ms: None,
+        };
+        self.attempts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(attempt_id.to_owned(), attempt);
+
         let mut active = self
             .active
             .lock()
@@ -101,6 +151,7 @@ impl RealtimeRequests {
     #[allow(clippy::too_many_arguments)]
     pub fn runtime(
         &self,
+        attempt_id: Option<&str>,
         request_id: &str,
         provider_id: Option<&str>,
         active_output_tokens_per_sec: Option<f64>,
@@ -112,6 +163,37 @@ impl RealtimeRequests {
         upstream_first_byte_ms: Option<i64>,
         client_first_write_ms: Option<i64>,
     ) {
+        if let Some(attempt_id) = attempt_id {
+            let mut attempts = self
+                .attempts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(item) = attempts.get_mut(attempt_id) {
+                item.updated_at = chrono::Utc::now().timestamp();
+                if provider_id.is_some() {
+                    item.provider_id = provider_id.map(str::to_owned);
+                }
+                item.phase = "streaming".to_owned();
+                item.active_output_tokens_per_sec = active_output_tokens_per_sec;
+                let model = item
+                    .upstream_model
+                    .as_deref()
+                    .or(item.requested_model.as_deref());
+                item.active_cost_usd_per_hour = model
+                    .and_then(crate::usage::output_cost_usd_per_token)
+                    .and_then(|per_token| {
+                        active_output_tokens_per_sec.map(|tps| per_token * tps * 3600.0)
+                    });
+                item.active_upstream_bytes_per_sec = active_upstream_bytes_per_sec;
+                item.active_downstream_bytes_per_sec = active_downstream_bytes_per_sec;
+                item.output_tokens_so_far = output_tokens_so_far;
+                item.upstream_bytes_so_far = upstream_bytes_so_far;
+                item.client_bytes_so_far = client_bytes_so_far;
+                item.upstream_first_byte_ms = upstream_first_byte_ms;
+                item.client_first_write_ms = client_first_write_ms;
+            }
+        }
+
         let mut active = self
             .active
             .lock()
@@ -162,11 +244,44 @@ impl RealtimeRequests {
                 .recent
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            recent.push_front(item);
-            while recent.len() > MAX_RECENT_REALTIME_REQUESTS {
-                recent.pop_back();
-            }
+                recent.push_front(item);
+                while recent.len() > MAX_RECENT_REALTIME_REQUESTS {
+                    recent.pop_back();
+                }
         }
+    }
+
+    pub fn attempt_finished(&self, attempt: &UpstreamAttemptLog) {
+        let mut attempts = self
+            .attempts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(item) = attempts.get_mut(&attempt.attempt_id) else {
+            return;
+        };
+        item.updated_at = chrono::Utc::now().timestamp();
+        item.phase = match attempt.phase {
+            UpstreamAttemptPhase::Connecting => "connecting",
+            UpstreamAttemptPhase::Streaming => "streaming",
+            UpstreamAttemptPhase::Completed => "completed",
+            UpstreamAttemptPhase::Failed => "failed",
+            UpstreamAttemptPhase::Abandoned => "abandoned",
+        }
+        .to_owned();
+        item.status_code = attempt.status_code;
+        item.upstream_http_status = attempt.upstream_http_status;
+        item.error = attempt.error_summary.clone();
+        item.active_output_tokens_per_sec = None;
+        item.active_cost_usd_per_hour = None;
+        item.active_upstream_bytes_per_sec = 0.0;
+        item.active_downstream_bytes_per_sec = 0.0;
+        item.output_tokens_so_far = attempt.output_tokens;
+        item.upstream_bytes_so_far = attempt.upstream_bytes;
+        item.client_bytes_so_far = attempt.client_bytes;
+        item.upstream_first_byte_ms = attempt.upstream_first_byte_ms;
+        item.client_first_write_ms = attempt.client_first_write_ms;
+        item.last_upstream_event_ms = attempt.last_upstream_event_ms;
+        item.last_client_write_ms = attempt.last_client_write_ms;
     }
 
     pub fn snapshot(&self, codex_transport: CodexTransportStats) -> RealtimeSnapshot {
@@ -185,6 +300,44 @@ impl RealtimeRequests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .cloned()
+            .collect();
+
+        let attempts_by_request: HashMap<String, Vec<RealtimeAttempt>> = {
+            let attempts = self
+                .attempts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut grouped: HashMap<String, Vec<RealtimeAttempt>> = HashMap::new();
+            for attempt in attempts.values() {
+                grouped
+                    .entry(attempt.request_id.clone())
+                    .or_default()
+                    .push(attempt.clone());
+            }
+            for attempts in grouped.values_mut() {
+                attempts.sort_by(|a, b| a.attempt_index.cmp(&b.attempt_index));
+            }
+            grouped
+        };
+
+        let active_requests: Vec<RealtimeRequest> = active_requests
+            .into_iter()
+            .map(|mut req| {
+                if let Some(attempts) = attempts_by_request.get(&req.id) {
+                    req.attempts = attempts.clone();
+                }
+                req
+            })
+            .collect();
+
+        let recent_requests: Vec<RealtimeRequest> = recent_requests
+            .into_iter()
+            .map(|mut req| {
+                if let Some(attempts) = attempts_by_request.get(&req.id) {
+                    req.attempts = attempts.clone();
+                }
+                req
+            })
             .collect();
 
         let mut by_provider: HashMap<String, RealtimeProvider> = HashMap::new();

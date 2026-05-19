@@ -6,6 +6,7 @@ import {
   api,
   type Credential,
   type Provider,
+  type RealtimeAttempt,
   type RequestLog,
   type UpstreamAttemptLog,
   type RealtimeSnapshot,
@@ -194,7 +195,7 @@ function credentialLabelFor(id: string | null | undefined): string | null {
 type WaveGroup = {
   wave_index: number;
   wave_size: number;
-  attempts: UpstreamAttemptLog[];
+  attempts: Array<UpstreamAttemptLog | RealtimeAttempt>;
 };
 type RequestGroup = {
   request_id: string;
@@ -204,9 +205,21 @@ type RequestGroup = {
   waves: WaveGroup[];
 };
 
+const activeRealtimeAttempts = computed<RealtimeAttempt[]>(() =>
+  (realtime.value?.active_requests ?? []).flatMap((request) => request.attempts ?? []),
+);
+
+const activeRealtimeAttemptIds = computed(
+  () => new Set(activeRealtimeAttempts.value.map((a) => a.attempt_id)),
+);
+
 const requestGroups = computed<RequestGroup[]>(() => {
   const byReq = new Map<string, RequestGroup>();
-  for (const a of attempts.value) {
+  const rows: Array<UpstreamAttemptLog | RealtimeAttempt> = [
+    ...activeRealtimeAttempts.value,
+    ...attempts.value.filter((a) => !activeRealtimeAttemptIds.value.has(a.attempt_id)),
+  ];
+  for (const a of rows) {
     let g = byReq.get(a.request_id);
     if (!g) {
       g = {
@@ -298,12 +311,37 @@ function lifecycleLabels() {
     clientFirstWrite: t("obs.attemptLifecycle.clientFirstWrite"),
     complete: t("obs.attemptLifecycle.complete"),
     terminal: t("obs.attemptLifecycle.terminal"),
+    elapsed: t("obs.attemptLifecycle.elapsed"),
   };
 }
 
 function outcomeLabelFor(outcome: string | null | undefined): string {
   if (!outcome) return "—";
   return t(`obs.outcome.${normalizeOutcomeKey(outcome)}`);
+}
+
+function outcomeLabelForAttempt(attempt: UpstreamAttemptLog | RealtimeAttempt): string | null {
+  if ("outcome" in attempt) return outcomeLabelFor(attempt.outcome);
+  return null;
+}
+
+function phaseLabelFor(phase: string | null | undefined): string {
+  switch (phase) {
+    case "connecting":
+      return t("obs.attemptPhase.connecting");
+    case "streaming":
+      return t("obs.attemptPhase.streaming");
+    case "completed":
+      return t("obs.attemptPhase.completed");
+    case "failed":
+      return t("obs.attemptPhase.failed");
+    case "abandoned":
+      return t("obs.attemptPhase.abandoned");
+    case "routing":
+      return t("obs.attemptPhase.routing");
+    default:
+      return phase || "—";
+  }
 }
 
 function normalizeOutcomeKey(outcome: string): string {
@@ -523,7 +561,8 @@ function normalizeOutcomeKey(outcome: string): string {
                   :attempt="a"
                   :provider-name="providerNameFor(a.provider_id)"
                   :credential-label="credentialLabelFor(a.credential_id)"
-                  :outcome-label="outcomeLabelFor(a.outcome)"
+                  :outcome-label="outcomeLabelForAttempt(a)"
+                  :phase-label="phaseLabelFor(a.phase)"
                   :wave-label="waveLabelFor(a.wave_index)"
                   :attempt-label="attemptLabelFor(a.attempt_index)"
                   :lifecycle-labels="lifecycleLabels()"
@@ -857,7 +896,16 @@ function normalizeOutcomeKey(outcome: string): string {
         "upstreamFirstByte": "upstream first byte",
         "clientFirstWrite": "client first write",
         "complete": "complete",
-        "terminal": "terminal"
+        "terminal": "terminal",
+        "elapsed": "elapsed"
+      },
+      "attemptPhase": {
+        "routing": "routing",
+        "connecting": "connecting",
+        "streaming": "streaming",
+        "completed": "completed",
+        "failed": "failed",
+        "abandoned": "abandoned"
       },
       "downstream": {
         "title": "Gateway ↔ Downstream client",
@@ -944,7 +992,16 @@ function normalizeOutcomeKey(outcome: string): string {
         "upstreamFirstByte": "上游首字节",
         "clientFirstWrite": "下游首写",
         "complete": "完成",
-        "terminal": "终局"
+        "terminal": "终局",
+        "elapsed": "已耗时"
+      },
+      "attemptPhase": {
+        "routing": "路由中",
+        "connecting": "连接中",
+        "streaming": "流式响应",
+        "completed": "完成",
+        "failed": "失败",
+        "abandoned": "已放弃"
       },
       "downstream": {
         "title": "网关 ↔ 下游客户端",
