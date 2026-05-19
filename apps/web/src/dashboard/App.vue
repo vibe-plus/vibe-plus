@@ -113,18 +113,25 @@ function tabLabel(item: (typeof topTabs)[number]) {
       </div>
     </div>
     <aside
-      class="nav-aside noise-overlay w-full sm:w-[4.25rem] lg:w-56 transition-[width] duration-200"
+      class="nav-aside noise-overlay w-full sm:w-[4.25rem] md:w-56 transition-[width] duration-200"
     >
       <div
         class="relative z-10 flex min-w-0 shrink-0 items-center justify-between gap-2 px-3 py-2 sm:hidden"
       >
-        <img
-          class="brand-mark--image brand-mark--image-mobile shrink-0 shadow-md shadow-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)]"
-          :src="currentBrandLogo.src"
-          :alt="currentBrandLogo.label"
-        />
+        <RouterLink
+          to="/"
+          class="shrink-0 rounded-[0.6rem] outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-vp-surface"
+          :aria-label="t('nav.home')"
+          :title="t('nav.home')"
+        >
+          <img
+            class="brand-mark--image brand-mark--image-mobile shadow-md shadow-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)]"
+            :src="currentBrandLogo.src"
+            :alt="currentBrandLogo.label"
+          />
+        </RouterLink>
         <div class="min-w-0 flex-1">
-          <span class="brand-wordmark-mobile block truncate text-vp-text">Vibe Plus</span>
+          <span class="brand-wordmark-mobile block truncate text-vp-text">Vibe+</span>
         </div>
         <div
           class="flex items-center gap-1.5 rounded-full border border-vp-border/70 bg-vp-surface/80 px-2 py-1 text-[10px] text-vp-muted"
@@ -140,19 +147,26 @@ function tabLabel(item: (typeof topTabs)[number]) {
       </div>
 
       <div
-        class="hidden sm:block px-3 lg:px-5 pt-5 lg:pt-6 pb-4 lg:pb-5 border-b border-vp-border relative z-10"
+        class="hidden sm:block px-3 md:px-5 pt-5 md:pt-6 pb-4 md:pb-5 border-b border-vp-border relative z-10"
       >
-        <div class="flex items-center justify-center lg:justify-start gap-2.5">
-          <img
-            class="brand-mark--image shrink-0 shadow-md shadow-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)]"
-            :src="currentBrandLogo.src"
-            :alt="currentBrandLogo.label"
-          />
-          <div class="min-w-0 hidden lg:block">
-            <span class="font-semibold text-[15px] tracking-tight text-vp-text">Vibe Plus</span>
+        <div class="flex items-center justify-center md:justify-start gap-2.5">
+          <RouterLink
+            to="/"
+            class="shrink-0 rounded-[0.8rem] outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-vp-surface"
+            :aria-label="t('nav.home')"
+            :title="t('nav.home')"
+          >
+            <img
+              class="brand-mark--image shadow-md shadow-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)]"
+              :src="currentBrandLogo.src"
+              :alt="currentBrandLogo.label"
+            />
+          </RouterLink>
+          <div class="min-w-0 hidden md:block">
+            <span class="font-semibold text-[15px] tracking-tight text-vp-text">Vibe+</span>
           </div>
         </div>
-        <div class="flex items-center justify-center lg:justify-start gap-2 mt-3 px-0.5 flex-wrap">
+        <div class="flex items-center justify-center md:justify-start gap-2 mt-3 px-0.5 flex-wrap">
           <span
             :class="
               online ? 'bg-emerald-500 shadow-emerald-500/30' : 'bg-red-500 shadow-red-500/30'
@@ -160,7 +174,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
             class="inline-block size-1.5 rounded-full shadow-lg live-dot shrink-0"
           />
           <span
-            class="hidden lg:inline text-[11px] text-vp-muted font-mono font-medium tracking-wide truncate"
+            class="hidden md:inline text-[11px] text-vp-muted font-mono font-medium tracking-wide truncate"
           >
             {{ online ? t("status.port", { port: status?.port ?? "?" }) : t("status.offline") }}
           </span>
@@ -171,7 +185,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
           >
         </div>
         <p
-          class="mt-2 text-center lg:text-left text-[10px] text-vp-muted font-mono lg:hidden"
+          class="mt-2 text-center md:text-left text-[10px] text-vp-muted font-mono md:hidden"
           :title="online ? t('status.port', { port: status?.port ?? '?' }) : t('status.offline')"
         >
           {{ online ? (status?.port ?? "?") : "—" }}
@@ -188,7 +202,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
           type="button"
           :aria-label="viewTitle[item.id]"
           :title="viewTitle[item.id]"
-          class="nav-link group relative h-10 min-w-0 rounded-[0.95rem] px-0.5 sm:h-auto sm:w-full sm:rounded-none sm:flex-col sm:gap-1 sm:px-0 lg:flex-row lg:justify-start lg:gap-3 lg:px-3 outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-vp-surface"
+          class="nav-link group relative h-10 min-w-0 rounded-[0.95rem] px-0.5 sm:h-auto sm:w-full sm:rounded-none sm:flex-col sm:gap-1 sm:px-0 md:flex-row md:justify-start md:gap-3 md:px-3 outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-vp-surface"
           :class="
             currentView === item.id
               ? 'nav-link--active text-[color-mix(in_srgb,var(--vp-primary)_34%,var(--vp-text))]'
@@ -197,7 +211,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
           @click="setView(item.id)"
         >
           <span
-            class="nav-icon size-6.5 lg:size-7 shrink-0"
+            class="nav-icon size-6.5 md:size-7 shrink-0"
             :class="currentView === item.id ? 'nav-icon--active' : 'nav-icon--idle'"
           >
             <span
@@ -205,19 +219,10 @@ function tabLabel(item: (typeof topTabs)[number]) {
               :class="[item.iconClass, 'size-[1.25rem]']"
               aria-hidden="true"
             />
-            <VpIcon v-else :name="item.icon" size-class="size-[1.05rem] lg:size-[1.125rem]" />
+            <VpIcon v-else :name="item.icon" size-class="size-[1.05rem] md:size-[1.125rem]" />
           </span>
           <span
-            class="min-w-0 truncate text-[11px] leading-none font-semibold transition-[max-width,opacity,margin] duration-150 sm:hidden"
-            :class="
-              currentView === item.id ? 'max-w-[5rem] opacity-100' : 'max-w-[3.25rem] opacity-80'
-            "
-            :aria-hidden="currentView !== item.id"
-          >
-            {{ t(item.labelKey) }}
-          </span>
-          <span
-            class="hidden min-w-0 flex-1 items-center gap-1.5 truncate text-left lg:inline-flex"
+            class="hidden min-w-0 flex-1 items-center gap-1.5 truncate text-left md:inline-flex"
           >
             <span class="truncate">{{ viewLabel[item.id] }}</span>
             <span
@@ -226,12 +231,6 @@ function tabLabel(item: (typeof topTabs)[number]) {
             >
               {{ item.badge }}
             </span>
-          </span>
-          <span
-            v-if="item.badge"
-            class="absolute bottom-0.5 right-1 rounded-full border border-amber-200 bg-amber-50 px-1 text-[8px] font-bold leading-none tracking-wide text-amber-700 sm:bottom-auto sm:top-7 lg:hidden"
-          >
-            {{ item.badge }}
           </span>
         </button>
       </nav>
@@ -312,6 +311,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
       "updateRequired": "Vibe CLI update required"
     },
     "nav": {
+      "home": "Back to landing page",
       "view": "View",
       "toolNavigation": "Tool navigation"
     },
@@ -336,6 +336,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
       "updateRequired": "需要更新 Vibe CLI"
     },
     "nav": {
+      "home": "返回落地页",
       "view": "视图",
       "toolNavigation": "工具导航"
     },

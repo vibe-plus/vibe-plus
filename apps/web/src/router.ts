@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 import LanderPage from "./lander/LanderPage.vue";
 import DashboardShell from "./dashboard/App.vue";
+import { syncDocumentTitle } from "./lib/page-title.ts";
 
 export const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -40,4 +41,8 @@ export const router = createRouter({
       ],
     },
   ],
+});
+
+router.afterEach((to) => {
+  syncDocumentTitle(to);
 });
