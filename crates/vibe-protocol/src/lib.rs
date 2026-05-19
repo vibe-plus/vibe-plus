@@ -69,6 +69,47 @@ pub enum CredentialVendor {
     AnthropicPlan,
 }
 
+/// Runtime upstream candidate synthesized from a UI provider, one endpoint/protocol,
+/// and optionally one credential. This is the gateway algorithm's smallest
+/// schedulable unit; UI-facing provider records are only templates/pools.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/Upstream.ts")]
+pub struct Upstream {
+    /// Stable synthetic id: provider + protocol endpoint + credential/provider auth.
+    pub id: String,
+    /// UI/provider profile that owns this runtime candidate.
+    pub provider_id: String,
+    /// Wire protocol selected for this candidate.
+    pub kind: ProviderKind,
+    /// Concrete upstream endpoint used by the gateway.
+    pub base_url: String,
+    /// Credential/account chosen for this runtime candidate, if any.
+    #[serde(default)]
+    pub credential_id: Option<String>,
+    /// Circuit breaker / rate-limit key. Usually credential_id, otherwise provider_id.
+    pub cb_key: String,
+    /// Fully resolved availability gate for the algorithm.
+    pub enabled: bool,
+    /// Optional deterministic tie-breaker only; UI priority lives on Provider/Credential.
+    pub priority: i32,
+}
+
+/// Aggregated view of runtime upstream units derived from a provider.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/ProviderUpstreamSummary.ts"
+)]
+pub struct ProviderUpstreamSummary {
+    pub provider_id: String,
+    pub total_upstreams: i64,
+    pub enabled_upstreams: i64,
+    pub endpoint_count: i64,
+    pub credential_count: i64,
+    #[serde(default)]
+    pub sample_upstreams: Vec<Upstream>,
+}
+
 /// One rolling-window usage snapshot (5 h / 1 d / 7 d).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/UsageWindow.ts")]
@@ -281,6 +322,12 @@ pub struct Provider {
     /// Optional custom avatar/logo URL for the provider, typically discovered from the upstream site.
     #[serde(default)]
     pub avatar_url: Option<String>,
+    /// Provider is a UI-facing profile/pool. Runtime routing expands it into
+    /// [`Upstream`] units by crossing endpoints/protocols with credentials.
+    #[serde(default)]
+    pub upstreams: Vec<Upstream>,
+    #[serde(default)]
+    pub upstream_summary: Option<ProviderUpstreamSummary>,
     pub kind: ProviderKind,
     pub base_url: String,
     /// All wire endpoints for this vendor (Chat + Messages on the same host, etc.).
@@ -459,6 +506,10 @@ pub struct RequestLog {
     pub upstream_terminal_type: Option<String>,
 }
 
+fn default_wave_size() -> i32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/ModelPricing.ts")]
 pub struct ModelPricing {
@@ -622,6 +673,15 @@ pub struct UpstreamAttemptLog {
     pub attempt_id: String,
     pub request_id: String,
     pub attempt_index: i32,
+    /// Zero-based scheduler wave for this user request. Attempts in the same wave are concurrent.
+    #[serde(default)]
+    pub wave_index: i32,
+    /// Number of upstreams dispatched in this wave.
+    #[serde(default = "default_wave_size")]
+    pub wave_size: i32,
+    /// Minimal runtime upstream id used by gateway scheduling.
+    #[serde(default)]
+    pub upstream_id: Option<String>,
     pub started_at: i64,
     pub ended_at: Option<i64>,
     pub provider_id: Option<String>,
@@ -641,6 +701,9 @@ pub struct UpstreamAttemptLog {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    /// Stored as decimal USD string for money stability.
+    #[serde(default)]
+    pub estimated_cost_usd: String,
     pub upstream_first_byte_ms: Option<i64>,
     pub client_first_write_ms: Option<i64>,
     pub last_upstream_event_ms: Option<i64>,
@@ -730,6 +793,39 @@ pub struct RealtimeSnapshot {
     pub active_downstream_bytes_per_sec: f64,
     pub codex_ws_active: usize,
     pub codex_last_transport: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/UsageDailyRollup.ts")]
+pub struct UsageDailyRollup {
+    pub day: String,
+    pub scope: String,
+    pub provider_id: String,
+    pub credential_id: String,
+    pub upstream_id: String,
+    pub wire: String,
+    pub route_prefix: String,
+    pub upstream_model: String,
+    pub requests: i64,
+    pub successes: i64,
+    pub failures: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub estimated_cost_usd: String,
+    pub latency_avg_ms: Option<f64>,
+    pub first_token_avg_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/UsageRollupPage.ts")]
+pub struct UsageRollupPage {
+    pub items: Vec<UsageDailyRollup>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+    pub has_more: bool,
 }
 
 /// Paginated request log envelope returned by `GET /_vp/logs`.
@@ -877,6 +973,9 @@ pub struct ProvidersOverview {
     pub health: Vec<ProviderHealthSummary>,
     pub pools: Vec<ProviderAuthPoolSummary>,
     pub credentials: HashMap<String, Vec<Credential>>,
+    /// Runtime upstream units grouped by UI provider.
+    #[serde(default)]
+    pub upstreams: HashMap<String, Vec<Upstream>>,
     pub codex_plans: HashMap<String, Vec<ProviderCodexPlanItem>>,
 }
 
@@ -922,6 +1021,44 @@ pub struct CodexPlanRefreshResult {
     pub attempted: usize,
     pub ok: usize,
     pub errors: Vec<String>,
+}
+
+/// Input for previewing or applying Codex history provider unification.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CodexHistoryUnifyInput.ts"
+)]
+pub struct CodexHistoryUnifyInput {
+    pub provider: String,
+    #[serde(default)]
+    pub from_providers: Vec<String>,
+    #[serde(default)]
+    pub apply: bool,
+    #[serde(default)]
+    pub no_backup: bool,
+    #[serde(default)]
+    pub codex_home: Option<String>,
+}
+
+/// Summary returned by Codex history preview/apply endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CodexHistorySummary.ts"
+)]
+pub struct CodexHistorySummary {
+    pub codex_home: String,
+    pub provider: String,
+    pub from_providers: Vec<String>,
+    pub applied: bool,
+    pub sqlite_files_seen: usize,
+    pub sqlite_files_changed: usize,
+    pub sqlite_rows_changed: usize,
+    pub rollout_files_seen: usize,
+    pub rollout_files_changed: usize,
+    pub rollout_fields_changed: usize,
+    pub backups_created: usize,
 }
 
 /// Enhanced stats for the dashboard.
@@ -1017,6 +1154,14 @@ pub struct Credential {
     /// Unix timestamp when the access token expires (null = unknown).
     pub oauth_expires_at: Option<i64>,
     // ── Rate-limit state ─────────────────────────────────────────────────────
+    /// User-facing provider group/pool selected on an upstream management platform.
+    /// Distinct from runtime [`Upstream`]: the gateway combines this credential
+    /// with each provider endpoint to create upstream units.
+    #[serde(default)]
+    pub upstream_group: Option<String>,
+    /// Cost multiplier relative to official pricing (default 1.0).
+    #[serde(default = "default_price_multiplier")]
+    pub price_multiplier: f64,
     /// Upstream rate-limit headers — updated after every response.
     pub rl_requests_limit: Option<i64>,
     pub rl_requests_remaining: Option<i64>,
@@ -1065,12 +1210,6 @@ pub struct Credential {
     /// Unix timestamp when the cached session expires.
     #[serde(default)]
     pub upstream_session_expires_at: Option<i64>,
-    /// Sub2API group name/ID this credential is pinned to.
-    #[serde(default)]
-    pub upstream_group: Option<String>,
-    /// Cost multiplier relative to official pricing (default 1.0).
-    #[serde(default = "default_price_multiplier")]
-    pub price_multiplier: f64,
     /// Rolling-window usage snapshots fetched from the upstream platform.
     #[serde(default)]
     pub windows: Vec<UsageWindow>,
@@ -1150,6 +1289,8 @@ mod tests {
             name: "Provider 1".to_string(),
             group_name: None,
             avatar_url: None,
+            upstreams: vec![],
+            upstream_summary: None,
             kind: ProviderKind::OpenaiChat,
             base_url: "https://legacy.example.com/v1".to_string(),
             protocols,

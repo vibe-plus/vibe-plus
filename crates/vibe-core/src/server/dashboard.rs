@@ -1,9 +1,86 @@
 use super::*;
+use vibe_protocol::ProviderKind;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct RollingHoursQuery {
     #[serde(default = "default_rolling_hours")]
     hours: i64,
+}
+
+fn provider_runtime_upstreams(provider: &Provider, credentials: &[Credential]) -> Vec<Upstream> {
+    let protocols = provider.effective_protocols();
+    let mut out = Vec::new();
+    if credentials.is_empty() {
+        if provider
+            .auth_ref
+            .as_ref()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            for proto in protocols {
+                out.push(Upstream {
+                    id: format!(
+                        "{}:{}:provider",
+                        provider.id,
+                        wire_as_str_for_kind(proto.kind)
+                    ),
+                    provider_id: provider.id.clone(),
+                    kind: proto.kind,
+                    base_url: proto.base_url.clone(),
+                    credential_id: None,
+                    cb_key: provider.id.clone(),
+                    enabled: provider.enabled,
+                    priority: provider.priority,
+                });
+            }
+        }
+        return out;
+    }
+
+    for proto in protocols {
+        for c in credentials {
+            out.push(Upstream {
+                id: format!(
+                    "{}:{}:{}",
+                    provider.id,
+                    wire_as_str_for_kind(proto.kind),
+                    c.id
+                ),
+                provider_id: provider.id.clone(),
+                kind: proto.kind,
+                base_url: proto.base_url.clone(),
+                credential_id: Some(c.id.clone()),
+                cb_key: c.id.clone(),
+                enabled: provider.enabled && c.enabled,
+                priority: provider.priority + c.priority,
+            });
+        }
+    }
+    out
+}
+
+fn wire_as_str_for_kind(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::OpenaiChat => "openai-chat",
+        ProviderKind::OpenaiResponses => "openai-responses",
+        ProviderKind::GeminiNative => "gemini-native",
+    }
+}
+
+fn provider_upstream_summary(
+    provider_id: &str,
+    endpoint_count: i64,
+    credential_count: i64,
+    upstreams: &[Upstream],
+) -> ProviderUpstreamSummary {
+    ProviderUpstreamSummary {
+        provider_id: provider_id.to_string(),
+        total_upstreams: upstreams.len() as i64,
+        enabled_upstreams: upstreams.iter().filter(|u| u.enabled).count() as i64,
+        endpoint_count,
+        credential_count,
+        sample_upstreams: upstreams.iter().take(8).cloned().collect(),
+    }
 }
 
 pub(super) async fn provider_overview(
@@ -93,6 +170,8 @@ pub(super) async fn build_providers_overview(
     let mut health = Vec::with_capacity(providers.len());
     let mut pools = Vec::with_capacity(providers.len());
     let mut codex_plans: HashMap<String, Vec<ProviderCodexPlanItem>> = HashMap::new();
+    let mut upstreams_by_provider: HashMap<String, Vec<Upstream>> = HashMap::new();
+    let mut providers_with_upstreams: Vec<Provider> = Vec::with_capacity(providers.len());
 
     for p in &providers {
         let creds = credentials_by_provider
@@ -140,6 +219,19 @@ pub(super) async fn build_providers_overview(
             hours,
         ));
 
+        let upstreams = provider_runtime_upstreams(p, &creds);
+        let summary = provider_upstream_summary(
+            &p.id,
+            p.effective_protocols().len() as i64,
+            creds.len() as i64,
+            &upstreams,
+        );
+        let mut provider_view = p.clone();
+        provider_view.upstreams = upstreams.clone();
+        provider_view.upstream_summary = Some(summary);
+        providers_with_upstreams.push(provider_view);
+        upstreams_by_provider.insert(p.id.clone(), upstreams);
+
         if official_provider_ids.contains(&p.id) {
             codex_plans.insert(
                 p.id.clone(),
@@ -158,10 +250,11 @@ pub(super) async fn build_providers_overview(
 
     Ok(ProvidersOverview {
         rolling_hours: hours,
-        providers,
+        providers: providers_with_upstreams,
         health,
         pools,
         credentials: credentials_by_provider,
+        upstreams: upstreams_by_provider,
         codex_plans,
     })
 }

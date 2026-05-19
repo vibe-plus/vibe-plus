@@ -18,6 +18,12 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum CcSwitchCommand {
+    /// Dump CC Switch extract summary (secrets redacted).
+    Extract,
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Start the local proxy daemon.
     Start(cmd::start::StartArgs),
@@ -29,6 +35,9 @@ enum Command {
     Statusline,
     /// Diagnose config, port, and provider reachability.
     Doctor,
+    /// Read CC Switch ~/.cc-switch database + settings (extraction smoke test).
+    #[command(subcommand, name = "ccswitch")]
+    CcSwitch(CcSwitchCommand),
     /// Guide Claude Code / OpenCode / Codex to use the local proxy.
     Takeover(cmd::takeover::TakeoverArgs),
     /// Tail the request log.
@@ -56,6 +65,7 @@ async fn main() -> Result<()> {
         Some(Command::Status) => cmd::status::run().await,
         Some(Command::Statusline) => cmd::statusline::run(),
         Some(Command::Doctor) => cmd::doctor::run().await,
+        Some(Command::CcSwitch(CcSwitchCommand::Extract)) => cmd::ccswitch_extract::run(),
         Some(Command::Takeover(a)) => cmd::takeover::run(a).await,
         Some(Command::Logs(a)) => cmd::logs::run(a).await,
         Some(Command::Install(a)) => cmd::install::run(a).await,

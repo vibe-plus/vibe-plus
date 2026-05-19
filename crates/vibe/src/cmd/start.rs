@@ -75,13 +75,28 @@ pub fn spawn_background(port: u16) -> Result<()> {
 }
 
 pub async fn start_server(port: u16) -> Result<()> {
+    if let Some(summary) = vibe_core::codex_history::try_auto_unify() {
+        let changes = summary.sqlite_rows_changed + summary.rollout_fields_changed;
+        if changes > 0 {
+            tracing::info!(
+                sqlite_rows = summary.sqlite_rows_changed,
+                rollout_fields = summary.rollout_fields_changed,
+                "codex history unified on gateway start"
+            );
+        }
+    }
+
     // Config is in-memory only; the runtime defaults live in
     // `vibe_core::config::Config::default()`. The CLI `--port` flag below is
     // the one user-visible knob still in play.
     let db_path = paths::db_path()?;
+    let body_dir = paths::bodies_dir()?;
     let mut cfg = Config::default();
     cfg.server.port = port;
-    let db = Db::open(&db_path)?;
+    let db = Db::open(&db_path)?.with_body_store(body_dir);
+    if let Err(e) = db.prune_short_logs(&vibe_db::ShortLogRetentionPolicy::default()) {
+        tracing::warn!(?e, "short log retention prune failed on gateway start");
+    }
     let state = AppState::init(db, cfg, port)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
     write_pid()?;

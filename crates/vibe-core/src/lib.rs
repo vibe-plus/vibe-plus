@@ -9,9 +9,11 @@
 
 pub mod auth_fingerprint;
 pub mod cache;
+pub mod ccswitch;
 pub mod circuit_breaker;
 pub mod claude_summary;
 pub mod codex_auth_json;
+pub mod codex_history;
 pub mod codex_plan_headers;
 pub mod codex_session_usage;
 pub mod codex_summary;

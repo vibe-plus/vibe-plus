@@ -1,3 +1,4 @@
+pub mod ccswitch_extract;
 pub mod doctor;
 pub mod gateway;
 pub mod install;

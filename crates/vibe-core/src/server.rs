@@ -33,8 +33,9 @@ use vibe_protocol::{
     AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexPlanRefreshResult,
     Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats,
     Health, HealthSummary, Meta, Provider, ProviderAuthPoolSummary, ProviderCodexPlanItem,
-    ProviderHealth, ProviderHealthSummary, ProviderInput, ProvidersOverview, RealtimeSnapshot,
-    Status, UsageSummary,
+    ProviderHealth, ProviderHealthSummary, ProviderInput, ProviderUpstreamSummary,
+    ProvidersOverview, RealtimeSnapshot, RequestLog, Status, Upstream, UpstreamAttemptLog,
+    UsageSummary,
 };
 
 mod clients;
@@ -46,6 +47,7 @@ mod files;
 mod models;
 mod providers;
 mod proxy;
+mod records;
 
 use clients::*;
 use codex_http::*;
@@ -56,6 +58,7 @@ use files::*;
 use models::*;
 use providers::*;
 use proxy::*;
+use records::*;
 
 pub fn router(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -170,6 +173,20 @@ pub fn router(state: AppState) -> Router {
         .route("/_vp/stats/dashboard", get(dashboard_stats))
         .route("/_vp/realtime", get(realtime_snapshot))
         .route("/_vp/app-logs", get(list_app_logs))
+        .route("/_vp/logs/app", get(list_app_log_records))
+        .route("/_vp/records/requests", get(list_request_records))
+        .route("/_vp/records/requests/:id", get(get_request_record))
+        .route(
+            "/_vp/records/requests/:id/network",
+            get(list_request_network_records),
+        )
+        .route(
+            "/_vp/records/network-attempts",
+            get(list_network_attempt_records),
+        )
+        .route("/_vp/stats/usage-rollups", get(list_usage_rollups))
+        .route("/_vp/codex-history/preview", get(get_codex_history_preview))
+        .route("/_vp/codex-history/unify", post(post_codex_history_unify))
         // sandboxed read/write of ~/.codex and ~/.claude
         .route("/_vp/files/:scope", get(list_files))
         .route(
@@ -438,6 +455,8 @@ mod request_body_limit_tests {
             name: "Provider A".into(),
             group_name: None,
             avatar_url: None,
+            upstreams: vec![],
+            upstream_summary: None,
             kind: ProviderKind::OpenaiResponses,
             base_url: "https://api.openai.com/v1".into(),
             protocols: vec![],

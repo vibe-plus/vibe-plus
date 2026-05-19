@@ -96,11 +96,13 @@ pub(crate) async fn try_one_pick(
     state: AppState,
     mut epick: ExpandedPick,
     attempt_index: i32,
+    wave_index: i32,
+    wave_size: i32,
     ctx: Arc<PickCtx>,
 ) -> PickResult {
     let provider = epick.provider.clone();
     let upstream_model = epick.upstream_model.clone();
-    let cb_key = epick.cb_key.clone();
+    let cb_key = epick.upstream.cb_key.clone();
     let log_ctx = LogCtx {
         wire: ctx.wire,
         route_prefix: ctx.route_prefix.clone(),
@@ -115,6 +117,9 @@ pub(crate) async fn try_one_pick(
     let attempt = new_attempt_ctx(
         &ctx.log_id,
         attempt_index,
+        wave_index,
+        wave_size,
+        Some(epick.upstream.id.as_str()),
         chrono::Utc::now().timestamp(),
         Some(&provider.id),
         epick.credential_id.as_deref(),
@@ -852,6 +857,7 @@ pub(crate) async fn run_wave(
     wave: Vec<ExpandedPick>,
     ctx: Arc<PickCtx>,
     base_attempt: i32,
+    wave_index: i32,
 ) -> WaveOutcome {
     if wave.is_empty() {
         return WaveOutcome::AllNonTerminal {
@@ -863,6 +869,7 @@ pub(crate) async fn run_wave(
     }
 
     let size = wave.len();
+    let wave_size = size as i32;
     let cancel = CancellationToken::new();
     let (tx, mut rx) = mpsc::channel::<WaveEvent>(size);
 
@@ -883,7 +890,7 @@ pub(crate) async fn run_wave(
                 _ = cancel_c.cancelled() => PickResult::RaceAborted {
                     provider_id: provider_id.clone(),
                 },
-                r = try_one_pick(state_c, epick, attempt_index, ctx_c) => r,
+                r = try_one_pick(state_c, epick, attempt_index, wave_index, wave_size, ctx_c) => r,
             };
             let cb_skip_note = match &result {
                 PickResult::CircuitSkip { .. } => Some(super::format_routing_attempt(
@@ -1011,6 +1018,8 @@ mod tests {
             name: id.into(),
             group_name: None,
             avatar_url: None,
+            upstreams: vec![],
+            upstream_summary: None,
             kind,
             base_url,
             protocols: vec![],
@@ -1029,27 +1038,42 @@ mod tests {
         }
     }
 
-    fn make_epick_passthrough(provider: Provider) -> ExpandedPick {
-        ExpandedPick {
+    fn upstream_for_provider(provider: &Provider) -> vibe_protocol::Upstream {
+        vibe_protocol::Upstream {
+            id: format!("{}:provider", provider.id),
+            provider_id: provider.id.clone(),
+            kind: provider.kind,
+            base_url: provider.base_url.clone(),
+            credential_id: None,
             cb_key: provider.id.clone(),
+            enabled: true,
+            priority: provider.priority,
+        }
+    }
+
+    fn make_epick_passthrough(provider: Provider) -> ExpandedPick {
+        let upstream = upstream_for_provider(&provider);
+        ExpandedPick {
             upstream_model: "gpt-test".into(),
             auth_ref: Some("passthrough".into()),
             oauth: None,
             credential_id: None,
             credential: None,
             provider,
+            upstream,
         }
     }
 
     fn make_epick_with_auth_ref(provider: Provider, auth_ref: &str) -> ExpandedPick {
+        let upstream = upstream_for_provider(&provider);
         ExpandedPick {
-            cb_key: provider.id.clone(),
             upstream_model: "gpt-test".into(),
             auth_ref: Some(auth_ref.into()),
             oauth: None,
             credential_id: None,
             credential: None,
             provider,
+            upstream,
         }
     }
 
@@ -1098,7 +1122,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         match result {
             PickResult::Final(resp) => assert_eq!(resp.status(), StatusCode::OK),
             other => panic!("expected Final(200), got {:?}", variant_name(&other)),
@@ -1115,7 +1139,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         match result {
             PickResult::Final(resp) => assert_eq!(resp.status(), StatusCode::BAD_REQUEST),
             other => panic!("expected Final(400), got {:?}", variant_name(&other)),
@@ -1132,7 +1156,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         match result {
             PickResult::Final(resp) => assert_eq!(resp.status(), StatusCode::NOT_FOUND),
             other => panic!("expected Final(404), got {:?}", variant_name(&other)),
@@ -1150,7 +1174,7 @@ mod tests {
         let body = Bytes::from(r#"{"model":"gpt-test","input":"hi"}"#);
         let ctx = make_ctx(Wire::OpenaiResponses, body);
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         assert!(
             matches!(result, PickResult::Retry { .. }),
             "expected Retry, got {}",
@@ -1169,7 +1193,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state.clone(), epick, 1, ctx).await;
+        let result = try_one_pick(state.clone(), epick, 1, 0, 1, ctx).await;
         assert!(matches!(result, PickResult::Retry { .. }));
         // CB must NOT have been tripped by 429 alone (record_failure is skipped).
         assert!(
@@ -1189,7 +1213,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state.clone(), epick, 1, ctx).await;
+        let result = try_one_pick(state.clone(), epick, 1, 0, 1, ctx).await;
         assert!(matches!(result, PickResult::Retry { .. }));
         assert!(!state.cb.allow(&cb_key), "CB must be force-opened by 401");
     }
@@ -1238,18 +1262,28 @@ mod tests {
             .expect("credential_insert");
 
         let cb_key_for_cred = cred.id.clone();
-        let epick = ExpandedPick {
+        let upstream = vibe_protocol::Upstream {
+            id: format!("{}:{}", provider.id, cb_key_for_cred),
+            provider_id: provider.id.clone(),
+            kind: provider.kind,
+            base_url: provider.base_url.clone(),
+            credential_id: Some(cred.id.clone()),
             cb_key: cb_key_for_cred.clone(),
+            enabled: true,
+            priority: provider.priority + cred.priority,
+        };
+        let epick = ExpandedPick {
             upstream_model: "gpt-test".into(),
             auth_ref: Some("passthrough".into()),
             oauth: None,
             credential_id: Some(cred.id.clone()),
             credential: Some(cred.clone()),
             provider,
+            upstream,
         };
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state.clone(), epick, 1, ctx).await;
+        let result = try_one_pick(state.clone(), epick, 1, 0, 1, ctx).await;
         assert!(matches!(result, PickResult::Retry { .. }));
 
         // The disable is fired via spawn_blocking; poll the DB up to ~1s.
@@ -1286,7 +1320,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state.clone(), epick, 1, ctx).await;
+        let result = try_one_pick(state.clone(), epick, 1, 0, 1, ctx).await;
         assert!(matches!(result, PickResult::Retry { .. }));
         assert!(
             !state.cb.allow(&cb_key),
@@ -1304,7 +1338,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         assert!(matches!(result, PickResult::Retry { .. }));
     }
 
@@ -1318,7 +1352,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         assert!(matches!(result, PickResult::Retry { .. }));
     }
 
@@ -1336,7 +1370,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         assert!(
             matches!(result, PickResult::Retry { .. }),
             "expected Retry on connection error, got {}",
@@ -1370,7 +1404,7 @@ mod tests {
         let epick = make_epick_passthrough(provider.clone());
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         match result {
             PickResult::CircuitSkip { provider_id } => {
                 assert_eq!(provider_id, "p-cb-open");
@@ -1398,7 +1432,7 @@ mod tests {
         let epick = make_epick_with_auth_ref(provider, "env:VIBE_RACE_TEST_DOES_NOT_EXIST_XYZ");
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         assert!(
             matches!(result, PickResult::Retry { .. }),
             "expected Retry on auth resolve failure, got {}",
@@ -1420,7 +1454,7 @@ mod tests {
         let epick = make_epick_passthrough(provider);
         let ctx = make_ctx(Wire::Anthropic, anthropic_body());
 
-        let result = try_one_pick(state, epick, 1, ctx).await;
+        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
         match result {
             PickResult::Final(resp) => assert_eq!(resp.status(), StatusCode::OK),
             other => panic!("expected Final(200), got {}", variant_name(&other)),
@@ -1445,7 +1479,7 @@ mod tests {
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
         let start = Instant::now();
-        let outcome = run_wave(state, wave, ctx, 0).await;
+        let outcome = run_wave(state, wave, ctx, 0, 0).await;
         let elapsed = start.elapsed();
 
         match outcome {
@@ -1482,7 +1516,7 @@ mod tests {
         ];
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let outcome = run_wave(state, wave, ctx, 0).await;
+        let outcome = run_wave(state, wave, ctx, 0, 0).await;
         match outcome {
             WaveOutcome::AllNonTerminal {
                 retry_count,
@@ -1520,7 +1554,7 @@ mod tests {
         ];
         let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
 
-        let outcome = run_wave(state, wave, ctx, 0).await;
+        let outcome = run_wave(state, wave, ctx, 0, 0).await;
         match outcome {
             WaveOutcome::AllNonTerminal {
                 retry_count,

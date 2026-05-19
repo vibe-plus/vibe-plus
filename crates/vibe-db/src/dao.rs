@@ -6,6 +6,42 @@ use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
 use vibe_protocol::*;
 
+#[derive(Debug, Clone)]
+pub struct ShortLogRetentionPolicy {
+    pub max_age_secs: i64,
+    pub max_request_rows: i64,
+    pub max_app_log_rows: i64,
+    pub max_db_bytes: i64,
+    pub body_max_age_secs: i64,
+    pub body_max_files: usize,
+    pub body_max_bytes: u64,
+}
+
+impl Default for ShortLogRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_age_secs: 14 * 24 * 3600,
+            max_request_rows: 50_000,
+            max_app_log_rows: 20_000,
+            max_db_bytes: 512 * 1024 * 1024,
+            body_max_age_secs: 14 * 24 * 3600,
+            body_max_files: 100_000,
+            body_max_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ShortLogPruneStats {
+    pub request_rows_deleted: i64,
+    pub attempt_rows_deleted: i64,
+    pub app_rows_deleted: i64,
+    pub body_files_deleted: usize,
+    pub body_bytes_deleted: u64,
+    pub db_bytes: i64,
+    pub body_bytes: u64,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ProviderConfig {
     #[serde(default = "default_passthrough_mode")]
@@ -126,7 +162,7 @@ fn provider_config_from_provider(p: &Provider) -> ProviderConfig {
     }
 }
 
-fn now_secs() -> i64 {
+pub fn now_secs() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
@@ -216,6 +252,109 @@ pub struct DashboardRollingTotals {
     pub output_tokens_per_sec: f64,
     pub decode_output_tokens_per_sec: f64,
     pub avg_latency_ms: i64,
+}
+
+fn day_utc(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .unwrap_or_else(chrono::Utc::now)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn usd_to_micros(value: &str) -> i64 {
+    let raw = value.trim();
+    if raw.is_empty() || raw.starts_with('-') {
+        return 0;
+    }
+    let mut parts = raw.splitn(2, '.');
+    let whole = parts
+        .next()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let frac_raw = parts.next().unwrap_or("");
+    let mut frac = frac_raw.chars().take(6).collect::<String>();
+    while frac.len() < 6 {
+        frac.push('0');
+    }
+    whole.saturating_mul(1_000_000) + frac.parse::<i64>().unwrap_or(0)
+}
+
+fn micros_to_usd(value: i64) -> String {
+    format!("{}.{:06}", value / 1_000_000, (value % 1_000_000).abs())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_usage_rollup(
+    c: &rusqlite::Connection,
+    day: &str,
+    scope: &str,
+    provider_id: Option<&str>,
+    credential_id: Option<&str>,
+    upstream_id: Option<&str>,
+    wire: Option<&str>,
+    route_prefix: Option<&str>,
+    upstream_model: Option<&str>,
+    success: bool,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_creation_tokens: i64,
+    estimated_cost_usd: &str,
+    latency_ms: Option<i64>,
+    first_token_ms: Option<i64>,
+    updated_at: i64,
+) -> Result<()> {
+    let latency_count = i64::from(latency_ms.is_some());
+    let first_token_count = i64::from(first_token_ms.is_some());
+    c.execute(
+        "INSERT INTO usage_daily_rollups (
+            day, scope, provider_id, credential_id, upstream_id, wire, route_prefix, upstream_model,
+            requests, successes, failures,
+            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+            estimated_cost_micros, latency_sum_ms, latency_count, first_token_sum_ms, first_token_count, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                   1, ?9, ?10,
+                   ?11, ?12, ?13, ?14,
+                   ?15, ?16, ?17, ?18, ?19, ?20)
+         ON CONFLICT(day, scope, provider_id, credential_id, upstream_id, wire, route_prefix, upstream_model)
+         DO UPDATE SET
+            requests = requests + 1,
+            successes = successes + excluded.successes,
+            failures = failures + excluded.failures,
+            input_tokens = input_tokens + excluded.input_tokens,
+            output_tokens = output_tokens + excluded.output_tokens,
+            cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+            cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+            estimated_cost_micros = estimated_cost_micros + excluded.estimated_cost_micros,
+            latency_sum_ms = latency_sum_ms + excluded.latency_sum_ms,
+            latency_count = latency_count + excluded.latency_count,
+            first_token_sum_ms = first_token_sum_ms + excluded.first_token_sum_ms,
+            first_token_count = first_token_count + excluded.first_token_count,
+            updated_at = excluded.updated_at",
+        params![
+            day,
+            scope,
+            provider_id.unwrap_or(""),
+            credential_id.unwrap_or(""),
+            upstream_id.unwrap_or(""),
+            wire.unwrap_or(""),
+            route_prefix.unwrap_or(""),
+            upstream_model.unwrap_or(""),
+            i64::from(success),
+            i64::from(!success),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            usd_to_micros(estimated_cost_usd),
+            latency_ms.unwrap_or(0),
+            latency_count,
+            first_token_ms.unwrap_or(0),
+            first_token_count,
+            updated_at,
+        ],
+    )?;
+    Ok(())
 }
 
 impl Db {
@@ -505,10 +644,49 @@ impl Db {
             .context("updated provider missing on read-back")
     }
 
+    fn body_value_for_insert(
+        &self,
+        kind: &str,
+        owner_id: &str,
+        value: &Option<String>,
+    ) -> Result<(Option<String>, Option<String>)> {
+        match (self.body_store(), value.as_deref()) {
+            (Some(store), Some(text)) => Ok((None, Some(store.write_text(kind, owner_id, text)?))),
+            _ => Ok((value.clone(), None)),
+        }
+    }
+
+    fn hydrate_body_value(
+        &self,
+        inline: Option<String>,
+        body_ref: Option<String>,
+    ) -> Option<String> {
+        if inline.is_some() {
+            return inline;
+        }
+        let Some(body_ref) = body_ref else {
+            return None;
+        };
+        self.body_store()
+            .and_then(|store| match store.read_text(&body_ref) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(?e, %body_ref, "read body ref failed");
+                    None
+                }
+            })
+    }
+
     // --- request logs -------------------------------------------------------
 
     pub fn log_insert(&self, log: &RequestLog) -> Result<()> {
-        self.with(|c| {
+        let (request_body_inline, request_body_ref) =
+            self.body_value_for_insert("request", &log.id, &log.request_body)?;
+        let (response_body_inline, response_body_ref) =
+            self.body_value_for_insert("response", &log.id, &log.response_body)?;
+        let (client_response_body_inline, client_response_body_ref) =
+            self.body_value_for_insert("client-response", &log.id, &log.client_response_body)?;
+        self.with_short(|c| {
             c.execute(
                 "INSERT INTO request_logs (
                     id, started_at, app, provider_id, requested_model, upstream_model,
@@ -528,12 +706,13 @@ impl Db {
                     first_keepalive_ms, last_keepalive_ms,
                     max_gap_between_upstream_events_ms, max_gap_between_data_events_ms,
                     keepalive_after_last_data_count, last_data_event_ms,
-                    bridge_mode, status_injected, terminal_injected, upstream_terminal_type
+                    bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
+                    request_body_ref, response_body_ref, client_response_body_ref
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                            ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
                            ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39,
                            ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51,
-                           ?52, ?53, ?54, ?55)
+                           ?52, ?53, ?54, ?55, ?56, ?57, ?58)
                  ON CONFLICT(id) DO UPDATE SET
                     started_at = excluded.started_at,
                     app = excluded.app,
@@ -561,6 +740,9 @@ impl Db {
                     request_body = excluded.request_body,
                     response_body = excluded.response_body,
                     client_response_body = excluded.client_response_body,
+                    request_body_ref = excluded.request_body_ref,
+                    response_body_ref = excluded.response_body_ref,
+                    client_response_body_ref = excluded.client_response_body_ref,
                     stream_kind = excluded.stream_kind,
                     stream_terminal_seen = excluded.stream_terminal_seen,
                     stream_end_reason = excluded.stream_end_reason,
@@ -614,9 +796,9 @@ impl Db {
                     log.dedupe_key,
                     log.client_transport,
                     log.request_headers,
-                    log.request_body,
-                    log.response_body,
-                    log.client_response_body,
+                    request_body_inline,
+                    response_body_inline,
+                    client_response_body_inline,
                     log.stream_kind,
                     log.stream_terminal_seen.map(i32::from),
                     log.stream_end_reason,
@@ -645,18 +827,51 @@ impl Db {
                     i32::from(log.status_injected),
                     i32::from(log.terminal_injected),
                     log.upstream_terminal_type,
+                    request_body_ref,
+                    response_body_ref,
+                    client_response_body_ref,
                 ],
             )?;
             Ok(())
+        })?;
+        let day = day_utc(log.started_at);
+        let success = log
+            .status_code
+            .map(|s| (200..300).contains(&s))
+            .unwrap_or(false);
+        self.with(|c| {
+            upsert_usage_rollup(
+                c,
+                &day,
+                "request",
+                log.provider_id.as_deref(),
+                log.credential_id.as_deref(),
+                None,
+                log.wire.as_deref(),
+                log.route_prefix.as_deref(),
+                log.upstream_model.as_deref(),
+                success,
+                log.input_tokens,
+                log.output_tokens,
+                log.cache_read_tokens,
+                log.cache_creation_tokens,
+                &log.estimated_cost_usd,
+                log.latency_ms,
+                log.first_token_ms,
+                now_secs(),
+            )
         })
     }
 
     /// Attach gateway→client transform trace (e.g. Codex WS Responses events) after streaming ends.
     pub fn log_set_client_response_body(&self, id: &str, client_body: Option<&str>) -> Result<()> {
-        self.with(|c| {
+        let body = client_body.map(str::to_string);
+        let (client_body_inline, client_body_ref) =
+            self.body_value_for_insert("client-response", id, &body)?;
+        self.with_short(|c| {
             let n = c.execute(
-                "UPDATE request_logs SET client_response_body = ?1 WHERE id = ?2",
-                params![client_body, id],
+                "UPDATE request_logs SET client_response_body = ?1, client_response_body_ref = ?2 WHERE id = ?3",
+                params![client_body_inline, client_body_ref, id],
             )?;
             if n == 0 {
                 anyhow::bail!("request_logs update: no row for id {id}");
@@ -666,41 +881,45 @@ impl Db {
     }
 
     pub fn log_update_client_trace_and_stream_fields(&self, log: &RequestLog) -> Result<()> {
-        self.with(|c| {
+        let (client_response_body_inline, client_response_body_ref) =
+            self.body_value_for_insert("client-response", &log.id, &log.client_response_body)?;
+        self.with_short(|c| {
             let n = c.execute(
                 "UPDATE request_logs SET
                     client_response_body = ?1,
-                    stream_kind = ?2,
-                    stream_terminal_seen = ?3,
-                    stream_end_reason = ?4,
-                    stream_error_detail = ?5,
-                    upstream_first_byte_ms = COALESCE(upstream_first_byte_ms, ?6),
-                    client_first_write_ms = ?7,
-                    last_upstream_event_ms = COALESCE(last_upstream_event_ms, ?8),
-                    last_client_write_ms = ?9,
-                    upstream_chunk_count = CASE WHEN upstream_chunk_count > 0 THEN upstream_chunk_count ELSE ?10 END,
-                    upstream_bytes = CASE WHEN upstream_bytes > 0 THEN upstream_bytes ELSE ?11 END,
-                    client_chunk_count = ?12,
-                    client_bytes = ?13,
-                    sse_event_count = CASE WHEN sse_event_count > 0 THEN sse_event_count ELSE ?14 END,
-                    sse_data_count = CASE WHEN sse_data_count > 0 THEN sse_data_count ELSE ?15 END,
-                    sse_comment_count = CASE WHEN sse_comment_count > 0 THEN sse_comment_count ELSE ?16 END,
-                    sse_keepalive_count = CASE WHEN sse_keepalive_count > 0 THEN sse_keepalive_count ELSE ?17 END,
-                    sse_done_count = CASE WHEN sse_done_count > 0 THEN sse_done_count ELSE ?18 END,
-                    parse_error_count = CASE WHEN parse_error_count > 0 THEN parse_error_count ELSE ?19 END,
-                    first_keepalive_ms = COALESCE(first_keepalive_ms, ?20),
-                    last_keepalive_ms = COALESCE(last_keepalive_ms, ?21),
-                    max_gap_between_upstream_events_ms = COALESCE(max_gap_between_upstream_events_ms, ?22),
-                    max_gap_between_data_events_ms = COALESCE(max_gap_between_data_events_ms, ?23),
-                    keepalive_after_last_data_count = CASE WHEN keepalive_after_last_data_count > 0 THEN keepalive_after_last_data_count ELSE ?24 END,
-                    last_data_event_ms = COALESCE(last_data_event_ms, ?25),
-                    bridge_mode = ?26,
-                    status_injected = ?27,
-                    terminal_injected = ?28,
-                    upstream_terminal_type = COALESCE(upstream_terminal_type, ?29)
-                 WHERE id = ?30",
+                    client_response_body_ref = ?2,
+                    stream_kind = ?3,
+                    stream_terminal_seen = ?4,
+                    stream_end_reason = ?5,
+                    stream_error_detail = ?6,
+                    upstream_first_byte_ms = COALESCE(upstream_first_byte_ms, ?7),
+                    client_first_write_ms = ?8,
+                    last_upstream_event_ms = COALESCE(last_upstream_event_ms, ?9),
+                    last_client_write_ms = ?10,
+                    upstream_chunk_count = CASE WHEN upstream_chunk_count > 0 THEN upstream_chunk_count ELSE ?11 END,
+                    upstream_bytes = CASE WHEN upstream_bytes > 0 THEN upstream_bytes ELSE ?12 END,
+                    client_chunk_count = ?13,
+                    client_bytes = ?14,
+                    sse_event_count = CASE WHEN sse_event_count > 0 THEN sse_event_count ELSE ?15 END,
+                    sse_data_count = CASE WHEN sse_data_count > 0 THEN sse_data_count ELSE ?16 END,
+                    sse_comment_count = CASE WHEN sse_comment_count > 0 THEN sse_comment_count ELSE ?17 END,
+                    sse_keepalive_count = CASE WHEN sse_keepalive_count > 0 THEN sse_keepalive_count ELSE ?18 END,
+                    sse_done_count = CASE WHEN sse_done_count > 0 THEN sse_done_count ELSE ?19 END,
+                    parse_error_count = CASE WHEN parse_error_count > 0 THEN parse_error_count ELSE ?20 END,
+                    first_keepalive_ms = COALESCE(first_keepalive_ms, ?21),
+                    last_keepalive_ms = COALESCE(last_keepalive_ms, ?22),
+                    max_gap_between_upstream_events_ms = COALESCE(max_gap_between_upstream_events_ms, ?23),
+                    max_gap_between_data_events_ms = COALESCE(max_gap_between_data_events_ms, ?24),
+                    keepalive_after_last_data_count = CASE WHEN keepalive_after_last_data_count > 0 THEN keepalive_after_last_data_count ELSE ?25 END,
+                    last_data_event_ms = COALESCE(last_data_event_ms, ?26),
+                    bridge_mode = ?27,
+                    status_injected = ?28,
+                    terminal_injected = ?29,
+                    upstream_terminal_type = COALESCE(upstream_terminal_type, ?30)
+                 WHERE id = ?31",
                 params![
-                    log.client_response_body,
+                    client_response_body_inline,
+                    client_response_body_ref,
                     log.stream_kind,
                     log.stream_terminal_seen.map(i32::from),
                     log.stream_end_reason,
@@ -740,7 +959,7 @@ impl Db {
     }
 
     pub fn log_list(&self, limit: i64, offset: i64) -> Result<LogPage> {
-        self.with(|c| {
+        self.with_short(|c| {
             let fetch = limit + 1;
             let mut stmt = c.prepare(&format!(
                 "SELECT {} FROM request_logs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2",
@@ -768,7 +987,7 @@ impl Db {
 
     pub fn usage_summary_last_hours(&self, hours: i64) -> Result<UsageSummary> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let (requests, input, output, cache_read, cache_create): (i64, i64, i64, i64, i64) = c
                 .query_row(
                     "SELECT count(*),
@@ -793,7 +1012,7 @@ impl Db {
     }
 
     pub fn count_logs_since(&self, since: i64) -> Result<i64> {
-        self.with(|c| {
+        self.with_short(|c| {
             let n: i64 = c.query_row(
                 "SELECT count(*) FROM request_logs WHERE started_at >= ?1",
                 params![since],
@@ -823,7 +1042,7 @@ impl Db {
 
     pub fn dashboard_rolling_totals(&self, hours: i64) -> Result<DashboardRollingTotals> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(
                 "SELECT count(*) as total,
                         COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0) as ok,
@@ -873,7 +1092,7 @@ impl Db {
         provider_id: Option<&str>,
         status_ok: Option<bool>,
     ) -> Result<LogPage> {
-        self.with(|c| {
+        self.with_short(|c| {
             // Build dynamic WHERE
             let mut conditions = Vec::<String>::new();
             if let Some(ts) = since {
@@ -922,25 +1141,45 @@ impl Db {
 
     /// Full log row including optional raw bodies (may be large).
     pub fn log_get(&self, id: &str) -> Result<Option<RequestLog>> {
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(&format!(
                 "SELECT {} FROM request_logs WHERE id = ?1",
                 Self::LOG_COLS_FULL
             ))?;
-            let mut rows = stmt.query_map(params![id], row_to_log_detail)?;
+            let mut rows = stmt.query_map(params![id], |r| {
+                let mut log = row_to_log_detail(r)?;
+                let request_body_ref: Option<String> = r.get(55)?;
+                let response_body_ref: Option<String> = r.get(56)?;
+                let client_response_body_ref: Option<String> = r.get(57)?;
+                log.request_body = self.hydrate_body_value(log.request_body, request_body_ref);
+                log.response_body = self.hydrate_body_value(log.response_body, response_body_ref);
+                log.client_response_body =
+                    self.hydrate_body_value(log.client_response_body, client_response_body_ref);
+                Ok(log)
+            })?;
             Ok(rows.next().transpose()?)
         })
     }
 
     pub fn upstream_attempt_insert(&self, attempt: &UpstreamAttemptLog) -> Result<()> {
-        self.with(|c| {
+        let (request_body_inline, request_body_ref) = self.body_value_for_insert(
+            "attempt-request",
+            &attempt.attempt_id,
+            &attempt.request_body,
+        )?;
+        let (response_body_inline, response_body_ref) = self.body_value_for_insert(
+            "attempt-response",
+            &attempt.attempt_id,
+            &attempt.response_body,
+        )?;
+        self.with_short(|c| {
             c.execute(
                 "INSERT INTO upstream_attempt_logs (
-                    attempt_id, request_id, attempt_index, started_at, ended_at,
+                    attempt_id, request_id, attempt_index, wave_index, wave_size, upstream_id, started_at, ended_at,
                     provider_id, credential_id, wire, route_prefix, requested_model, upstream_model,
                     phase, outcome, status_code, upstream_http_status, error_summary,
                     latency_ms, first_token_ms, input_tokens, output_tokens,
-                    cache_read_tokens, cache_creation_tokens,
+                    cache_read_tokens, cache_creation_tokens, estimated_cost_usd,
                     upstream_first_byte_ms, client_first_write_ms,
                     last_upstream_event_ms, last_client_write_ms,
                     upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
@@ -951,13 +1190,14 @@ impl Db {
                     keepalive_after_last_data_count, last_data_event_ms,
                     bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
                     active_upstream_decode_tps_peak, active_downstream_emit_tps_peak,
-                    request_headers, request_body, response_headers, response_body
+                    request_headers, request_body, response_headers, response_body,
+                    request_body_ref, response_body_ref
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5,
+                    ?1, ?2, ?3, ?53, ?54, ?55, ?4, ?5,
                     ?6, ?7, ?8, ?9, ?10, ?11,
                     ?12, ?13, ?14, ?15, ?16,
                     ?17, ?18, ?19, ?20,
-                    ?21, ?22,
+                    ?21, ?22, ?56,
                     ?23, ?24,
                     ?25, ?26,
                     ?27, ?28, ?29, ?30,
@@ -967,7 +1207,7 @@ impl Db {
                     ?39, ?40,
                     ?41, ?42,
                     ?43, ?44, ?45, ?46,
-                    ?47, ?48, ?49, ?50, ?51, ?52
+                    ?47, ?48, ?49, ?50, ?51, ?52, ?57, ?58
                  )",
                 params![
                     attempt.attempt_id,
@@ -1019,22 +1259,57 @@ impl Db {
                     attempt.active_upstream_decode_tps_peak,
                     attempt.active_downstream_emit_tps_peak,
                     attempt.request_headers,
-                    attempt.request_body,
+                    request_body_inline,
                     attempt.response_headers,
-                    attempt.response_body,
+                    response_body_inline,
+                    attempt.wave_index,
+                    attempt.wave_size,
+                    attempt.upstream_id,
+                    attempt.estimated_cost_usd,
+                    request_body_ref,
+                    response_body_ref,
                 ],
             )?;
             Ok(())
+        })?;
+        let day = day_utc(attempt.started_at);
+        let success = matches!(attempt.outcome, UpstreamAttemptOutcome::Success)
+            || attempt
+                .status_code
+                .map(|s| (200..300).contains(&s))
+                .unwrap_or(false);
+        self.with(|c| {
+            upsert_usage_rollup(
+                c,
+                &day,
+                "upstream_attempt",
+                attempt.provider_id.as_deref(),
+                attempt.credential_id.as_deref(),
+                attempt.upstream_id.as_deref(),
+                attempt.wire.as_deref(),
+                attempt.route_prefix.as_deref(),
+                attempt.upstream_model.as_deref(),
+                success,
+                attempt.input_tokens,
+                attempt.output_tokens,
+                attempt.cache_read_tokens,
+                attempt.cache_creation_tokens,
+                &attempt.estimated_cost_usd,
+                attempt.latency_ms,
+                attempt.first_token_ms,
+                now_secs(),
+            )
         })
     }
 
     pub fn upstream_attempt_get(&self, attempt_id: &str) -> Result<Option<UpstreamAttemptLog>> {
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(&format!(
                 "SELECT {} FROM upstream_attempt_logs WHERE attempt_id = ?1",
                 Self::ATTEMPT_COLS
             ))?;
-            let mut rows = stmt.query_map(params![attempt_id], row_to_attempt)?;
+            let mut rows =
+                stmt.query_map(params![attempt_id], |r| self.row_to_attempt_hydrated(r))?;
             Ok(rows.next().transpose()?)
         })
     }
@@ -1043,12 +1318,12 @@ impl Db {
         &self,
         request_id: &str,
     ) -> Result<Vec<UpstreamAttemptLog>> {
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(&format!(
                 "SELECT {} FROM upstream_attempt_logs WHERE request_id = ?1 ORDER BY attempt_index ASC",
                 Self::ATTEMPT_COLS
             ))?;
-            let rows = stmt.query_map(params![request_id], row_to_attempt)?;
+            let rows = stmt.query_map(params![request_id], |r| self.row_to_attempt_hydrated(r))?;
             let mut out = Vec::new();
             for r in rows {
                 out.push(r?);
@@ -1062,18 +1337,227 @@ impl Db {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<UpstreamAttemptLog>> {
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(&format!(
                 "SELECT {} FROM upstream_attempt_logs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2",
                 Self::ATTEMPT_COLS
             ))?;
-            let rows = stmt.query_map(params![limit, offset], row_to_attempt)?;
+            let rows =
+                stmt.query_map(params![limit, offset], |r| self.row_to_attempt_hydrated(r))?;
             let mut out = Vec::new();
             for r in rows {
                 out.push(r?);
             }
             Ok(out)
         })
+    }
+
+    fn row_to_attempt_hydrated(&self, r: &rusqlite::Row) -> rusqlite::Result<UpstreamAttemptLog> {
+        let mut attempt = row_to_attempt(r)?;
+        let request_body_ref: Option<String> = r.get(56)?;
+        let response_body_ref: Option<String> = r.get(57)?;
+        attempt.request_body = self.hydrate_body_value(attempt.request_body, request_body_ref);
+        attempt.response_body = self.hydrate_body_value(attempt.response_body, response_body_ref);
+        Ok(attempt)
+    }
+
+    pub fn usage_rollup_list(
+        &self,
+        limit: i64,
+        offset: i64,
+        since_day: Option<&str>,
+        until_day: Option<&str>,
+        scope: Option<&str>,
+        provider_id: Option<&str>,
+        credential_id: Option<&str>,
+        upstream_id: Option<&str>,
+    ) -> Result<vibe_protocol::UsageRollupPage> {
+        self.with(|c| {
+            let mut conditions = Vec::<String>::new();
+            let esc = |v: &str| v.replace('\'', "''");
+            if let Some(v) = since_day.filter(|v| !v.is_empty()) {
+                conditions.push(format!("day >= '{}'", esc(v)));
+            }
+            if let Some(v) = until_day.filter(|v| !v.is_empty()) {
+                conditions.push(format!("day <= '{}'", esc(v)));
+            }
+            if let Some(v) = scope.filter(|v| !v.is_empty()) {
+                conditions.push(format!("scope = '{}'", esc(v)));
+            }
+            if let Some(v) = provider_id.filter(|v| !v.is_empty()) {
+                conditions.push(format!("provider_id = '{}'", esc(v)));
+            }
+            if let Some(v) = credential_id.filter(|v| !v.is_empty()) {
+                conditions.push(format!("credential_id = '{}'", esc(v)));
+            }
+            if let Some(v) = upstream_id.filter(|v| !v.is_empty()) {
+                conditions.push(format!("upstream_id = '{}'", esc(v)));
+            }
+            let where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+            let fetch = limit + 1;
+            let mut stmt = c.prepare(&format!(
+                "SELECT day, scope, provider_id, credential_id, upstream_id, wire, route_prefix, upstream_model,
+                        requests, successes, failures,
+                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                        estimated_cost_micros,
+                        CASE WHEN latency_count > 0 THEN CAST(latency_sum_ms AS REAL) / latency_count ELSE NULL END,
+                        CASE WHEN first_token_count > 0 THEN CAST(first_token_sum_ms AS REAL) / first_token_count ELSE NULL END
+                 FROM usage_daily_rollups {where_clause}
+                 ORDER BY day DESC, scope ASC, requests DESC LIMIT {fetch} OFFSET {offset}"
+            ))?;
+            let rows = stmt.query_map([], |r| {
+                let micros: i64 = r.get(15)?;
+                Ok(vibe_protocol::UsageDailyRollup {
+                    day: r.get(0)?,
+                    scope: r.get(1)?,
+                    provider_id: r.get(2)?,
+                    credential_id: r.get(3)?,
+                    upstream_id: r.get(4)?,
+                    wire: r.get(5)?,
+                    route_prefix: r.get(6)?,
+                    upstream_model: r.get(7)?,
+                    requests: r.get(8)?,
+                    successes: r.get(9)?,
+                    failures: r.get(10)?,
+                    input_tokens: r.get(11)?,
+                    output_tokens: r.get(12)?,
+                    cache_read_tokens: r.get(13)?,
+                    cache_creation_tokens: r.get(14)?,
+                    estimated_cost_usd: micros_to_usd(micros),
+                    latency_avg_ms: r.get(16)?,
+                    first_token_avg_ms: r.get(17)?,
+                })
+            })?;
+            let mut items = Vec::new();
+            for r in rows {
+                items.push(r?);
+            }
+            let has_more = items.len() > limit as usize;
+            if has_more {
+                items.pop();
+            }
+            let total = offset + items.len() as i64;
+            Ok(vibe_protocol::UsageRollupPage {
+                items,
+                total,
+                limit,
+                offset,
+                has_more,
+            })
+        })
+    }
+
+    pub fn prune_short_logs(&self, policy: &ShortLogRetentionPolicy) -> Result<ShortLogPruneStats> {
+        let cutoff = now_secs().saturating_sub(policy.max_age_secs.max(0));
+        let mut stats = self.with_short(|c| {
+            let db_bytes = c
+                .path()
+                .and_then(|p| std::fs::metadata(p).ok().map(|m| m.len() as i64))
+                .unwrap_or(0);
+
+            let attempt_deleted = c.execute(
+                "DELETE FROM upstream_attempt_logs WHERE started_at < ?1",
+                params![cutoff],
+            )? as i64;
+            let mut request_deleted = c.execute(
+                "DELETE FROM request_logs WHERE started_at < ?1",
+                params![cutoff],
+            )? as i64;
+            let mut app_deleted =
+                c.execute("DELETE FROM app_logs WHERE ts < ?1", params![cutoff])? as i64;
+
+            if policy.max_request_rows > 0 {
+                request_deleted += c.execute(
+                    "DELETE FROM request_logs
+                     WHERE id IN (
+                        SELECT id FROM request_logs
+                        ORDER BY started_at DESC
+                        LIMIT -1 OFFSET ?1
+                     )",
+                    params![policy.max_request_rows],
+                )? as i64;
+            }
+            if policy.max_app_log_rows > 0 {
+                app_deleted += c.execute(
+                    "DELETE FROM app_logs
+                     WHERE id IN (
+                        SELECT id FROM app_logs
+                        ORDER BY ts DESC, id DESC
+                        LIMIT -1 OFFSET ?1
+                     )",
+                    params![policy.max_app_log_rows],
+                )? as i64;
+            }
+
+            // Size guard: progressively drop oldest raw requests until the main DB
+            // is below target. Rollups stay in usage_daily_rollups.
+            if policy.max_db_bytes > 0 && db_bytes > policy.max_db_bytes {
+                request_deleted += c.execute(
+                    "DELETE FROM request_logs
+                     WHERE id IN (
+                        SELECT id FROM request_logs
+                        ORDER BY started_at ASC
+                        LIMIT 1000
+                     )",
+                    [],
+                )? as i64;
+            }
+
+            c.execute(
+                "INSERT INTO log_retention_state (
+                    id, last_pruned_at, last_request_rows_deleted,
+                    last_attempt_rows_deleted, last_app_rows_deleted, last_db_bytes
+                 ) VALUES ('default', ?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    last_pruned_at = excluded.last_pruned_at,
+                    last_request_rows_deleted = excluded.last_request_rows_deleted,
+                    last_attempt_rows_deleted = excluded.last_attempt_rows_deleted,
+                    last_app_rows_deleted = excluded.last_app_rows_deleted,
+                    last_db_bytes = excluded.last_db_bytes",
+                params![
+                    now_secs(),
+                    request_deleted,
+                    attempt_deleted,
+                    app_deleted,
+                    db_bytes
+                ],
+            )?;
+
+            Ok(ShortLogPruneStats {
+                request_rows_deleted: request_deleted,
+                attempt_rows_deleted: attempt_deleted,
+                app_rows_deleted: app_deleted,
+                db_bytes,
+                ..Default::default()
+            })
+        })?;
+
+        if let Some(store) = self.body_store() {
+            let body = store.prune(crate::body_store::BodyPruneOptions {
+                max_age_secs: Some(policy.body_max_age_secs),
+                max_files: Some(policy.body_max_files),
+                max_bytes: Some(policy.body_max_bytes),
+            })?;
+            stats.body_files_deleted = body.files_deleted;
+            stats.body_bytes_deleted = body.bytes_deleted;
+            stats.body_bytes = body.bytes_remaining;
+            let body_files_deleted = stats.body_files_deleted as i64;
+            let body_bytes = stats.body_bytes as i64;
+            self.with_short(|c| {
+                c.execute(
+                    "UPDATE log_retention_state
+                     SET last_body_files_deleted = ?1, last_body_bytes = ?2
+                     WHERE id = 'default'",
+                    params![body_files_deleted, body_bytes],
+                )?;
+                Ok(())
+            })?;
+        }
+        Ok(stats)
     }
 
     pub fn app_log_insert(&self, ev: &AppLogEvent) -> Result<()> {
@@ -1083,7 +1567,7 @@ impl Db {
             AppLogLevel::Warn => "warn",
             AppLogLevel::Error => "error",
         };
-        self.with(|c| {
+        self.with_short(|c| {
             c.execute(
                 "INSERT INTO app_logs (ts, level, category, message, detail, event_type, payload_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1102,7 +1586,7 @@ impl Db {
     }
 
     pub fn app_log_list(&self, limit: i64, since: Option<i64>) -> Result<Vec<AppLogEvent>> {
-        self.with(|c| {
+        self.with_short(|c| {
             let since_clause = since
                 .map(|t| format!("WHERE ts >= {t}"))
                 .unwrap_or_default();
@@ -1149,7 +1633,7 @@ impl Db {
     /// Per-model request count and token totals for the last N hours.
     pub fn top_models(&self, hours: i64, limit: i64) -> Result<Vec<vibe_protocol::ModelStat>> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(
                 "SELECT COALESCE(NULLIF(TRIM(upstream_model), ''), NULLIF(TRIM(requested_model), ''), 'unknown') as model,
                         count(*) as reqs,
@@ -1177,10 +1661,10 @@ impl Db {
     /// Per-provider aggregated stats for the last N hours.
     pub fn per_provider_stats(&self, hours: i64) -> Result<Vec<vibe_protocol::ProviderStat>> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(
                 "SELECT l.provider_id,
-                        COALESCE(p.name, l.provider_id, 'unknown') as name,
+                        COALESCE(l.provider_id, 'unknown') as name,
                         count(*) as total,
                         sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as ok,
                         sum(CASE WHEN l.status_code IS NULL OR l.status_code >= 400 THEN 1 ELSE 0 END) as err,
@@ -1196,7 +1680,6 @@ impl Db {
                         sum(CASE WHEN l.status_code BETWEEN 400 AND 499 AND l.status_code != 429 THEN 1 ELSE 0 END),
                         sum(CASE WHEN l.status_code >= 500 AND l.status_code != 503 THEN 1 ELSE 0 END)
                  FROM request_logs l
-                 LEFT JOIN providers p ON p.id = l.provider_id
                  WHERE l.started_at >= ?1 AND l.provider_id IS NOT NULL
                  GROUP BY l.provider_id",
             )?;
@@ -1252,7 +1735,7 @@ impl Db {
         self.with(|c| {
             let mut stmt = c.prepare(
                 "SELECT l.provider_id,
-                        COALESCE(p.name, l.provider_id, 'unknown') as name,
+                        COALESCE(l.provider_id, 'unknown') as name,
                         count(*) as total,
                         sum(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as ok,
                         sum(CASE WHEN l.status_code IS NULL OR l.status_code >= 400 THEN 1 ELSE 0 END) as err,
@@ -1315,7 +1798,7 @@ impl Db {
     /// Rolling-window output speed (tokens/sec) across successful requests with latency.
     pub fn output_tokens_per_sec(&self, hours: i64) -> Result<f64> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(
                 "SELECT
                     COALESCE(sum(output_tokens), 0) as out_tokens,
@@ -1336,7 +1819,7 @@ impl Db {
     /// Rolling-window decode-phase output speed: tokens per wall second after first token.
     pub fn decode_output_tokens_per_sec(&self, hours: i64) -> Result<f64> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(
                 "SELECT
                     COALESCE(sum(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms IS NOT NULL AND first_token_ms IS NOT NULL AND latency_ms > first_token_ms THEN output_tokens ELSE 0 END), 0) as out_tokens,
@@ -1360,7 +1843,7 @@ impl Db {
         hours: i64,
     ) -> Result<Vec<CredentialRollingStat>> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(
                 "SELECT l.credential_id,
                         count(*) as total,
@@ -1394,7 +1877,7 @@ impl Db {
     /// Rolling-window stats grouped by credential across all providers.
     pub fn credential_stats_all(&self, hours: i64) -> Result<Vec<CredentialRollingStat>> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(
                 "SELECT l.credential_id,
                         count(*) as total,
@@ -1566,7 +2049,7 @@ impl Db {
 
     pub fn latency_percentiles(&self, hours: i64) -> Result<(i64, i64)> {
         let since = now_secs() - hours * 3600;
-        self.with(|c| {
+        self.with_short(|c| {
             let mut stmt = c.prepare(
                 "SELECT latency_ms FROM request_logs
                  WHERE started_at >= ?1 AND latency_ms IS NOT NULL
@@ -1735,14 +2218,15 @@ impl Db {
          first_keepalive_ms, last_keepalive_ms,
          max_gap_between_upstream_events_ms, max_gap_between_data_events_ms,
          keepalive_after_last_data_count, last_data_event_ms,
-         bridge_mode, status_injected, terminal_injected, upstream_terminal_type";
+         bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
+         request_body_ref, response_body_ref, client_response_body_ref";
 
     const ATTEMPT_COLS: &'static str =
-        "attempt_id, request_id, attempt_index, started_at, ended_at,
+        "attempt_id, request_id, attempt_index, wave_index, wave_size, upstream_id, started_at, ended_at,
          provider_id, credential_id, wire, route_prefix, requested_model, upstream_model,
          phase, outcome, status_code, upstream_http_status, error_summary,
          latency_ms, first_token_ms, input_tokens, output_tokens,
-         cache_read_tokens, cache_creation_tokens,
+         cache_read_tokens, cache_creation_tokens, estimated_cost_usd,
          upstream_first_byte_ms, client_first_write_ms,
          last_upstream_event_ms, last_client_write_ms,
          upstream_chunk_count, upstream_bytes, client_chunk_count, client_bytes,
@@ -1753,7 +2237,8 @@ impl Db {
          keepalive_after_last_data_count, last_data_event_ms,
          bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
          active_upstream_decode_tps_peak, active_downstream_emit_tps_peak,
-         request_headers, request_body, response_headers, response_body";
+         request_headers, request_body, response_headers, response_body,
+         request_body_ref, response_body_ref";
 
     pub fn credential_list_for_provider(
         &self,
@@ -2238,6 +2723,8 @@ fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
         name: r.get(1)?,
         group_name: cfg.group_name,
         avatar_url: cfg.avatar_url,
+        upstreams: vec![],
+        upstream_summary: None,
         kind,
         base_url,
         protocols,
@@ -2305,6 +2792,8 @@ fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Crede
         notes: r.get(5)?,
         enabled: r.get::<_, i64>(6)? != 0,
         priority: r.get(7)?,
+        upstream_group: r.get(35)?,
+        price_multiplier: r.get::<_, Option<f64>>(36)?.unwrap_or(1.0),
         rl_requests_limit: r.get(8)?,
         rl_requests_remaining: r.get(9)?,
         rl_requests_reset_at: r.get(10)?,
@@ -2332,8 +2821,6 @@ fn row_to_credential(r: &rusqlite::Row) -> rusqlite::Result<vibe_protocol::Crede
         upstream_username: r.get(32)?,
         upstream_has_session,
         upstream_session_expires_at: r.get(34)?,
-        upstream_group: r.get(35)?,
-        price_multiplier: r.get::<_, Option<f64>>(36)?.unwrap_or(1.0),
         windows,
         disabled_reason: r.get(38)?,
         disabled_at: r.get(39)?,
@@ -2359,65 +2846,69 @@ fn row_to_plan_snapshot(
 }
 
 fn row_to_attempt(r: &rusqlite::Row) -> rusqlite::Result<UpstreamAttemptLog> {
-    let phase_s: String = r.get(11)?;
-    let outcome_s: String = r.get(12)?;
+    let phase_s: String = r.get(14)?;
+    let outcome_s: String = r.get(15)?;
     Ok(UpstreamAttemptLog {
         attempt_id: r.get(0)?,
         request_id: r.get(1)?,
         attempt_index: r.get(2)?,
-        started_at: r.get(3)?,
-        ended_at: r.get(4)?,
-        provider_id: r.get(5)?,
-        credential_id: r.get(6)?,
-        wire: r.get(7)?,
-        route_prefix: r.get(8)?,
-        requested_model: r.get(9)?,
-        upstream_model: r.get(10)?,
+        wave_index: r.get(3)?,
+        wave_size: r.get(4)?,
+        upstream_id: r.get(5)?,
+        started_at: r.get(6)?,
+        ended_at: r.get(7)?,
+        provider_id: r.get(8)?,
+        credential_id: r.get(9)?,
+        wire: r.get(10)?,
+        route_prefix: r.get(11)?,
+        requested_model: r.get(12)?,
+        upstream_model: r.get(13)?,
         phase: upstream_attempt_phase_from_str(&phase_s).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, e.into())
+            rusqlite::Error::FromSqlConversionFailure(14, rusqlite::types::Type::Text, e.into())
         })?,
         outcome: upstream_attempt_outcome_from_str(&outcome_s).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, e.into())
+            rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, e.into())
         })?,
-        status_code: r.get(13)?,
-        upstream_http_status: r.get(14)?,
-        error_summary: r.get(15)?,
-        latency_ms: r.get(16)?,
-        first_token_ms: r.get(17)?,
-        input_tokens: r.get(18)?,
-        output_tokens: r.get(19)?,
-        cache_read_tokens: r.get(20)?,
-        cache_creation_tokens: r.get(21)?,
-        upstream_first_byte_ms: r.get(22)?,
-        client_first_write_ms: r.get(23)?,
-        last_upstream_event_ms: r.get(24)?,
-        last_client_write_ms: r.get(25)?,
-        upstream_chunk_count: r.get(26)?,
-        upstream_bytes: r.get(27)?,
-        client_chunk_count: r.get(28)?,
-        client_bytes: r.get(29)?,
-        sse_event_count: r.get(30)?,
-        sse_data_count: r.get(31)?,
-        sse_comment_count: r.get(32)?,
-        sse_keepalive_count: r.get(33)?,
-        sse_done_count: r.get(34)?,
-        parse_error_count: r.get(35)?,
-        first_keepalive_ms: r.get(36)?,
-        last_keepalive_ms: r.get(37)?,
-        max_gap_between_upstream_events_ms: r.get(38)?,
-        max_gap_between_data_events_ms: r.get(39)?,
-        keepalive_after_last_data_count: r.get(40)?,
-        last_data_event_ms: r.get(41)?,
-        bridge_mode: r.get(42)?,
-        status_injected: r.get::<_, i32>(43)? != 0,
-        terminal_injected: r.get::<_, i32>(44)? != 0,
-        upstream_terminal_type: r.get(45)?,
-        active_upstream_decode_tps_peak: r.get(46)?,
-        active_downstream_emit_tps_peak: r.get(47)?,
-        request_headers: r.get(48)?,
-        request_body: r.get(49)?,
-        response_headers: r.get(50)?,
-        response_body: r.get(51)?,
+        status_code: r.get(16)?,
+        upstream_http_status: r.get(17)?,
+        error_summary: r.get(18)?,
+        latency_ms: r.get(19)?,
+        first_token_ms: r.get(20)?,
+        input_tokens: r.get(21)?,
+        output_tokens: r.get(22)?,
+        cache_read_tokens: r.get(23)?,
+        cache_creation_tokens: r.get(24)?,
+        estimated_cost_usd: r.get(25)?,
+        upstream_first_byte_ms: r.get(26)?,
+        client_first_write_ms: r.get(27)?,
+        last_upstream_event_ms: r.get(28)?,
+        last_client_write_ms: r.get(29)?,
+        upstream_chunk_count: r.get(30)?,
+        upstream_bytes: r.get(31)?,
+        client_chunk_count: r.get(32)?,
+        client_bytes: r.get(33)?,
+        sse_event_count: r.get(34)?,
+        sse_data_count: r.get(35)?,
+        sse_comment_count: r.get(36)?,
+        sse_keepalive_count: r.get(37)?,
+        sse_done_count: r.get(38)?,
+        parse_error_count: r.get(39)?,
+        first_keepalive_ms: r.get(40)?,
+        last_keepalive_ms: r.get(41)?,
+        max_gap_between_upstream_events_ms: r.get(42)?,
+        max_gap_between_data_events_ms: r.get(43)?,
+        keepalive_after_last_data_count: r.get(44)?,
+        last_data_event_ms: r.get(45)?,
+        bridge_mode: r.get(46)?,
+        status_injected: r.get::<_, i32>(47)? != 0,
+        terminal_injected: r.get::<_, i32>(48)? != 0,
+        upstream_terminal_type: r.get(49)?,
+        active_upstream_decode_tps_peak: r.get(50)?,
+        active_downstream_emit_tps_peak: r.get(51)?,
+        request_headers: r.get(52)?,
+        request_body: r.get(53)?,
+        response_headers: r.get(54)?,
+        response_body: r.get(55)?,
     })
 }
 

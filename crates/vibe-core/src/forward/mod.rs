@@ -350,6 +350,19 @@ pub(crate) fn persist_request_log(state: &AppState, log: RequestLog) {
     state
         .realtime
         .finished(&log.id, log.status_code, log.error.clone());
+    persist_request_log_to_db(state, log);
+}
+
+fn persist_request_log_to_db(state: &AppState, log: RequestLog) {
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        let res = tokio::task::spawn_blocking(move || db.log_insert(&log)).await;
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(?e, "persist request log failed"),
+            Err(e) => tracing::warn!(?e, "persist request log task failed"),
+        }
+    });
 }
 
 pub(crate) fn publish_request_started(
@@ -376,14 +389,33 @@ pub(crate) fn publish_request_started(
 }
 
 pub(crate) fn persist_request_log_placeholder(
-    _state: &AppState,
-    _id: &str,
-    _started_at: i64,
-    _app: &Option<String>,
-    _log_ctx: &LogCtx,
-    _provider_id: Option<&str>,
-    _requested_model: &str,
+    state: &AppState,
+    id: &str,
+    started_at: i64,
+    app: &Option<String>,
+    log_ctx: &LogCtx,
+    provider_id: Option<&str>,
+    requested_model: &str,
 ) {
+    let started_instant = Instant::now();
+    let log = build_log(
+        log_ctx,
+        id,
+        started_at,
+        &started_instant,
+        app,
+        provider_id,
+        requested_model,
+        "",
+        None,
+        None,
+        None,
+        None,
+        Usage::default(),
+        None,
+        None,
+    );
+    persist_request_log_to_db(state, log);
 }
 
 #[derive(Clone, Debug)]
@@ -391,6 +423,9 @@ pub(crate) struct AttemptCtx {
     pub attempt_id: String,
     pub request_id: String,
     pub attempt_index: i32,
+    pub wave_index: i32,
+    pub wave_size: i32,
+    pub upstream_id: Option<String>,
     pub started_at: i64,
     pub provider_id: Option<String>,
     pub credential_id: Option<String>,
@@ -401,6 +436,9 @@ pub(crate) struct AttemptCtx {
 pub(crate) fn new_attempt_ctx(
     request_id: &str,
     attempt_index: i32,
+    wave_index: i32,
+    wave_size: i32,
+    upstream_id: Option<&str>,
     started_at: i64,
     provider_id: Option<&str>,
     credential_id: Option<&str>,
@@ -411,6 +449,9 @@ pub(crate) fn new_attempt_ctx(
         attempt_id: uuid::Uuid::new_v4().to_string(),
         request_id: request_id.to_string(),
         attempt_index,
+        wave_index,
+        wave_size,
+        upstream_id: upstream_id.map(str::to_string),
         started_at,
         provider_id: provider_id.map(str::to_string),
         credential_id: credential_id.map(str::to_string),
@@ -494,6 +535,9 @@ pub(crate) fn attempt_log_from_parts(
         attempt_id: attempt.attempt_id.clone(),
         request_id: attempt.request_id.clone(),
         attempt_index: attempt.attempt_index,
+        wave_index: attempt.wave_index,
+        wave_size: attempt.wave_size,
+        upstream_id: attempt.upstream_id.clone(),
         started_at: attempt.started_at,
         ended_at: Some(chrono::Utc::now().timestamp()),
         provider_id: attempt.provider_id.clone(),
@@ -515,6 +559,7 @@ pub(crate) fn attempt_log_from_parts(
         output_tokens: usage.output_tokens,
         cache_read_tokens: usage.cache_read_tokens,
         cache_creation_tokens: usage.cache_creation_tokens,
+        estimated_cost_usd: usage.estimated_cost_usd(&attempt.upstream_model),
         upstream_first_byte_ms: None,
         client_first_write_ms: None,
         last_upstream_event_ms: None,
@@ -548,7 +593,17 @@ pub(crate) fn attempt_log_from_parts(
     }
 }
 
-pub(crate) fn persist_upstream_attempt_log(_state: &AppState, _attempt: UpstreamAttemptLog) {}
+pub(crate) fn persist_upstream_attempt_log(state: &AppState, attempt: UpstreamAttemptLog) {
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        let res = tokio::task::spawn_blocking(move || db.upstream_attempt_insert(&attempt)).await;
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(?e, "persist upstream attempt log failed"),
+            Err(e) => tracing::warn!(?e, "persist upstream attempt log task failed"),
+        }
+    });
+}
 
 pub(crate) fn mark_provider_health(
     state: &AppState,
@@ -769,7 +824,7 @@ pub(crate) async fn prepare_forward_once(
     for mut epick in expanded_picks {
         let provider = epick.provider;
         let upstream_model = epick.upstream_model;
-        let cb_key = epick.cb_key.clone();
+        let cb_key = epick.upstream.cb_key.clone();
         let log_ctx = LogCtx {
             wire,
             route_prefix: route_prefix.clone(),
@@ -1552,9 +1607,17 @@ pub async fn forward(
     // `CancellationToken` aborting losers. Between waves we serialize, so a
     // single healthy upstream is never wasted in parallel with itself.
     let waves = selector::build_waves(expanded_picks, &state.cb);
-    for wave in waves {
+    for (wave_index, wave) in waves.into_iter().enumerate() {
         let n = wave.len() as i32;
-        match race::run_wave(state.clone(), wave, pick_ctx.clone(), attempt_index).await {
+        match race::run_wave(
+            state.clone(),
+            wave,
+            pick_ctx.clone(),
+            attempt_index,
+            wave_index as i32,
+        )
+        .await
+        {
             race::WaveOutcome::Final(resp) => return resp,
             race::WaveOutcome::AllNonTerminal {
                 last_error: err,
@@ -2153,12 +2216,14 @@ pub(crate) fn persist_log(state: &AppState, log: RequestLog) {
     state
         .realtime
         .finished(&log.id, log.status_code, log.error.clone());
+    persist_request_log_to_db(state, log);
 }
 
 async fn finalize_stream_request_log(state: AppState, log: RequestLog) {
     state
         .realtime
         .finished(&log.id, log.status_code, log.error.clone());
+    persist_request_log_to_db(&state, log);
 }
 
 pub(crate) fn fire_health(

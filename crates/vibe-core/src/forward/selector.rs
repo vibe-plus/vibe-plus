@@ -23,14 +23,15 @@ pub struct CredOAuth {
 pub struct ExpandedPick {
     pub provider: vibe_protocol::Provider,
     pub upstream_model: String,
-    /// Circuit-breaker + rate-limit key: credential_id when present, else provider_id.
-    pub cb_key: String,
     /// auth_ref scheme (keyring:, env:, passthrough, …). Mutually exclusive with `oauth`.
     pub auth_ref: Option<String>,
     /// OAuth direct-storage tokens. Mutually exclusive with `auth_ref`.
     pub oauth: Option<CredOAuth>,
     pub credential_id: Option<String>,
     pub credential: Option<Credential>,
+    /// Runtime upstream unit synthesized from provider endpoint + credential.
+    /// `provider` remains the UI/profile object; gateway selection operates on this unit.
+    pub upstream: vibe_protocol::Upstream,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,14 +80,15 @@ pub fn expand_picks(
                     } else {
                         (c.auth_ref.clone(), None)
                     };
+                    let upstream = runtime_upstream_for_credential(&pick.provider, c);
                     let epick = ExpandedPick {
                         provider: pick.provider.clone(),
                         upstream_model: pick.upstream_model.clone(),
-                        cb_key: c.id.clone(),
                         auth_ref,
                         oauth,
                         credential_id: Some(c.id.clone()),
                         credential: Some(c.clone()),
+                        upstream,
                     };
                     let rate_limited = cred_is_rate_limited(c, now);
                     let defer_plan = !rate_limited
@@ -121,14 +123,15 @@ pub fn expand_picks(
                     .as_deref()
                     .is_some_and(|s| !s.trim().is_empty());
                 if has_provider_auth {
+                    let upstream = runtime_upstream_for_provider_auth(&pick.provider);
                     out.push(ExpandedPick {
-                        cb_key: pick.provider.id.clone(),
                         auth_ref: pick.provider.auth_ref.clone(),
                         oauth: None,
                         provider: pick.provider,
                         upstream_model: pick.upstream_model,
                         credential_id: None,
                         credential: None,
+                        upstream,
                     });
                 } else {
                     tracing::debug!(
@@ -142,6 +145,37 @@ pub fn expand_picks(
     }
     out.extend(deferred);
     out
+}
+
+fn runtime_upstream_for_credential(
+    provider: &vibe_protocol::Provider,
+    c: &Credential,
+) -> vibe_protocol::Upstream {
+    vibe_protocol::Upstream {
+        id: format!("{}:{}", provider.id, c.id),
+        provider_id: provider.id.clone(),
+        kind: provider.kind,
+        base_url: provider.base_url.clone(),
+        credential_id: Some(c.id.clone()),
+        cb_key: c.id.clone(),
+        enabled: provider.enabled && c.enabled,
+        priority: provider.priority + c.priority,
+    }
+}
+
+fn runtime_upstream_for_provider_auth(
+    provider: &vibe_protocol::Provider,
+) -> vibe_protocol::Upstream {
+    vibe_protocol::Upstream {
+        id: format!("{}:provider", provider.id),
+        provider_id: provider.id.clone(),
+        kind: provider.kind,
+        base_url: provider.base_url.clone(),
+        credential_id: None,
+        cb_key: provider.id.clone(),
+        enabled: provider.enabled,
+        priority: provider.priority,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +234,7 @@ pub fn build_waves(picks: Vec<ExpandedPick>, cb: &CircuitBreakers) -> Vec<Vec<Ex
     let mut half_open = Vec::new();
     let mut closed = Vec::new();
     for pick in picks {
-        match cb.state_of(&pick.cb_key) {
+        match cb.state_of(&pick.upstream.cb_key) {
             State::Open => open.push(pick),
             State::HalfOpen => half_open.push(pick),
             State::Closed => closed.push(pick),
@@ -334,6 +368,8 @@ mod tests {
             name: id.into(),
             group_name: None,
             avatar_url: None,
+            upstreams: vec![],
+            upstream_summary: None,
             kind: ProviderKind::OpenaiChat,
             base_url: "https://example.com".into(),
             protocols: vec![],
@@ -363,11 +399,20 @@ mod tests {
         ExpandedPick {
             provider: make_provider(provider_id, None),
             upstream_model: "m".into(),
-            cb_key: cred_id.unwrap_or(provider_id).to_string(),
             auth_ref: None,
             oauth: None,
             credential_id: cred_id.map(str::to_string),
             credential: None,
+            upstream: vibe_protocol::Upstream {
+                id: format!("{provider_id}:{}", cred_id.unwrap_or("provider")),
+                provider_id: provider_id.into(),
+                kind: ProviderKind::OpenaiChat,
+                base_url: "https://example.com".into(),
+                credential_id: cred_id.map(str::to_string),
+                cb_key: cred_id.unwrap_or(provider_id).into(),
+                enabled: true,
+                priority: 10,
+            },
         }
     }
 

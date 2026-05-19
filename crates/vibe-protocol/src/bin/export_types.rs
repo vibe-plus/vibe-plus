@@ -12,6 +12,8 @@ use vibe_protocol::*;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     Provider::export_all()?;
     ProviderProtocol::export_all()?;
+    Upstream::export_all()?;
+    ProviderUpstreamSummary::export_all()?;
     ProviderSpeedtestResult::export_all()?;
     ModelAlias::export_all()?;
     ProviderKind::export_all()?;
@@ -20,6 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     WebCompatibility::export_all()?;
     Status::export_all()?;
     UsageSummary::export_all()?;
+    UsageDailyRollup::export_all()?;
+    UsageRollupPage::export_all()?;
     ClientStatus::export_all()?;
     ClientTakeoverResult::export_all()?;
     Health::export_all()?;

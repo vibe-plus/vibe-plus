@@ -9,6 +9,7 @@ pub async fn run() -> Result<()> {
     let base_url = gateway::ensure_running(port).await?;
     println!("vibe is ready at {base_url}");
     auto_takeover(&base_url);
+    auto_unify_codex_history();
     ui::open_dashboard().await
 }
 
@@ -21,4 +22,19 @@ fn auto_takeover(base_url: &str) {
             Err(e) => eprintln!("  [warning]  {target}: {e}"),
         }
     }
+}
+
+/// Unify Codex local history metadata under `vibeplus`. Non-fatal.
+fn auto_unify_codex_history() {
+    let Some(summary) = vibe_core::codex_history::try_auto_unify() else {
+        return;
+    };
+    let changes = summary.sqlite_rows_changed + summary.rollout_fields_changed;
+    if changes == 0 {
+        return;
+    }
+    println!(
+        "  [codex-history] 已统一聊天记录（sqlite {} 行，rollout {} 处）",
+        summary.sqlite_rows_changed, summary.rollout_fields_changed
+    );
 }

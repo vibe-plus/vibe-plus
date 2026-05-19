@@ -43,6 +43,16 @@ export type Credential = {
    */
   oauth_expires_at: bigint | null;
   /**
+   * User-facing provider group/pool selected on an upstream management platform.
+   * Distinct from runtime [`Upstream`]: the gateway combines this credential
+   * with each provider endpoint to create upstream units.
+   */
+  upstream_group: string | null;
+  /**
+   * Cost multiplier relative to official pricing (default 1.0).
+   */
+  price_multiplier: number;
+  /**
    * Upstream rate-limit headers — updated after every response.
    */
   rl_requests_limit: bigint | null;
@@ -97,15 +107,16 @@ export type Credential = {
    */
   upstream_session_expires_at: bigint | null;
   /**
-   * Sub2API group name/ID this credential is pinned to.
-   */
-  upstream_group: string | null;
-  /**
-   * Cost multiplier relative to official pricing (default 1.0).
-   */
-  price_multiplier: number;
-  /**
    * Rolling-window usage snapshots fetched from the upstream platform.
    */
   windows: Array<UsageWindow>;
+  /**
+   * Why this credential was auto-disabled (e.g. "HTTP 401 from <provider>").
+   * Cleared when an operator re-enables the credential.
+   */
+  disabled_reason: string | null;
+  /**
+   * Unix seconds when this credential was auto-disabled.
+   */
+  disabled_at: bigint | null;
 };

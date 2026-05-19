@@ -90,11 +90,19 @@ pub async fn try_forward_official_codex_ws(
         None,
         &prepared.requested_model,
     );
+    let upstream_id = prepared
+        .credential_id
+        .as_deref()
+        .map(|cid| format!("{}:{}", prepared.provider.id, cid))
+        .unwrap_or_else(|| format!("{}:provider", prepared.provider.id));
     let attempt = forward::new_attempt_ctx(
         &prepared.log_id,
         1,
+        0,
+        1,
+        Some(upstream_id.as_str()),
         prepared.started_at,
-        Some(&prepared.provider.id),
+        Some(prepared.provider.id.as_str()),
         prepared.credential_id.as_deref(),
         &prepared.requested_model,
         &prepared.upstream_model,
