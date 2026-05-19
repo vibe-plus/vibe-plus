@@ -18,6 +18,10 @@ export type DashboardStats = {
    * Aggregates below use this rolling window (same as `hours` query).
    */
   requests_in_window: bigint;
+  /**
+   * Estimated USD cost summed across the rolling window.
+   */
+  estimated_cost_usd_in_window: string;
   success_rate_in_window: number;
   input_tokens_in_window: bigint;
   output_tokens_in_window: bigint;

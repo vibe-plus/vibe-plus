@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     WebCompatibility::export_all()?;
     Status::export_all()?;
     UsageSummary::export_all()?;
+    CredentialQuotaStatus::export_all()?;
     UsageDailyRollup::export_all()?;
     UsageRollupPage::export_all()?;
     ClientStatus::export_all()?;

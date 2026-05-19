@@ -4,6 +4,8 @@ import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import {
   api,
+  type Credential,
+  type Provider,
   type RequestLog,
   type UpstreamAttemptLog,
   type RealtimeSnapshot,
@@ -21,6 +23,9 @@ import type { vp_icon_name } from "../components/vp-icon.vue";
 import EntityChip from "../components/ui/entity-chip.vue";
 import AttemptRow from "../components/observability/attempt-row.vue";
 import Sparkline from "../components/observability/sparkline.vue";
+import { resolveProviderLabel } from "../utils/provider-display.ts";
+import { credentialPrimaryAccountLabel } from "../utils/providers-display.ts";
+import { protocolWireLetter } from "../utils/protocol-label.ts";
 
 const route = useRoute();
 const router = useRouter();
@@ -96,16 +101,19 @@ const sparkUsd = computed(() => seriesOf((s) => s.active_cost_usd_per_hour ?? 0)
 const POLL_MS = 2_000;
 const attempts = ref<UpstreamAttemptLog[]>([]);
 const requests = ref<RequestLog[]>([]);
+const providers = ref<Provider[]>([]);
+const credentialsByProvider = ref<Record<string, Credential[]>>({});
 const recordsLoading = ref(false);
 const recordsError = ref<string | null>(null);
+const entitiesError = ref<string | null>(null);
 let pollTimer: number | null = null;
 
 async function loadRecords() {
   recordsLoading.value = true;
   try {
     const [attemptsRes, requestsRes] = await Promise.all([
-      api.records.networkAttempts({ limit: 200 }),
-      api.records.requests({ limit: 100 }),
+      api.observability.networkAttempts({ limit: 200 }),
+      api.observability.requests({ limit: 100 }),
     ]);
     attempts.value = attemptsRes;
     requests.value = requestsRes.items;
@@ -114,6 +122,20 @@ async function loadRecords() {
     recordsError.value = err instanceof Error ? err.message : String(err);
   } finally {
     recordsLoading.value = false;
+  }
+}
+
+async function loadEntities() {
+  try {
+    const [providersRes, credentialsRes] = await Promise.all([
+      api.providers.list(),
+      api.credentials.all(),
+    ]);
+    providers.value = providersRes;
+    credentialsByProvider.value = credentialsRes;
+    entitiesError.value = null;
+  } catch (err) {
+    entitiesError.value = err instanceof Error ? err.message : String(err);
   }
 }
 
@@ -133,20 +155,39 @@ function stopPolling() {
 
 onMounted(() => {
   void loadRecords();
+  void loadEntities();
   startPolling();
 });
 onUnmounted(stopPolling);
 
-// Provider names: best-effort from realtime snapshot (avoids extra fetch).
-const providerNames = computed<Record<string, string>>(() => {
-  const out: Record<string, string> = {};
-  for (const p of realtime.value?.providers ?? []) out[p.provider_id] = p.provider_name;
+const providerNamesById = computed(() => {
+  const out = new Map<string, string>();
+  for (const p of providers.value) {
+    if (p.name.trim()) out.set(p.id, p.name);
+  }
+  for (const p of realtime.value?.providers ?? []) {
+    if (!out.has(p.provider_id) && p.provider_name.trim()) out.set(p.provider_id, p.provider_name);
+  }
+  return out;
+});
+
+const credentialsById = computed(() => {
+  const out = new Map<string, Credential>();
+  for (const rows of Object.values(credentialsByProvider.value)) {
+    for (const c of rows) out.set(c.id, c);
+  }
   return out;
 });
 
 function providerNameFor(id: string | null | undefined): string | null {
   if (!id) return null;
-  return providerNames.value[id] ?? id;
+  return resolveProviderLabel(id, "", providerNamesById.value);
+}
+
+function credentialLabelFor(id: string | null | undefined): string | null {
+  if (!id) return null;
+  const credential = credentialsById.value.get(id);
+  return credential ? credentialPrimaryAccountLabel(credential) : "credential";
 }
 
 // ── 上游 grouping by request → wave ─────────────────────────────────────────
@@ -236,6 +277,64 @@ function formatUsdPerHour(v: number | null): string {
   if (v < 0.01) return `$${v.toFixed(4)}/h`;
   if (v < 1) return `$${v.toFixed(3)}/h`;
   return `$${v.toFixed(2)}/h`;
+}
+
+function requestProtocolLetter(wire: string | null | undefined): string {
+  return protocolWireLetter(wire);
+}
+
+function waveLabelFor(waveIndex: number): string {
+  return t("obs.upstream.waveLabel", { wave: waveIndex + 1 });
+}
+
+function attemptLabelFor(attemptIndex: number): string {
+  return t("obs.upstream.attemptLabel", { attempt: Math.max(1, attemptIndex) });
+}
+
+function lifecycleLabels() {
+  return {
+    dispatch: t("obs.attemptLifecycle.dispatch"),
+    upstreamFirstByte: t("obs.attemptLifecycle.upstreamFirstByte"),
+    clientFirstWrite: t("obs.attemptLifecycle.clientFirstWrite"),
+    complete: t("obs.attemptLifecycle.complete"),
+    terminal: t("obs.attemptLifecycle.terminal"),
+  };
+}
+
+function outcomeLabelFor(outcome: string | null | undefined): string {
+  if (!outcome) return "—";
+  return t(`obs.outcome.${normalizeOutcomeKey(outcome)}`);
+}
+
+function normalizeOutcomeKey(outcome: string): string {
+  switch (outcome) {
+    case "race-aborted":
+    case "race_aborted":
+      return "raceAborted";
+    case "rate-limit":
+    case "rate_limit":
+      return "rateLimit";
+    case "auth_error":
+      return "authError";
+    case "payment_error":
+      return "paymentError";
+    case "server_error":
+      return "serverError";
+    case "not_found":
+      return "notFound";
+    case "retryable-error":
+      return "retryableError";
+    case "client-error":
+      return "clientError";
+    case "transport-error":
+      return "transportError";
+    case "fallback-abandon":
+      return "fallbackAbandon";
+    case "circuit-skip":
+      return "circuitSkip";
+    default:
+      return outcome;
+  }
 }
 </script>
 
@@ -373,6 +472,9 @@ function formatUsdPerHour(v: number | null): string {
           <div v-if="recordsError" class="px-4 py-3 text-sm text-red-600">
             {{ recordsError }}
           </div>
+          <div v-if="entitiesError" class="px-4 py-3 text-sm text-amber-700">
+            {{ entitiesError }}
+          </div>
           <div
             v-else-if="!requestGroups.length"
             class="px-4 py-12 text-center text-sm text-vp-muted"
@@ -413,13 +515,18 @@ function formatUsdPerHour(v: number | null): string {
                 <div
                   class="border-b border-vp-border bg-vp-bg-hover/40 px-2 py-1 text-[10px] uppercase tracking-wide text-vp-muted"
                 >
-                  {{ t("obs.upstream.waveLabel", { wave: w.wave_index + 1, size: w.wave_size }) }}
+                  {{ waveLabelFor(w.wave_index) }}
                 </div>
                 <AttemptRow
                   v-for="a in w.attempts"
                   :key="a.attempt_id"
                   :attempt="a"
                   :provider-name="providerNameFor(a.provider_id)"
+                  :credential-label="credentialLabelFor(a.credential_id)"
+                  :outcome-label="outcomeLabelFor(a.outcome)"
+                  :wave-label="waveLabelFor(a.wave_index)"
+                  :attempt-label="attemptLabelFor(a.attempt_index)"
+                  :lifecycle-labels="lifecycleLabels()"
                   :highlighted="
                     a.attempt_id === highlightAttempt ||
                     `${g.request_id}#${a.wave_index}` === highlightWave
@@ -489,6 +596,20 @@ function formatUsdPerHour(v: number | null): string {
                       variant="inline"
                     />
                     <EntityChip
+                      v-if="r.credential_id"
+                      :kind="'credential'"
+                      :id="r.credential_id"
+                      :label="credentialLabelFor(r.credential_id) ?? 'credential'"
+                      variant="inline"
+                    />
+                    <Badge
+                      v-if="r.wire"
+                      variant="outline"
+                      class="font-mono text-[10px] uppercase tracking-wide"
+                    >
+                      {{ requestProtocolLetter(r.wire) }}
+                    </Badge>
+                    <EntityChip
                       :kind="'request'"
                       :id="r.id"
                       :label="r.id.slice(0, 8)"
@@ -536,6 +657,11 @@ function formatUsdPerHour(v: number | null): string {
               :key="a.attempt_id"
               :attempt="a"
               :provider-name="providerNameFor(a.provider_id)"
+              :credential-label="credentialLabelFor(a.credential_id)"
+              :outcome-label="outcomeLabelFor(a.outcome)"
+              :wave-label="waveLabelFor(a.wave_index)"
+              :attempt-label="attemptLabelFor(a.attempt_index)"
+              :lifecycle-labels="lifecycleLabels()"
               :highlighted="
                 a.attempt_id === highlightAttempt ||
                 a.request_id === highlightRequest ||
@@ -591,10 +717,9 @@ function formatUsdPerHour(v: number | null): string {
                     :id="a.provider_id ?? ''"
                     :label="providerNameFor(a.provider_id) ?? a.provider_id ?? '—'"
                     variant="inline"
-                    class="!text-foreground"
                   />
                 </td>
-                <td class="px-3 py-1.5 text-vp-muted">{{ a.wire ?? "—" }}</td>
+                <td class="px-3 py-1.5 text-vp-muted">{{ requestProtocolLetter(a.wire) }}</td>
                 <td class="px-3 py-1.5">
                   <Badge
                     :class="`font-mono text-[10px] ${statusTone(a.upstream_http_status ?? a.status_code)}`"
@@ -723,8 +848,16 @@ function formatUsdPerHour(v: number | null): string {
       "upstream": {
         "title": "Gateway ↔ Upstream",
         "summary": "{requests} requests · {attempts} attempts",
-        "waveLabel": "Wave {wave}/{size}",
+        "waveLabel": "Wave {wave}",
+        "attemptLabel": "Attempt {attempt}",
         "attemptsSummary": "{n} attempts in {w} waves"
+      },
+      "attemptLifecycle": {
+        "dispatch": "dispatch",
+        "upstreamFirstByte": "upstream first byte",
+        "clientFirstWrite": "client first write",
+        "complete": "complete",
+        "terminal": "terminal"
       },
       "downstream": {
         "title": "Gateway ↔ Downstream client",
@@ -758,12 +891,25 @@ function formatUsdPerHour(v: number | null): string {
       "outcome": {
         "success": "ok",
         "failure": "failure",
-        "race_aborted": "race-aborted",
-        "rate_limit": "rate-limited",
-        "auth_error": "auth-error",
-        "payment_error": "payment-error",
-        "server_error": "5xx",
-        "not_found": "404"
+        "raceAborted": "race-aborted",
+        "rateLimit": "rate-limited",
+        "authError": "auth-error",
+        "paymentError": "payment-error",
+        "serverError": "5xx",
+        "notFound": "404",
+        "retryableError": "retryable-error",
+        "clientError": "client-error",
+        "transportError": "transport-error",
+        "fallbackAbandon": "fallback-abandon",
+        "circuitSkip": "circuit-skip"
+      }
+    },
+    "realtime": {
+      "transport": {
+        "stream": "live",
+        "polling": "poll",
+        "connecting": "connecting",
+        "offline": "offline"
       }
     }
   },
@@ -789,8 +935,16 @@ function formatUsdPerHour(v: number | null): string {
       "upstream": {
         "title": "网关 ↔ 上游",
         "summary": "{requests} 个请求 · {attempts} 次尝试",
-        "waveLabel": "第 {wave}/{size} 波",
+        "waveLabel": "第 {wave} 波",
+        "attemptLabel": "第 {attempt} 次尝试",
         "attemptsSummary": "{n} 次尝试，分 {w} 波"
+      },
+      "attemptLifecycle": {
+        "dispatch": "发起连接",
+        "upstreamFirstByte": "上游首字节",
+        "clientFirstWrite": "下游首写",
+        "complete": "完成",
+        "terminal": "终局"
       },
       "downstream": {
         "title": "网关 ↔ 下游客户端",
@@ -824,12 +978,25 @@ function formatUsdPerHour(v: number | null): string {
       "outcome": {
         "success": "成功",
         "failure": "失败",
-        "race_aborted": "race 被取消",
-        "rate_limit": "限流",
-        "auth_error": "认证错误",
-        "payment_error": "付费错误",
-        "server_error": "5xx",
-        "not_found": "404"
+        "raceAborted": "race 被取消",
+        "rateLimit": "限流",
+        "authError": "认证错误",
+        "paymentError": "付费错误",
+        "serverError": "5xx",
+        "notFound": "404",
+        "retryableError": "可重试错误",
+        "clientError": "客户端错误",
+        "transportError": "传输错误",
+        "fallbackAbandon": "放弃补位",
+        "circuitSkip": "熔断跳过"
+      }
+    },
+    "realtime": {
+      "transport": {
+        "stream": "实时",
+        "polling": "轮询",
+        "connecting": "连接中",
+        "offline": "离线"
       }
     }
   }

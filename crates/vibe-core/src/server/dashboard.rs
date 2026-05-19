@@ -981,21 +981,6 @@ pub(super) async fn credential_circuit_reset(
 // App logs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-pub(super) struct AppLogQuery {
-    limit: Option<i64>,
-    since: Option<i64>,
-}
-
-pub(super) async fn list_app_logs(
-    State(state): State<AppState>,
-    Query(q): Query<AppLogQuery>,
-) -> Result<Json<Vec<AppLogEvent>>, AppError> {
-    let limit = q.limit.unwrap_or(200).clamp(1, 500);
-    let since = q.since;
-    Ok(Json(state.app_logs.list(limit, since)))
-}
-
 // ---------------------------------------------------------------------------
 // Usage / stats
 // ---------------------------------------------------------------------------
@@ -1017,6 +1002,14 @@ pub(super) async fn usage_summary(
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_creation_tokens: 0,
+        reasoning_tokens: 0,
+        cache_creation_5m_tokens: 0,
+        cache_creation_1h_tokens: 0,
+        audio_input_tokens: 0,
+        audio_output_tokens: 0,
+        accepted_prediction_tokens: 0,
+        rejected_prediction_tokens: 0,
+        cost_items: None,
         estimated_cost_usd: "0".into(),
     }))
 }
@@ -1096,4 +1089,19 @@ fn success_rate(successes: i64, requests: i64) -> f64 {
     } else {
         1.0
     }
+}
+
+pub(super) async fn list_credential_quota_statuses(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<CredentialQuotaStatus>>, AppError> {
+    let rows = run_blocking(state, move |s| s.db.credential_quota_status_list()).await?;
+    Ok(Json(rows))
+}
+
+pub(super) async fn get_credential_quota_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Option<CredentialQuotaStatus>>, AppError> {
+    let row = run_blocking(state, move |s| s.db.credential_quota_status_get(&id)).await?;
+    Ok(Json(row))
 }

@@ -61,6 +61,10 @@ pub struct PickCtx {
     pub dedupe_key: Option<String>,
     pub client_transport: Option<String>,
     pub request_headers_json: Option<String>,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub session_id: Option<String>,
     pub codex_client_kind: CodexClientKind,
     pub claude_client_kind: ClaudeClientKind,
     pub body: Bytes,
@@ -111,6 +115,10 @@ pub(crate) async fn try_one_pick(
         dedupe_key: ctx.dedupe_key.clone(),
         client_transport: ctx.client_transport.clone(),
         request_headers: ctx.request_headers_json.clone(),
+        thread_id: ctx.thread_id.clone(),
+        turn_id: ctx.turn_id.clone(),
+        trace_id: ctx.trace_id.clone(),
+        session_id: ctx.session_id.clone(),
         codex_client_kind: ctx.codex_client_kind,
         claude_client_kind: ctx.claude_client_kind,
     };
@@ -123,6 +131,10 @@ pub(crate) async fn try_one_pick(
         chrono::Utc::now().timestamp(),
         Some(&provider.id),
         epick.credential_id.as_deref(),
+        ctx.thread_id.as_deref(),
+        ctx.turn_id.as_deref(),
+        ctx.trace_id.as_deref(),
+        ctx.session_id.as_deref(),
         &ctx.requested_model,
         &upstream_model,
     );
@@ -692,7 +704,7 @@ pub(crate) async fn try_one_pick(
         Some(sc),
         Some(sc),
         None,
-        usage,
+        usage.clone(),
     );
     attempt_log.response_headers = resp_headers_snapshot;
 
@@ -704,7 +716,7 @@ pub(crate) async fn try_one_pick(
     let mut client_body = buf.clone();
     if ctx.wire == Wire::Anthropic {
         let metrics = crate::codex_summary::SummaryMetrics::from_usage(
-            usage,
+            usage.clone(),
             Some(ctx.started_instant.elapsed().as_millis() as i64),
             None,
         );
@@ -846,8 +858,8 @@ struct WaveEvent {
 }
 
 /// Run one bucket of picks concurrently — the unit of work that the wave
-/// dispatcher in [`super::forward`] composes into a "病患先 → 健康兜底"
-/// schedule. First terminal response wins; losers are cancelled via
+/// dispatcher in [`super::forward`] composes into the 123 schedule. First
+/// terminal response wins; losers are cancelled via
 /// [`CancellationToken`].
 ///
 /// `base_attempt` is the running attempt counter; this wave assigns
@@ -1092,6 +1104,10 @@ mod tests {
             dedupe_key: None,
             client_transport: None,
             request_headers_json: None,
+            thread_id: None,
+            turn_id: None,
+            trace_id: None,
+            session_id: None,
             codex_client_kind: CodexClientKind::Unknown,
             claude_client_kind: ClaudeClientKind::Unknown,
             body,
@@ -1200,6 +1216,61 @@ mod tests {
             state.cb.allow(&cb_key),
             "CB should still allow after a single 429"
         );
+    }
+    #[test]
+    fn attempt_log_preserves_observability_context_fields() {
+        let attempt_ctx = new_attempt_ctx(
+            "observe-log",
+            7,
+            2,
+            3,
+            Some("p-observe:provider"),
+            0,
+            Some("p-observe"),
+            None,
+            Some("thread-observe"),
+            Some("turn-observe"),
+            Some("trace-observe"),
+            Some("session-observe"),
+            "gpt-observe",
+            "gpt-test",
+        );
+        let log_ctx = LogCtx {
+            wire: Wire::OpenaiResponses,
+            route_prefix: Some("codex-v1".into()),
+            credential_id: None,
+            cb_key: Some("p-observe".into()),
+            dedupe_key: None,
+            client_transport: None,
+            request_headers: None,
+            thread_id: Some("thread-observe".into()),
+            turn_id: Some("turn-observe".into()),
+            trace_id: Some("trace-observe".into()),
+            session_id: Some("session-observe".into()),
+            codex_client_kind: CodexClientKind::Unknown,
+            claude_client_kind: ClaudeClientKind::Unknown,
+        };
+
+        let attempt = attempt_log_from_parts(
+            &log_ctx,
+            &attempt_ctx,
+            UpstreamAttemptPhase::Failed,
+            UpstreamAttemptOutcome::RateLimit,
+            &Instant::now(),
+            Some(429),
+            Some(429),
+            Some("rate limited".into()),
+            Usage::default(),
+        );
+
+        assert_eq!(attempt.attempt_index, 7);
+        assert_eq!(attempt.wave_index, 2);
+        assert_eq!(attempt.wave_size, 3);
+        assert_eq!(attempt.upstream_id.as_deref(), Some("p-observe:provider"));
+        assert_eq!(attempt.wire.as_deref(), Some("openai-responses"));
+        assert_eq!(attempt.route_prefix.as_deref(), Some("codex-v1"));
+        assert_eq!(attempt.requested_model.as_deref(), Some("gpt-observe"));
+        assert_eq!(attempt.upstream_model.as_deref(), Some("gpt-test"));
     }
 
     // ── 6. 401 auth error — retryable, CB force-opened ──────────────────
@@ -1459,6 +1530,42 @@ mod tests {
             PickResult::Final(resp) => assert_eq!(resp.status(), StatusCode::OK),
             other => panic!("expected Final(200), got {}", variant_name(&other)),
         }
+    }
+
+    #[tokio::test]
+    async fn half_open_successful_pick_marks_circuit_recovered() {
+        let base = start_mock(200, r#"{"id":"ok","choices":[]}"#).await;
+        let mut config = Config::default();
+        config.failover.failure_threshold = 1;
+        config.failover.success_threshold = 1;
+        config.failover.open_timeout_secs = 0;
+        let db = vibe_db::Db::memory().expect("db");
+        let state = AppState::init(db, config, 0).expect("state");
+        let provider = make_provider("p-half-recover", ProviderKind::OpenaiChat, base);
+        let cb_key = provider.id.clone();
+        state.cb.force_open(&cb_key);
+
+        assert!(
+            state.cb.allow(&cb_key),
+            "0s timeout should allow HalfOpen probe"
+        );
+        assert_eq!(
+            state.cb.state_of(&cb_key),
+            crate::circuit_breaker::State::HalfOpen
+        );
+
+        let epick = make_epick_passthrough(provider);
+        let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
+        let result = try_one_pick(state.clone(), epick, 1, 0, 1, ctx).await;
+
+        match result {
+            PickResult::Final(resp) => assert_eq!(resp.status(), StatusCode::OK),
+            other => panic!("expected Final(200), got {}", variant_name(&other)),
+        }
+        assert_eq!(
+            state.cb.state_of(&cb_key),
+            crate::circuit_breaker::State::Closed
+        );
     }
 
     // ── 14. run_wave: first Final wins, slow loser cancelled ────────────

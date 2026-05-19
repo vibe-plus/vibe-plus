@@ -20,13 +20,27 @@ export function apiUrl(path: string, base = BASE): string {
   return base + path;
 }
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly bodyText: string;
+  readonly url: string;
+
+  constructor(status: number, bodyText: string, url: string) {
+    super(`${status} ${bodyText}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.bodyText = bodyText;
+    this.url = url;
+  }
+}
+
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(apiUrl(path), {
     headers: { "content-type": "application/json" },
     ...options,
   });
   const bodyText = await res.text();
-  if (!res.ok) throw new Error(`${res.status} ${bodyText}`);
+  if (!res.ok) throw new ApiError(res.status, bodyText, apiUrl(path));
   // DELETE / no-content responses have an empty body — do not call JSON.parse on ""
   const trimmed = bodyText.trim();
   if (trimmed === "") {
@@ -341,6 +355,26 @@ export interface LogPage {
 }
 
 export type UpstreamAttemptOutcome =
+  | import("../../../../../crates/vibe-protocol/packages/protocol/types/UpstreamAttemptOutcome.ts").UpstreamAttemptOutcome
+  // Legacy observability rows kept for backward-compatible rendering.
+  | "failure"
+  | "race_aborted"
+  | "rate_limit"
+  | "auth_error"
+  | "payment_error"
+  | "server_error"
+  | "not_found";
+
+export type UpstreamAttemptPhase =
+  | import("../../../../../crates/vibe-protocol/packages/protocol/types/UpstreamAttemptPhase.ts").UpstreamAttemptPhase
+  // Legacy observability rows kept for backward-compatible rendering.
+  | "start"
+  | "first_byte"
+  | "complete"
+  | "abort";
+
+/*
+export type UpstreamAttemptOutcome =
   | "success"
   | "failure"
   | "race_aborted"
@@ -351,6 +385,7 @@ export type UpstreamAttemptOutcome =
   | "not_found";
 
 export type UpstreamAttemptPhase = "start" | "first_byte" | "complete" | "abort";
+*/
 
 /** One attempt within a wave dispatched for a given inbound request. */
 export interface UpstreamAttemptLog {
@@ -935,10 +970,10 @@ export const api = {
   appLogs: {
     list: (limit = 200, since?: number) =>
       req<AppLogEvent[]>(
-        `/_vp/app-logs?limit=${limit}${since !== undefined ? `&since=${since}` : ""}`,
+        `/_vp/observability/app-logs?limit=${limit}${since !== undefined ? `&since=${since}` : ""}`,
       ),
   },
-  records: {
+  observability: {
     requests: (opts: RequestRecordsQuery = {}) => {
       const params = new URLSearchParams();
       if (opts.limit != null) params.set("limit", String(opts.limit));
@@ -947,17 +982,18 @@ export const api = {
       if (opts.provider_id) params.set("provider_id", opts.provider_id);
       if (opts.status_ok != null) params.set("status_ok", String(opts.status_ok));
       const qs = params.toString();
-      return req<LogPage>(`/_vp/records/requests${qs ? `?${qs}` : ""}`);
+      return req<LogPage>(`/_vp/observability/requests${qs ? `?${qs}` : ""}`);
     },
-    request: (id: string) => req<RequestLog>(`/_vp/records/requests/${encodeURIComponent(id)}`),
+    request: (id: string) =>
+      req<RequestLog>(`/_vp/observability/requests/${encodeURIComponent(id)}`),
     requestNetwork: (id: string) =>
-      req<UpstreamAttemptLog[]>(`/_vp/records/requests/${encodeURIComponent(id)}/network`),
+      req<UpstreamAttemptLog[]>(`/_vp/observability/requests/${encodeURIComponent(id)}/network`),
     networkAttempts: (opts: { limit?: number; offset?: number } = {}) => {
       const params = new URLSearchParams();
       if (opts.limit != null) params.set("limit", String(opts.limit));
       if (opts.offset != null) params.set("offset", String(opts.offset));
       const qs = params.toString();
-      return req<UpstreamAttemptLog[]>(`/_vp/records/network-attempts${qs ? `?${qs}` : ""}`);
+      return req<UpstreamAttemptLog[]>(`/_vp/observability/network-attempts${qs ? `?${qs}` : ""}`);
     },
   },
   usage: (hours = 24) => req<UsageSummary>(`/_vp/usage/summary?hours=${hours}`),

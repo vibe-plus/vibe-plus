@@ -9,6 +9,7 @@ export type RealtimeSnapshot = {
   providers: Array<RealtimeProvider>;
   active_count: number;
   active_output_tokens_per_sec: number;
+  active_cost_usd_per_hour: number | null;
   active_upstream_bytes_per_sec: number;
   active_downstream_bytes_per_sec: number;
   codex_ws_active: number;

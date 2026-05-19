@@ -1,11 +1,19 @@
 //! Token & cost extraction.
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct Usage {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub cache_creation_5m_tokens: i64,
+    pub cache_creation_1h_tokens: i64,
+    pub audio_input_tokens: i64,
+    pub audio_output_tokens: i64,
+    pub accepted_prediction_tokens: i64,
+    pub rejected_prediction_tokens: i64,
+    pub cost_items: Option<String>,
 }
 
 /// Lightweight realtime token estimate used before providers send final usage.

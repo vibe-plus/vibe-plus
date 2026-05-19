@@ -4,6 +4,7 @@ import type { Provider } from "./Provider.js";
 import type { ProviderAuthPoolSummary } from "./ProviderAuthPoolSummary.js";
 import type { ProviderCodexPlanItem } from "./ProviderCodexPlanItem.js";
 import type { ProviderHealthSummary } from "./ProviderHealthSummary.js";
+import type { Upstream } from "./Upstream.js";
 
 /**
  * One-shot overview used by the Providers page and websocket delta refresh.
@@ -14,5 +15,9 @@ export type ProvidersOverview = {
   health: Array<ProviderHealthSummary>;
   pools: Array<ProviderAuthPoolSummary>;
   credentials: { [key in string]?: Array<Credential> };
+  /**
+   * Runtime upstream units grouped by UI provider.
+   */
+  upstreams: { [key in string]?: Array<Upstream> };
   codex_plans: { [key in string]?: Array<ProviderCodexPlanItem> };
 };

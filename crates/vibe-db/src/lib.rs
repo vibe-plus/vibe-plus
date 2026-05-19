@@ -144,6 +144,9 @@ impl Db {
             M::up(include_str!(
                 "../migrations/026_request_log_cost_micros.sql"
             )),
+            M::up(include_str!(
+                "../migrations/027_observability_thread_usage_quota.sql"
+            )),
         ])
     }
 
@@ -221,13 +224,41 @@ fn copy_observability_tables_from_attached(
 ) -> Result<()> {
     let source_path = source_path.to_string_lossy().to_string();
     conn.execute("ATTACH DATABASE ?1 AS source_db", [&source_path])?;
-    let copy_result = conn.execute_batch(
-        "INSERT OR REPLACE INTO request_logs SELECT * FROM source_db.request_logs;
-         INSERT OR REPLACE INTO upstream_attempt_logs SELECT * FROM source_db.upstream_attempt_logs;
-         INSERT OR REPLACE INTO app_logs (id, ts, level, category, message, detail, event_type, payload_json)
-            SELECT id, ts, level, category, message, detail, event_type, payload_json
-            FROM source_db.app_logs;",
-    );
+    let source_tables = conn
+        .prepare("SELECT name FROM source_db.sqlite_master WHERE type = 'table'")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+
+    let copy_result = if source_tables.contains("request_logs") {
+        conn.execute("INSERT OR REPLACE INTO request_logs SELECT * FROM source_db.request_logs", [])
+            .map(|_| ())
+    } else {
+        Ok(())
+    }
+    .and_then(|_| {
+        if source_tables.contains("upstream_attempt_logs") {
+            conn.execute(
+                "INSERT OR REPLACE INTO upstream_attempt_logs SELECT * FROM source_db.upstream_attempt_logs",
+                [],
+            )
+            .map(|_| ())
+        } else {
+            Ok(())
+        }
+    })
+    .and_then(|_| {
+        if source_tables.contains("app_logs") {
+            conn.execute(
+                "INSERT OR REPLACE INTO app_logs (id, ts, level, category, message, detail, event_type, payload_json)
+                 SELECT id, ts, level, category, message, detail, event_type, payload_json
+                 FROM source_db.app_logs",
+                [],
+            )
+            .map(|_| ())
+        } else {
+            Ok(())
+        }
+    });
     conn.execute_batch("DETACH DATABASE source_db").ok();
     copy_result?;
     Ok(())

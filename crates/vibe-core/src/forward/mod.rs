@@ -159,8 +159,7 @@ pub struct VibeCodexClientKind(pub CodexClientKind);
 /// Codex CLI omits `instructions` when empty (`skip_serializing_if`); ChatGPT's
 /// Codex handler returns `{"detail":"Instructions are required"}`. Inject a
 /// minimal default only when the field is absent or whitespace-empty.
-const CHATGPT_CODEX_FALLBACK_INSTRUCTIONS: &str =
-    "You are Codex, OpenAI's coding agent. Help with software engineering tasks using available tools.";
+const CHATGPT_CODEX_FALLBACK_INSTRUCTIONS: &str = "You are Codex, OpenAI's coding agent. Help with software engineering tasks using available tools.";
 
 pub(crate) fn inject_chatgpt_codex_instructions_if_missing(
     provider: &vibe_protocol::Provider,
@@ -188,6 +187,10 @@ pub(crate) struct LogCtx {
     pub dedupe_key: Option<String>,
     pub client_transport: Option<String>,
     pub request_headers: Option<String>,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub session_id: Option<String>,
     pub codex_client_kind: CodexClientKind,
     pub claude_client_kind: ClaudeClientKind,
 }
@@ -238,23 +241,6 @@ fn routing_credential_line(cred: Option<&Credential>, cred_id: &Option<String>) 
         Some(id) if !id.is_empty() => format!("cred {}", routing_id_tail(id)),
         _ => "cred —".to_string(),
     }
-}
-
-fn format_cb_skipped_provider_preview(
-    ids: &[String],
-    providers: &[vibe_protocol::Provider],
-) -> String {
-    let map: HashMap<&str, &vibe_protocol::Provider> =
-        providers.iter().map(|p| (p.id.as_str(), p)).collect();
-    ids.iter()
-        .take(6)
-        .map(|id| {
-            map.get(id.as_str())
-                .map(|p| routing_provider_line(*p))
-                .unwrap_or_else(|| routing_id_tail(id))
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 pub(crate) fn format_routing_attempt(
@@ -423,6 +409,10 @@ pub(crate) struct AttemptCtx {
     pub started_at: i64,
     pub provider_id: Option<String>,
     pub credential_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub session_id: Option<String>,
     pub requested_model: String,
     pub upstream_model: String,
 }
@@ -436,6 +426,10 @@ pub(crate) fn new_attempt_ctx(
     started_at: i64,
     provider_id: Option<&str>,
     credential_id: Option<&str>,
+    thread_id: Option<&str>,
+    turn_id: Option<&str>,
+    trace_id: Option<&str>,
+    session_id: Option<&str>,
     requested_model: &str,
     upstream_model: &str,
 ) -> AttemptCtx {
@@ -449,6 +443,10 @@ pub(crate) fn new_attempt_ctx(
         started_at,
         provider_id: provider_id.map(str::to_string),
         credential_id: credential_id.map(str::to_string),
+        thread_id: thread_id.map(str::to_string),
+        turn_id: turn_id.map(str::to_string),
+        trace_id: trace_id.map(str::to_string),
+        session_id: session_id.map(str::to_string),
         requested_model: requested_model.to_string(),
         upstream_model: upstream_model.to_string(),
     }
@@ -536,6 +534,10 @@ pub(crate) fn attempt_log_from_parts(
         ended_at: Some(chrono::Utc::now().timestamp()),
         provider_id: attempt.provider_id.clone(),
         credential_id: attempt.credential_id.clone(),
+        thread_id: attempt.thread_id.clone(),
+        turn_id: attempt.turn_id.clone(),
+        trace_id: attempt.trace_id.clone(),
+        session_id: attempt.session_id.clone(),
         wire: Some(wire_as_str(log_ctx.wire).to_string()),
         route_prefix: log_ctx.route_prefix.clone(),
         requested_model: (!attempt.requested_model.is_empty())
@@ -553,6 +555,14 @@ pub(crate) fn attempt_log_from_parts(
         output_tokens: usage.output_tokens,
         cache_read_tokens: usage.cache_read_tokens,
         cache_creation_tokens: usage.cache_creation_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+        cache_creation_5m_tokens: usage.cache_creation_5m_tokens,
+        cache_creation_1h_tokens: usage.cache_creation_1h_tokens,
+        audio_input_tokens: usage.audio_input_tokens,
+        audio_output_tokens: usage.audio_output_tokens,
+        accepted_prediction_tokens: usage.accepted_prediction_tokens,
+        rejected_prediction_tokens: usage.rejected_prediction_tokens,
+        cost_items: usage.cost_items.clone(),
         estimated_cost_usd: usage.estimated_cost_usd(&attempt.upstream_model),
         upstream_first_byte_ms: None,
         client_first_write_ms: None,
@@ -705,6 +715,8 @@ pub(crate) async fn prepare_forward_once(
     let claude_client_kind =
         crate::claude_summary::detect_client(req_headers, route_prefix.as_deref());
     let requested_model = request_model_for_body(wire, upstream_path, &body);
+    let (thread_id, turn_id, trace_id, session_id) =
+        extract_thread_turn_trace_session(req_headers, &body);
 
     let request_snapshot = None;
 
@@ -735,6 +747,10 @@ pub(crate) async fn prepare_forward_once(
         dedupe_key: dedupe_key.clone(),
         client_transport: client_transport.clone(),
         request_headers: request_headers.clone(),
+        thread_id: thread_id.clone(),
+        turn_id: turn_id.clone(),
+        trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
         codex_client_kind,
         claude_client_kind,
     };
@@ -821,6 +837,10 @@ pub(crate) async fn prepare_forward_once(
             dedupe_key: dedupe_key.clone(),
             client_transport: client_transport.clone(),
             request_headers: request_headers.clone(),
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            trace_id: trace_id.clone(),
+            session_id: session_id.clone(),
             codex_client_kind,
             claude_client_kind,
         };
@@ -997,16 +1017,7 @@ pub(crate) async fn prepare_forward_once(
     }
 
     let final_error = if attempted_after_cb == 0 && cb_skipped_total > 0 {
-        let preview = if cb_skipped_provider_ids.is_empty() {
-            String::new()
-        } else {
-            let labels =
-                format_cb_skipped_provider_preview(&cb_skipped_provider_ids, &providers_list);
-            format!(", providers=[{labels}]")
-        };
-        format!(
-            "all providers blocked by circuit breaker ({cb_skipped_total} skipped{preview}). reset via POST /_vp/providers/:id/circuit/reset or Providers UI"
-        )
+        vibe_i18n::text_env("gateway-all-providers-blocked")
     } else {
         last_error
     };
@@ -1385,6 +1396,8 @@ pub async fn forward(
     } else {
         extract_model(&body).unwrap_or_default()
     };
+    let (thread_id, turn_id, trace_id, session_id) =
+        extract_thread_turn_trace_session(&req_headers, &body);
 
     let request_snapshot = None;
 
@@ -1417,6 +1430,10 @@ pub async fn forward(
             dedupe_key: dedupe_key.clone(),
             client_transport: client_transport.clone(),
             request_headers: request_headers.clone(),
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            trace_id: trace_id.clone(),
+            session_id: session_id.clone(),
             codex_client_kind,
             claude_client_kind,
         };
@@ -1507,6 +1524,10 @@ pub async fn forward(
             dedupe_key: dedupe_key.clone(),
             client_transport: client_transport.clone(),
             request_headers: request_headers.clone(),
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            trace_id: trace_id.clone(),
+            session_id: session_id.clone(),
             codex_client_kind,
             claude_client_kind,
         };
@@ -1540,6 +1561,10 @@ pub async fn forward(
         dedupe_key: dedupe_key.clone(),
         client_transport: client_transport.clone(),
         request_headers: request_headers.clone(),
+        thread_id: thread_id.clone(),
+        turn_id: turn_id.clone(),
+        trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
         codex_client_kind,
         claude_client_kind,
     };
@@ -1580,6 +1605,10 @@ pub async fn forward(
         dedupe_key: dedupe_key.clone(),
         client_transport: client_transport.clone(),
         request_headers_json: request_headers.clone(),
+        thread_id: thread_id.clone(),
+        turn_id: turn_id.clone(),
+        trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
         codex_client_kind,
         claude_client_kind,
         body: body.clone(),
@@ -1589,11 +1618,12 @@ pub async fn forward(
         plan_by_cred: Arc::new(plan_by_cred),
     });
 
-    // Health-bucketed wave dispatch: 病患 (CB Open) 4-wide concurrent →
-    // 半健康 (HalfOpen) 2-wide → 健康 (Closed) 1-at-a-time. Within each wave
-    // racers run concurrently and the first terminal response wins, with
-    // `CancellationToken` aborting losers. Between waves we serialize, so a
-    // single healthy upstream is never wasted in parallel with itself.
+    // 123 wave dispatch: the already load-balanced / sticky-prioritized first
+    // pick runs alone; then we race up to 1 sick + 1 healthy, then up to
+    // 1 sick + 2 healthy. Within each wave racers run concurrently and the
+    // first terminal response wins. No fourth wave is generated; remaining
+    // candidates are left untried and the existing aggregate-503 path handles
+    // total failure.
     let waves = selector::build_waves(expanded_picks, &state.cb);
     for (wave_index, wave) in waves.into_iter().enumerate() {
         let n = wave.len() as i32;
@@ -1638,20 +1668,15 @@ pub async fn forward(
         dedupe_key: dedupe_key.clone(),
         client_transport,
         request_headers,
+        thread_id,
+        turn_id,
+        trace_id,
+        session_id,
         codex_client_kind,
         claude_client_kind,
     };
     let final_error = if attempted_after_cb == 0 && cb_skipped_total > 0 {
-        let preview = if cb_skipped_provider_ids.is_empty() {
-            String::new()
-        } else {
-            let labels =
-                format_cb_skipped_provider_preview(&cb_skipped_provider_ids, &providers_list);
-            format!(", providers=[{labels}]")
-        };
-        format!(
-            "all providers blocked by circuit breaker ({cb_skipped_total} skipped{preview}). reset via POST /_vp/providers/:id/circuit/reset or Providers UI"
-        )
+        vibe_i18n::text_env("gateway-all-providers-blocked")
     } else {
         last_error
     };
@@ -1896,7 +1921,7 @@ pub(crate) fn stream_response(
             Some(sc),
             None,
             None,
-            acc,
+            acc.clone(),
             request_body,
             response_body,
         );
@@ -1911,7 +1936,7 @@ pub(crate) fn stream_response(
             Some(sc),
             Some(sc),
             None,
-            acc,
+            acc.clone(),
         );
         attempt_log.first_token_ms = first_token_ms;
         attempt_log.upstream_first_byte_ms = log.upstream_first_byte_ms;
@@ -2009,6 +2034,68 @@ pub(crate) fn codex_sticky_key(wire: Wire, headers: &HeaderMap, body: &[u8]) -> 
     header_key(headers, "thread_id")
         .or_else(|| header_key(headers, "session_id"))
         .or_else(|| selector::sticky_key_from_body(body))
+}
+
+fn extract_thread_turn_trace_session_from_headers(
+    headers: &HeaderMap,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    fn h(headers: &HeaderMap, name: &str) -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+    (
+        h(headers, "thread_id")
+            .or_else(|| h(headers, "thread-id"))
+            .or_else(|| h(headers, "x-vibe-thread-id")),
+        h(headers, "turn_id")
+            .or_else(|| h(headers, "turn-id"))
+            .or_else(|| h(headers, "x-vibe-turn-id")),
+        h(headers, "trace_id")
+            .or_else(|| h(headers, "x-vibe-trace-id"))
+            .or_else(|| h(headers, "x-request-id")),
+        h(headers, "session_id").or_else(|| h(headers, "x-vibe-session-id")),
+    )
+}
+
+fn extract_thread_turn_trace_session(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let (h_thread, h_turn, h_trace, h_session) = extract_thread_turn_trace_session_from_headers(headers);
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return (h_thread, h_turn, h_trace, h_session);
+    };
+    let s = |p: &str| v.pointer(p).and_then(|x| x.as_str()).map(str::to_owned);
+    let thread = h_thread
+        .or_else(|| crate::codex_summary::thread_id_from_value(&v))
+        .or_else(|| s("/metadata/thread_id"))
+        .or_else(|| s("/metadata/user_id"));
+    let turn = h_turn
+        .or_else(|| crate::codex_summary::turn_id_from_value(&v))
+        .or_else(|| s("/metadata/turn_id"));
+    let trace = h_trace
+        .or_else(|| s("/trace_id"))
+        .or_else(|| s("/metadata/trace_id"))
+        .or_else(|| s("/metadata/user_id"));
+    let session = h_session
+        .or_else(|| s("/session_id"))
+        .or_else(|| s("/client_metadata/session_id"))
+        .or_else(|| s("/previous_response_id"));
+    (thread, turn, trace, session)
 }
 
 pub(crate) fn remember_codex_sticky_route_for_pick(
@@ -2144,6 +2231,10 @@ pub(crate) fn build_log(
         started_at,
         app: app.clone(),
         provider_id: provider_id.map(str::to_string),
+        thread_id: ctx.thread_id.clone(),
+        turn_id: ctx.turn_id.clone(),
+        trace_id: ctx.trace_id.clone(),
+        session_id: ctx.session_id.clone(),
         requested_model: Some(requested_model.to_string()),
         upstream_model: Some(upstream_model.to_string()),
         status_code,
@@ -2154,6 +2245,14 @@ pub(crate) fn build_log(
         output_tokens: usage.output_tokens,
         cache_read_tokens: usage.cache_read_tokens,
         cache_creation_tokens: usage.cache_creation_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+        cache_creation_5m_tokens: usage.cache_creation_5m_tokens,
+        cache_creation_1h_tokens: usage.cache_creation_1h_tokens,
+        audio_input_tokens: usage.audio_input_tokens,
+        audio_output_tokens: usage.audio_output_tokens,
+        accepted_prediction_tokens: usage.accepted_prediction_tokens,
+        rejected_prediction_tokens: usage.rejected_prediction_tokens,
+        cost_items: usage.cost_items.clone(),
         estimated_cost_usd: usage.estimated_cost_usd(upstream_model),
         wire: Some(wire_as_str(ctx.wire).to_string()),
         route_prefix: ctx.route_prefix.clone(),

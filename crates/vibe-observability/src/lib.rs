@@ -28,6 +28,10 @@ pub struct RequestRecordsQuery {
     since: Option<i64>,
     provider_id: Option<String>,
     status_ok: Option<bool>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    trace_id: Option<String>,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +50,12 @@ pub struct UsageRollupsQuery {
     provider_id: Option<String>,
     credential_id: Option<String>,
     upstream_id: Option<String>,
+    wire: Option<String>,
+    route_prefix: Option<String>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    trace_id: Option<String>,
+    session_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -93,10 +103,30 @@ impl ObservabilityStore {
         since: Option<i64>,
         provider_id: Option<&str>,
         status_ok: Option<bool>,
+        thread_id: Option<&str>,
+        turn_id: Option<&str>,
+        trace_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<LogPage> {
-        if since.is_some() || provider_id.is_some() || status_ok.is_some() {
-            self.db
-                .log_list_filtered(limit, offset, since, provider_id, status_ok)
+        if since.is_some()
+            || provider_id.is_some()
+            || status_ok.is_some()
+            || thread_id.is_some()
+            || turn_id.is_some()
+            || trace_id.is_some()
+            || session_id.is_some()
+        {
+            self.db.log_list_filtered(
+                limit,
+                offset,
+                since,
+                provider_id,
+                status_ok,
+                thread_id,
+                turn_id,
+                trace_id,
+                session_id,
+            )
         } else {
             self.db.log_list(limit, offset)
         }
@@ -116,6 +146,48 @@ impl ObservabilityStore {
 
     pub fn app_log_list(&self, limit: i64, since: Option<i64>) -> Result<Vec<AppLogEvent>> {
         self.db.app_log_list(limit, since)
+    }
+
+    pub fn prune(
+        &self,
+        policy: &vibe_db::ShortLogRetentionPolicy,
+    ) -> Result<vibe_db::ShortLogPruneStats> {
+        self.db.prune_short_logs(policy)
+    }
+
+    pub fn usage_rollup_list(
+        &self,
+        limit: i64,
+        offset: i64,
+        since_day: Option<&str>,
+        until_day: Option<&str>,
+        scope: Option<&str>,
+        provider_id: Option<&str>,
+        credential_id: Option<&str>,
+        upstream_id: Option<&str>,
+        wire: Option<&str>,
+        route_prefix: Option<&str>,
+        thread_id: Option<&str>,
+        turn_id: Option<&str>,
+        trace_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<UsageRollupPage> {
+        self.db.usage_rollup_list(
+            limit,
+            offset,
+            since_day,
+            until_day,
+            scope,
+            provider_id,
+            credential_id,
+            upstream_id,
+            wire,
+            route_prefix,
+            thread_id,
+            turn_id,
+            trace_id,
+            session_id,
+        )
     }
 }
 
@@ -182,7 +254,17 @@ pub async fn list_request_records(
     let offset = q.offset.unwrap_or(0).max(0);
     let provider_id = q.provider_id.filter(|v| !v.trim().is_empty());
     let page = run_blocking(store, move |s| {
-        s.request_list(limit, offset, q.since, provider_id.as_deref(), q.status_ok)
+        s.request_list(
+            limit,
+            offset,
+            q.since,
+            provider_id.as_deref(),
+            q.status_ok,
+            q.thread_id.as_deref(),
+            q.turn_id.as_deref(),
+            q.trace_id.as_deref(),
+            q.session_id.as_deref(),
+        )
     })
     .await?;
     Ok(Json(page))
@@ -224,39 +306,14 @@ pub async fn list_app_log_records(
     Ok(Json(rows))
 }
 
-pub fn router() -> Router<ObservabilityStore> {
-    Router::new()
-        .route("/requests", get(list_request_records))
-        .route("/requests/:id", get(get_request_record))
-        .route("/requests/:id/network", get(list_request_network_records))
-        .route("/network-attempts", get(list_network_attempt_records))
-        .route("/app-logs", get(list_app_log_records))
-}
-
-pub fn legacy_records_router() -> Router<ObservabilityStore> {
-    Router::new()
-        .route("/requests", get(list_request_records))
-        .route("/requests/:id", get(get_request_record))
-        .route("/requests/:id/network", get(list_request_network_records))
-        .route("/network-attempts", get(list_network_attempt_records))
-}
-
-pub fn legacy_logs_router() -> Router<ObservabilityStore> {
-    Router::new().route("/app", get(list_app_log_records))
-}
-
-/// Daily usage rollups live in the long-retention main DB, not the
-/// observability DB. We still serve them through the observability crate so
-/// that all "historical / records / aggregates" HTTP endpoints stay in one
-/// place — the handler just takes a `Db` state instead of `ObservabilityStore`.
 pub async fn list_usage_rollups(
-    State(db): State<Db>,
+    State(store): State<ObservabilityStore>,
     Query(q): Query<UsageRollupsQuery>,
 ) -> Result<Json<UsageRollupPage>, ObservabilityHttpError> {
     let limit = q.limit.unwrap_or(500).clamp(1, 2000);
     let offset = q.offset.unwrap_or(0).max(0);
-    let page = tokio::task::spawn_blocking(move || {
-        db.usage_rollup_list(
+    let page = run_blocking(store, move |s| {
+        s.usage_rollup_list(
             limit,
             offset,
             q.since_day.as_deref(),
@@ -265,21 +322,26 @@ pub async fn list_usage_rollups(
             q.provider_id.as_deref(),
             q.credential_id.as_deref(),
             q.upstream_id.as_deref(),
+            q.wire.as_deref(),
+            q.route_prefix.as_deref(),
+            q.thread_id.as_deref(),
+            q.turn_id.as_deref(),
+            q.trace_id.as_deref(),
+            q.session_id.as_deref(),
         )
     })
-    .await
-    .map_err(|e| ObservabilityHttpError::internal(e.to_string()))?
-    .map_err(|e| ObservabilityHttpError::internal(e.to_string()))?;
+    .await?;
     Ok(Json(page))
 }
 
-pub fn legacy_stats_router<S>(legacy_db: Db) -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
+pub fn router() -> Router<ObservabilityStore> {
     Router::new()
+        .route("/requests", get(list_request_records))
+        .route("/requests/:id", get(get_request_record))
+        .route("/requests/:id/network", get(list_request_network_records))
+        .route("/network-attempts", get(list_network_attempt_records))
+        .route("/app-logs", get(list_app_log_records))
         .route("/usage-rollups", get(list_usage_rollups))
-        .with_state(legacy_db)
 }
 
 #[derive(Debug)]
@@ -336,6 +398,10 @@ mod tests {
             started_at: 1,
             app: None,
             provider_id: Some("p1".into()),
+            thread_id: None,
+            turn_id: None,
+            trace_id: None,
+            session_id: None,
             requested_model: Some("m".into()),
             upstream_model: Some("m".into()),
             status_code: Some(200),
@@ -346,6 +412,14 @@ mod tests {
             output_tokens: 2,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            audio_input_tokens: 0,
+            audio_output_tokens: 0,
+            accepted_prediction_tokens: 0,
+            rejected_prediction_tokens: 0,
+            cost_items: None,
             estimated_cost_usd: "0".into(),
             wire: Some("openai-responses".into()),
             route_prefix: None,
@@ -402,6 +476,10 @@ mod tests {
             ended_at: Some(2),
             provider_id: Some("p1".into()),
             credential_id: None,
+            thread_id: None,
+            turn_id: None,
+            trace_id: None,
+            session_id: None,
             wire: Some("openai-responses".into()),
             route_prefix: None,
             requested_model: Some("m".into()),
@@ -417,6 +495,14 @@ mod tests {
             output_tokens: 2,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            audio_input_tokens: 0,
+            audio_output_tokens: 0,
+            accepted_prediction_tokens: 0,
+            rejected_prediction_tokens: 0,
+            cost_items: None,
             estimated_cost_usd: "0".into(),
             upstream_first_byte_ms: None,
             client_first_write_ms: None,
@@ -466,7 +552,7 @@ mod tests {
 
         assert_eq!(
             store
-                .request_list(10, 0, None, None, None)
+                .request_list(10, 0, None, None, None, None, None, None, None)
                 .unwrap()
                 .items
                 .len(),

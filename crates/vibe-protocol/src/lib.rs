@@ -401,6 +401,14 @@ pub struct RequestLog {
     pub started_at: i64,
     pub app: Option<String>,
     pub provider_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub requested_model: Option<String>,
     pub upstream_model: Option<String>,
     pub status_code: Option<i32>,
@@ -411,6 +419,22 @@ pub struct RequestLog {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    #[serde(default)]
+    pub reasoning_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_5m_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_1h_tokens: i64,
+    #[serde(default)]
+    pub audio_input_tokens: i64,
+    #[serde(default)]
+    pub audio_output_tokens: i64,
+    #[serde(default)]
+    pub accepted_prediction_tokens: i64,
+    #[serde(default)]
+    pub rejected_prediction_tokens: i64,
+    #[serde(default)]
+    pub cost_items: Option<String>,
     /// Stored as a decimal string because we don't want float drift in money.
     pub estimated_cost_usd: String,
     /// Wire protocol: `anthropic` | `openai-chat` | `openai-responses` | `gemini-native`.
@@ -571,6 +595,22 @@ pub struct UsageSummary {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    #[serde(default)]
+    pub reasoning_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_5m_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_1h_tokens: i64,
+    #[serde(default)]
+    pub audio_input_tokens: i64,
+    #[serde(default)]
+    pub audio_output_tokens: i64,
+    #[serde(default)]
+    pub accepted_prediction_tokens: i64,
+    #[serde(default)]
+    pub rejected_prediction_tokens: i64,
+    #[serde(default)]
+    pub cost_items: Option<String>,
     pub estimated_cost_usd: String,
 }
 
@@ -686,6 +726,14 @@ pub struct UpstreamAttemptLog {
     pub ended_at: Option<i64>,
     pub provider_id: Option<String>,
     pub credential_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub wire: Option<String>,
     pub route_prefix: Option<String>,
     pub requested_model: Option<String>,
@@ -701,6 +749,22 @@ pub struct UpstreamAttemptLog {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    #[serde(default)]
+    pub reasoning_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_5m_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_1h_tokens: i64,
+    #[serde(default)]
+    pub audio_input_tokens: i64,
+    #[serde(default)]
+    pub audio_output_tokens: i64,
+    #[serde(default)]
+    pub accepted_prediction_tokens: i64,
+    #[serde(default)]
+    pub rejected_prediction_tokens: i64,
+    #[serde(default)]
+    pub cost_items: Option<String>,
     /// Stored as decimal USD string for money stability.
     #[serde(default)]
     pub estimated_cost_usd: String,
@@ -796,6 +860,56 @@ pub struct RealtimeSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CredentialQuotaStatus.ts"
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialQuotaState {
+    Available,
+    Warning,
+    Exhausted,
+    RateLimited,
+    Disabled,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CredentialQuotaStatus.ts"
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialQuotaSource {
+    ResponseHeaders,
+    CodexPlan,
+    CredentialState,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/CredentialQuotaStatus.ts"
+)]
+pub struct CredentialQuotaStatus {
+    pub credential_id: String,
+    pub provider_id: String,
+    pub status: CredentialQuotaState,
+    pub ready: bool,
+    pub source: CredentialQuotaSource,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub quota_data_json: Option<String>,
+    #[serde(default)]
+    pub next_reset_at: Option<i64>,
+    #[serde(default)]
+    pub last_checked_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/UsageDailyRollup.ts")]
 pub struct UsageDailyRollup {
     pub day: String,
@@ -806,6 +920,14 @@ pub struct UsageDailyRollup {
     pub wire: String,
     pub route_prefix: String,
     pub upstream_model: String,
+    #[serde(default)]
+    pub thread_id: String,
+    #[serde(default)]
+    pub turn_id: String,
+    #[serde(default)]
+    pub trace_id: String,
+    #[serde(default)]
+    pub session_id: String,
     pub requests: i64,
     pub successes: i64,
     pub failures: i64,

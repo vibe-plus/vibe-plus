@@ -98,8 +98,25 @@ impl Db {
                     OR (client_response_body IS NOT NULL AND client_response_body_ref IS NULL)",
             )?;
             let mapped = stmt.query_map([], |r| {
-                Ok::<(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>), rusqlite::Error>((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+                Ok::<
+                    (
+                        String,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                    ),
+                    rusqlite::Error,
+                >((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
                 ))
             })?;
             let mut out = Vec::new();
@@ -110,9 +127,30 @@ impl Db {
         })?;
 
         for (id, req_b, resp_b, client_b, req_ref, resp_ref, client_ref) in rows {
-            let new_req = externalise_one(&store, "request", &id, req_ref.as_deref(), req_b.as_deref(), &mut report.bytes_externalised)?;
-            let new_resp = externalise_one(&store, "response", &id, resp_ref.as_deref(), resp_b.as_deref(), &mut report.bytes_externalised)?;
-            let new_client = externalise_one(&store, "client-response", &id, client_ref.as_deref(), client_b.as_deref(), &mut report.bytes_externalised)?;
+            let new_req = externalise_one(
+                &store,
+                "request",
+                &id,
+                req_ref.as_deref(),
+                req_b.as_deref(),
+                &mut report.bytes_externalised,
+            )?;
+            let new_resp = externalise_one(
+                &store,
+                "response",
+                &id,
+                resp_ref.as_deref(),
+                resp_b.as_deref(),
+                &mut report.bytes_externalised,
+            )?;
+            let new_client = externalise_one(
+                &store,
+                "client-response",
+                &id,
+                client_ref.as_deref(),
+                client_b.as_deref(),
+                &mut report.bytes_externalised,
+            )?;
             self.with_short_mut(|c| {
                 c.execute(
                     "UPDATE request_logs SET
@@ -137,9 +175,16 @@ impl Db {
                     OR (response_body IS NOT NULL AND response_body_ref IS NULL)",
             )?;
             let mapped = stmt.query_map([], |r| {
-                Ok::<(String, Option<String>, Option<String>, Option<String>, Option<String>), rusqlite::Error>((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                ))
+                Ok::<
+                    (
+                        String,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                    ),
+                    rusqlite::Error,
+                >((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?;
             let mut out = Vec::new();
             for row in mapped {
@@ -149,8 +194,22 @@ impl Db {
         })?;
 
         for (attempt_id, req_b, resp_b, req_ref, resp_ref) in rows {
-            let new_req = externalise_one(&store, "attempt-request", &attempt_id, req_ref.as_deref(), req_b.as_deref(), &mut report.bytes_externalised)?;
-            let new_resp = externalise_one(&store, "attempt-response", &attempt_id, resp_ref.as_deref(), resp_b.as_deref(), &mut report.bytes_externalised)?;
+            let new_req = externalise_one(
+                &store,
+                "attempt-request",
+                &attempt_id,
+                req_ref.as_deref(),
+                req_b.as_deref(),
+                &mut report.bytes_externalised,
+            )?;
+            let new_resp = externalise_one(
+                &store,
+                "attempt-response",
+                &attempt_id,
+                resp_ref.as_deref(),
+                resp_b.as_deref(),
+                &mut report.bytes_externalised,
+            )?;
             self.with_short_mut(|c| {
                 c.execute(
                     "UPDATE upstream_attempt_logs SET

@@ -14,3 +14,4 @@ cli-stop-stopped = Vibe Plus 已停止。
 cli-doctor-title = Vibe Plus 检查
 
 gateway-no-credentials = 已经没有可用的凭证。所有凭证都已被禁用（通常是因为上游 401/403 鉴权失败）。请到面板中手动启用一个凭证后再重试。
+gateway-all-providers-blocked = 所有供应商目前都被熔断器暂时阻断。请在面板中重置一个供应商，或稍后重试。

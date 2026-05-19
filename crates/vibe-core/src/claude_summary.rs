@@ -71,8 +71,11 @@ impl ClaudeSummaryAccumulator {
         if self.emitted || !message_delta_is_final_text_turn(&v) {
             return None;
         }
-        let metrics =
-            SummaryMetrics::from_usage(self.usage, Some(latency_ms.max(0)), self.first_token_ms);
+        let metrics = SummaryMetrics::from_usage(
+            self.usage.clone(),
+            Some(latency_ms.max(0)),
+            self.first_token_ms,
+        );
         let text = render_summary(&self.cfg, self.client.into(), metrics)?;
         if let Some(state) = &self.state {
             if !reserve_summary_slot(state, self.request_id.as_deref(), self.client) {

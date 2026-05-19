@@ -369,7 +369,7 @@ pub struct AppState {
     pub app_logs: Arc<InMemoryAppLogs>,
     pub realtime: Arc<RealtimeRequests>,
     pub plugins: PluginRegistry<AppState>,
-    pub observability: ObservabilityStore,
+    pub observability: Option<ObservabilityStore>,
     codex_summary_config: Arc<Mutex<CodexSummaryConfig>>,
     /// Mirrors `codex.route_status_enabled` from disk; updated on config GET/PUT.
     codex_route_status_on: Arc<AtomicBool>,
@@ -380,10 +380,12 @@ pub struct AppState {
 impl AppState {
     pub fn init(db: Db, config: Config, port: u16) -> Result<Self> {
         #[cfg(test)]
-        let observability = ObservabilityStore::memory()?;
+        let observability = ObservabilityStore::memory().ok();
         #[cfg(not(test))]
-        let observability = ObservabilityStore::open(crate::paths::observability_db_path()?)?;
-        Self::init_with_observability(db, config, port, observability)
+        let observability = Some(ObservabilityStore::open(
+            crate::paths::observability_db_path()?,
+        )?);
+        Self::init_with_optional_observability(db, config, port, observability)
     }
 
     pub fn init_with_observability(
@@ -392,9 +394,29 @@ impl AppState {
         port: u16,
         observability: ObservabilityStore,
     ) -> Result<Self> {
-        observability.migrate_from_legacy(&db)?;
-        let plugin = vibe_observability::ObservabilityPlugin::from_store(observability.clone());
-        let plugins = PluginRegistry::new().with_plugin(plugin);
+        Self::init_with_optional_observability(db, config, port, Some(observability))
+    }
+
+    pub fn init_without_observability(db: Db, config: Config, port: u16) -> Result<Self> {
+        Self::init_with_optional_observability(db, config, port, None)
+    }
+
+    pub fn init_with_optional_observability(
+        db: Db,
+        config: Config,
+        port: u16,
+        observability: Option<ObservabilityStore>,
+    ) -> Result<Self> {
+        if let Some(observability) = observability.as_ref() {
+            observability.migrate_from_legacy(&db)?;
+        }
+        let plugins = if let Some(observability) = observability.as_ref() {
+            PluginRegistry::new().with_plugin(vibe_observability::ObservabilityPlugin::from_store(
+                observability.clone(),
+            ))
+        } else {
+            PluginRegistry::new()
+        };
         let http = Client::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(60))
             .timeout(std::time::Duration::from_secs(120))

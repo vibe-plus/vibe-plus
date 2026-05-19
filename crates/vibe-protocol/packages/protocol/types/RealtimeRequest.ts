@@ -16,6 +16,7 @@ export type RealtimeRequest = {
   status_code: number | null;
   error: string | null;
   active_output_tokens_per_sec: number | null;
+  active_cost_usd_per_hour: number | null;
   active_upstream_bytes_per_sec: number;
   active_downstream_bytes_per_sec: number;
   output_tokens_so_far: bigint;

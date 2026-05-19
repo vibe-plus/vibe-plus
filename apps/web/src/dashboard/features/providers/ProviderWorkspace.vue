@@ -16,6 +16,7 @@ import {
   isProviderHealthSummary,
 } from "../../api/client.ts";
 import { CLIENT_TOOLS, type ClientToolId, type ClientToolInfo } from "../../utils/client-tools.ts";
+import { formatApiError } from "../../utils/api-error.ts";
 import type { ProviderSectionView } from "./types.ts";
 import { useRoute } from "vue-router";
 import { hintsFromAuthJsonTokens } from "../../utils/codex-oauth-hints.ts";
@@ -117,6 +118,10 @@ const authJsonPasteErr = ref("");
 const authJsonDragActive = ref(false);
 const authJsonFileInputRef = ref<HTMLInputElement | null>(null);
 
+function toUiError(err: unknown) {
+  return formatApiError(err, t);
+}
+
 function resetAuthJsonImportUi() {
   authJsonPaste.value = "";
   authJsonPasteErr.value = "";
@@ -206,7 +211,7 @@ function applyAuthJsonText(raw: string, clearPaste: boolean) {
 
     authJsonPasteErr.value = t("authJson.unknownMode", { mode });
   } catch (e: unknown) {
-    authJsonPasteErr.value = e instanceof Error ? e.message : String(e);
+    authJsonPasteErr.value = e instanceof Error ? e.message : toUiError(e);
   }
 }
 
@@ -341,7 +346,7 @@ async function load() {
       sessionStorage.setItem("vp-providers-overview-cache", JSON.stringify(overview));
     } catch {}
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   } finally {
     loading.value = false;
   }
@@ -394,7 +399,7 @@ async function refreshProviderModels(providerId: string) {
     replaceProviderInList(updated);
     error.value = "";
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   } finally {
     const { [providerId]: _, ...rest } = modelRefreshBusy.value;
     modelRefreshBusy.value = rest;
@@ -420,7 +425,7 @@ async function refreshCredentialModels(credentialId: string) {
     }
     error.value = "";
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   } finally {
     const { [credentialId]: _, ...rest } = credModelRefreshBusy.value;
     credModelRefreshBusy.value = rest;
@@ -446,7 +451,7 @@ async function refreshCredentialBalance(credentialId: string) {
     }
     error.value = "";
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   } finally {
     const { [credentialId]: _, ...rest } = credBalanceRefreshBusy.value;
     credBalanceRefreshBusy.value = rest;
@@ -518,7 +523,7 @@ async function loadAndScrollToTargetProvider() {
     await load();
     await scrollToTargetProvider();
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   }
 }
 
@@ -542,7 +547,7 @@ async function saveCredentialOnly(providerId: string, credentialAuthRef: string)
     showForm.value = false;
     await load();
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   }
 }
 
@@ -569,7 +574,7 @@ async function save(payload: ProviderInput, credentialAuthRef: string | null = n
     showForm.value = false;
     await load();
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   }
 }
 
@@ -605,7 +610,7 @@ async function toggleProviderEnabled(p: Provider) {
     }
     error.value = "";
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   } finally {
     const { [p.id]: _, ...rest } = toggleBusy.value;
     toggleBusy.value = rest;
@@ -622,7 +627,7 @@ async function resetProviderCircuit(providerId: string) {
     await refreshSinglePool(providerId);
     error.value = "";
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   } finally {
     const { [providerId]: _, ...rest } = circuitResetBusy.value;
     circuitResetBusy.value = rest;
@@ -635,7 +640,7 @@ async function remove(id: string) {
     await api.providers.delete(id);
     await load();
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   }
 }
 
@@ -704,7 +709,7 @@ async function doCredLogin() {
     credLoginNote.value = res.ok ? t("login.success") : (res.note ?? t("login.failed"));
     if (res.ok) credLoginPassword.value = "";
   } catch (e) {
-    credLoginNote.value = String(e);
+    credLoginNote.value = toUiError(e);
   } finally {
     credLoginBusy.value = false;
   }
@@ -740,7 +745,7 @@ async function saveCred() {
     await loadCreds(credProviderId.value);
     await refreshSinglePool(credProviderId.value);
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   }
 }
 
@@ -751,7 +756,7 @@ async function removeCred(cred: Credential) {
     await loadCreds(cred.provider_id);
     await refreshSinglePool(cred.provider_id);
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   }
 }
 
@@ -777,7 +782,7 @@ async function toggleCredentialEnabled(cred: Credential) {
     await loadCreds(cred.provider_id);
     await refreshSinglePool(cred.provider_id);
   } catch (e) {
-    error.value = String(e);
+    error.value = toUiError(e);
   } finally {
     const { [cred.id]: _, ...rest } = credToggleBusy.value;
     credToggleBusy.value = rest;
@@ -796,7 +801,7 @@ watch(
   () => route.query.provider,
   () => {
     void scrollToTargetProvider().catch((e) => {
-      error.value = String(e);
+      error.value = toUiError(e);
     });
   },
 );

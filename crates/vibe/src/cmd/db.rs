@@ -111,7 +111,12 @@ struct SlimSummary {
     bytes_externalised: i64,
 }
 
-fn slim_one(path: &Path, is_observability: bool, args: &SlimArgs, total: &mut SlimSummary) -> Result<()> {
+fn slim_one(
+    path: &Path,
+    is_observability: bool,
+    args: &SlimArgs,
+    total: &mut SlimSummary,
+) -> Result<()> {
     let db = if is_observability {
         Db::open_observability(path)?
     } else {
@@ -130,8 +135,11 @@ fn slim_one(path: &Path, is_observability: bool, args: &SlimArgs, total: &mut Sl
     if args.vacuum_only {
         println!("  --vacuum-only: skipping backfill.");
     } else if args.dry_run {
-        println!("  --dry-run: would externalise {} rows ({}).",
-            stats.inline_rows(), human_bytes(stats.inline_bytes()));
+        println!(
+            "  --dry-run: would externalise {} rows ({}).",
+            stats.inline_rows(),
+            human_bytes(stats.inline_bytes())
+        );
     } else if stats.inline_rows() == 0 {
         println!("  nothing to backfill.");
     } else {
@@ -151,7 +159,8 @@ fn slim_one(path: &Path, is_observability: bool, args: &SlimArgs, total: &mut Sl
         println!("  --dry-run: skipping VACUUM.");
     } else {
         println!("  running VACUUM…");
-        db.vacuum().with_context(|| format!("VACUUM on {}", path.display()))?;
+        db.vacuum()
+            .with_context(|| format!("VACUUM on {}", path.display()))?;
         println!("  VACUUM done.");
     }
     Ok(())

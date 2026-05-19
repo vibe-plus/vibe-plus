@@ -32,10 +32,11 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use vibe_protocol::{
     AppLogEvent, AppLogLevel, ClientStatus, ClientTakeoverResult, CodexPlanRefreshResult,
-    Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus, DashboardStats,
-    Health, HealthSummary, LocalCandidate, Meta, Provider, ProviderAuthPoolSummary,
-    ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary, ProviderInput,
-    ProviderUpstreamSummary, ProvidersOverview, RealtimeSnapshot, Status, Upstream, UsageSummary,
+    Credential, CredentialInput, CredentialPlanSnapshot, CredentialPoolStatus,
+    CredentialQuotaStatus, DashboardStats, Health, HealthSummary, LocalCandidate, Meta, Provider,
+    ProviderAuthPoolSummary, ProviderCodexPlanItem, ProviderHealth, ProviderHealthSummary,
+    ProviderInput, ProviderUpstreamSummary, ProvidersOverview, RealtimeSnapshot, Status, Upstream,
+    UsageSummary,
 };
 
 mod clients;
@@ -136,6 +137,14 @@ pub fn router(state: AppState) -> Router {
         // credentials
         .route("/_vp/credentials", get(list_credentials_all))
         .route(
+            "/_vp/credentials/quota-status",
+            get(list_credential_quota_statuses),
+        )
+        .route(
+            "/_vp/credentials/:id/quota-status",
+            get(get_credential_quota_status),
+        )
+        .route(
             "/_vp/providers/:id/credentials",
             get(list_credentials).post(create_credential),
         )
@@ -183,23 +192,7 @@ pub fn router(state: AppState) -> Router {
         .route("/_vp/stats/dashboard", get(dashboard_stats))
         .route("/_vp/realtime", get(realtime_snapshot))
         .route("/_vp/stream/realtime", get(realtime_stream))
-        .route("/_vp/app-logs", get(list_app_logs))
-        .nest(
-            "/_vp/observability",
-            vibe_observability::router().with_state(state.observability.clone()),
-        )
-        .nest(
-            "/_vp/records",
-            vibe_observability::legacy_records_router().with_state(state.observability.clone()),
-        )
-        .nest(
-            "/_vp/logs",
-            vibe_observability::legacy_logs_router().with_state(state.observability.clone()),
-        )
-        .nest(
-            "/_vp/stats",
-            vibe_observability::legacy_stats_router(state.db.clone()),
-        )
+        .merge(observability_routes(&state))
         .route("/_vp/codex-history/preview", get(get_codex_history_preview))
         .route("/_vp/codex-history/unify", post(post_codex_history_unify))
         // sandboxed read/write of ~/.codex and ~/.claude
@@ -220,6 +213,24 @@ pub fn router(state: AppState) -> Router {
         // framework-level 413 before the handler runs.
         .layer(DefaultBodyLimit::disable())
         .with_state(state)
+}
+
+fn observability_routes(state: &AppState) -> Router<AppState> {
+    let Some(observability) = state.observability.clone() else {
+        return Router::new().route("/_vp/observability/*path", any(observability_unavailable));
+    };
+
+    Router::new().nest(
+        "/_vp/observability",
+        vibe_observability::router().with_state(observability),
+    )
+}
+
+async fn observability_unavailable() -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "observability plugin is not enabled",
+    )
 }
 
 pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
@@ -577,6 +588,10 @@ mod observability_route_tests {
             started_at: 1,
             app: None,
             provider_id: Some("p1".into()),
+            thread_id: None,
+            turn_id: None,
+            trace_id: None,
+            session_id: None,
             requested_model: Some("m".into()),
             upstream_model: Some("m".into()),
             status_code: Some(200),
@@ -587,6 +602,14 @@ mod observability_route_tests {
             output_tokens: 2,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            audio_input_tokens: 0,
+            audio_output_tokens: 0,
+            accepted_prediction_tokens: 0,
+            rejected_prediction_tokens: 0,
+            cost_items: None,
             estimated_cost_usd: "0".into(),
             wire: Some("openai-responses".into()),
             route_prefix: None,
@@ -645,18 +668,20 @@ mod observability_route_tests {
         .expect("state");
         let app = router(state);
 
-        for uri in ["/_vp/records/requests", "/_vp/observability/requests"] {
-            let response = app
-                .clone()
-                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            let page: LogPage = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(page.items.len(), 1);
-            assert_eq!(page.items[0].id, "r-route");
-        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/_vp/observability/requests")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let page: LogPage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, "r-route");
     }
 }
 
