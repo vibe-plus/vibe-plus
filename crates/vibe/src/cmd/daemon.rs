@@ -105,9 +105,12 @@ pub async fn run_server(port: u16) -> Result<()> {
     // `vibe_core::config::Config::default()`. The CLI `--port` flag below is
     // the one user-visible knob still in play.
     let db_path = paths::db_path()?;
+    let observability_db_path = paths::observability_db_path()?;
     let body_dir = paths::bodies_dir()?;
     let mut cfg = Config::default();
     cfg.server.port = port;
+    let observability = vibe_observability::ObservabilityStore::open(&observability_db_path)?;
+    observability.migrate_from_legacy_path(&db_path)?;
     let db = Db::open(&db_path)?.with_body_store(body_dir);
     match db.migrate_inline_bodies_to_body_refs(10_000) {
         Ok(n) if n > 0 => tracing::info!(
@@ -120,7 +123,7 @@ pub async fn run_server(port: u16) -> Result<()> {
     if let Err(e) = db.prune_short_logs(&vibe_db::ShortLogRetentionPolicy::default()) {
         tracing::warn!(?e, "short log retention prune failed on gateway up");
     }
-    let state = AppState::init(db, cfg, port)?;
+    let state = AppState::init_with_observability(db, cfg, port, observability)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
     write_pid()?;
     vibe_core::server::serve(addr, state).await?;

@@ -1,4 +1,5 @@
 use super::*;
+use vibe_plugin_api::GatewayEvent;
 use vibe_protocol::ProviderKind;
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +267,19 @@ pub(super) fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Structured payload for credential.* app-log events (matches provider.* shape).
+fn credential_app_event_payload(c: &Credential, provider: Option<&Provider>) -> serde_json::Value {
+    let provider = match provider {
+        Some(p) => serde_json::json!({ "id": p.id, "name": p.name }),
+        None => serde_json::json!({ "id": c.provider_id }),
+    };
+    serde_json::json!({
+        "schema": 1,
+        "credential": { "id": c.id, "label": c.label },
+        "provider": provider,
+    })
+}
+
 pub(super) fn emit_app_log(state: &AppState, level: AppLogLevel, category: &str, message: String) {
     emit_app_event(
         state,
@@ -296,7 +310,8 @@ pub(super) fn emit_app_event(
         message,
         detail,
     };
-    state.app_logs.push(ev);
+    state.app_logs.push(ev.clone());
+    state.plugins.emit(GatewayEvent::AppLog(ev));
 }
 
 pub(super) async fn provider_health(
@@ -636,8 +651,10 @@ pub(super) async fn create_credential(
         input.auth_ref.as_deref(),
         input.oauth_access_token.as_deref(),
     );
-    let mut c = run_blocking(state.clone(), move |s| {
-        s.db.credential_insert(&provider_id, input, Some(fp))
+    let (mut c, provider) = run_blocking(state.clone(), move |s| {
+        let c = s.db.credential_insert(&provider_id, input, Some(fp))?;
+        let provider = s.db.provider_get(&provider_id)?;
+        Ok::<_, anyhow::Error>((c, provider))
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
@@ -646,11 +663,7 @@ pub(super) async fn create_credential(
         AppLogLevel::Info,
         "credential",
         "credential.created",
-        serde_json::json!({
-            "schema": 1,
-            "credential": { "id": c.id, "label": c.label },
-            "provider": { "id": c.provider_id },
-        }),
+        credential_app_event_payload(&c, provider.as_ref()),
         format!("Credential added: {label}"),
         None,
     );
@@ -678,8 +691,10 @@ pub(super) async fn update_credential(
         input.auth_ref.as_deref(),
         input.oauth_access_token.as_deref(),
     );
-    let mut c = run_blocking(state.clone(), move |s| {
-        s.db.credential_update(&id, input, Some(fp))
+    let (mut c, provider) = run_blocking(state.clone(), move |s| {
+        let c = s.db.credential_update(&id, input, Some(fp))?;
+        let provider = s.db.provider_get(&c.provider_id)?;
+        Ok::<_, anyhow::Error>((c, provider))
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
@@ -688,11 +703,7 @@ pub(super) async fn update_credential(
         AppLogLevel::Info,
         "credential",
         "credential.updated",
-        serde_json::json!({
-            "schema": 1,
-            "credential": { "id": c.id, "label": c.label },
-            "provider": { "id": c.provider_id },
-        }),
+        credential_app_event_payload(&c, provider.as_ref()),
         format!("Credential updated: {label}"),
         None,
     );
@@ -878,19 +889,28 @@ pub(super) async fn delete_credential(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let id_clone = id.clone();
-    run_blocking(state.clone(), move |s| s.db.credential_delete(&id_clone)).await?;
-    emit_app_event(
-        &state,
-        AppLogLevel::Warn,
-        "credential",
-        "credential.deleted",
-        serde_json::json!({
-            "schema": 1,
-            "credential": { "id": id },
-        }),
-        format!("Credential deleted: {id}"),
-        None,
-    );
+    let snapshot = run_blocking(state.clone(), move |s| {
+        let cred = s.db.credential_get(&id_clone)?;
+        let provider = cred
+            .as_ref()
+            .and_then(|c| s.db.provider_get(&c.provider_id).ok().flatten());
+        if cred.is_some() {
+            s.db.credential_delete(&id_clone)?;
+        }
+        Ok::<_, anyhow::Error>((cred, provider))
+    })
+    .await?;
+    if let Some(c) = snapshot.0.as_ref() {
+        emit_app_event(
+            &state,
+            AppLogLevel::Warn,
+            "credential",
+            "credential.deleted",
+            credential_app_event_payload(c, snapshot.1.as_ref()),
+            format!("Credential deleted: {}", c.label),
+            None,
+        );
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -899,8 +919,10 @@ pub(super) async fn enable_credential(
     Path(id): Path<String>,
 ) -> Result<Json<Credential>, AppError> {
     state.cb.reset(&id);
-    let mut c = run_blocking(state.clone(), move |s| {
-        s.db.credential_set_enabled(&id, true)
+    let (mut c, provider) = run_blocking(state.clone(), move |s| {
+        let c = s.db.credential_set_enabled(&id, true)?;
+        let provider = s.db.provider_get(&c.provider_id)?;
+        Ok::<_, anyhow::Error>((c, provider))
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
@@ -909,11 +931,7 @@ pub(super) async fn enable_credential(
         AppLogLevel::Info,
         "credential",
         "credential.enabled",
-        serde_json::json!({
-            "schema": 1,
-            "credential": { "id": c.id, "label": c.label },
-            "provider": { "id": c.provider_id },
-        }),
+        credential_app_event_payload(&c, provider.as_ref()),
         format!("Credential enabled: {}", c.label),
         None,
     );
@@ -925,8 +943,10 @@ pub(super) async fn disable_credential(
     Path(id): Path<String>,
 ) -> Result<Json<Credential>, AppError> {
     state.cb.reset(&id);
-    let mut c = run_blocking(state.clone(), move |s| {
-        s.db.credential_set_enabled(&id, false)
+    let (mut c, provider) = run_blocking(state.clone(), move |s| {
+        let c = s.db.credential_set_enabled(&id, false)?;
+        let provider = s.db.provider_get(&c.provider_id)?;
+        Ok::<_, anyhow::Error>((c, provider))
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
@@ -935,11 +955,7 @@ pub(super) async fn disable_credential(
         AppLogLevel::Warn,
         "credential",
         "credential.disabled",
-        serde_json::json!({
-            "schema": 1,
-            "credential": { "id": c.id, "label": c.label },
-            "provider": { "id": c.provider_id },
-        }),
+        credential_app_event_payload(&c, provider.as_ref()),
         format!("Credential disabled: {}", c.label),
         None,
     );

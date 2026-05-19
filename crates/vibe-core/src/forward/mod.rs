@@ -44,6 +44,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use vibe_plugin_api::GatewayEvent;
 use vibe_protocol::{
     AppLogEvent, AppLogLevel, Credential, CredentialPlanSnapshot, ProviderKind, RequestLog,
     UpstreamAttemptLog, UpstreamAttemptOutcome, UpstreamAttemptPhase,
@@ -134,7 +135,8 @@ pub(crate) fn emit_circuit_event(
         message,
         detail,
     };
-    state.app_logs.push(ev);
+    state.app_logs.push(ev.clone());
+    state.plugins.emit(GatewayEvent::AppLog(ev));
 }
 
 const CODEX_STICKY_ROUTE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -354,15 +356,7 @@ pub(crate) fn persist_request_log(state: &AppState, log: RequestLog) {
 }
 
 fn persist_request_log_to_db(state: &AppState, log: RequestLog) {
-    let db = state.db.clone();
-    tokio::spawn(async move {
-        let res = tokio::task::spawn_blocking(move || db.log_insert(&log)).await;
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(?e, "persist request log failed"),
-            Err(e) => tracing::warn!(?e, "persist request log task failed"),
-        }
-    });
+    state.plugins.emit(GatewayEvent::RequestFinished(log));
 }
 
 pub(crate) fn publish_request_started(
@@ -594,15 +588,9 @@ pub(crate) fn attempt_log_from_parts(
 }
 
 pub(crate) fn persist_upstream_attempt_log(state: &AppState, attempt: UpstreamAttemptLog) {
-    let db = state.db.clone();
-    tokio::spawn(async move {
-        let res = tokio::task::spawn_blocking(move || db.upstream_attempt_insert(&attempt)).await;
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(?e, "persist upstream attempt log failed"),
-            Err(e) => tracing::warn!(?e, "persist upstream attempt log task failed"),
-        }
-    });
+    state
+        .plugins
+        .emit(GatewayEvent::UpstreamAttemptFinished(attempt));
 }
 
 pub(crate) fn mark_provider_health(

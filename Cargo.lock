@@ -4240,6 +4240,8 @@ dependencies = [
  "vibe-core",
  "vibe-db",
  "vibe-i18n",
+ "vibe-observability",
+ "vibe-plugin-api",
  "vibe-protocol",
 ]
 
@@ -4305,6 +4307,8 @@ dependencies = [
  "uuid",
  "vibe-db",
  "vibe-i18n",
+ "vibe-observability",
+ "vibe-plugin-api",
  "vibe-protocol",
 ]
 
@@ -4314,6 +4318,7 @@ version = "0.0.6"
 dependencies = [
  "anyhow",
  "chrono",
+ "flate2",
  "rusqlite",
  "rusqlite_migration",
  "serde",
@@ -4333,6 +4338,31 @@ dependencies = [
  "fluent-templates",
  "once_cell",
  "unic-langid",
+]
+
+[[package]]
+name = "vibe-observability"
+version = "0.0.6"
+dependencies = [
+ "anyhow",
+ "axum",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "vibe-db",
+ "vibe-plugin-api",
+ "vibe-protocol",
+]
+
+[[package]]
+name = "vibe-plugin-api"
+version = "0.0.6"
+dependencies = [
+ "anyhow",
+ "axum",
+ "tracing",
+ "vibe-protocol",
 ]
 
 [[package]]

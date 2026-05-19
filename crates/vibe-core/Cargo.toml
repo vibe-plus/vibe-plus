@@ -11,6 +11,8 @@ description = "Local API gateway core: server, providers, router, transforms."
 vibe-protocol = { workspace = true }
 vibe-db = { workspace = true }
 vibe-i18n = { workspace = true }
+vibe-observability = { workspace = true }
+vibe-plugin-api = { workspace = true }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

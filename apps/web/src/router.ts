@@ -30,9 +30,14 @@ export const router = createRouter({
           name: "providers",
           component: () => import("./dashboard/pages/Providers.vue"),
         },
+        {
+          path: "observability",
+          name: "observability",
+          component: () => import("./dashboard/pages/Observability.vue"),
+        },
         { path: "routes", redirect: "/ui/providers" },
-        { path: "monitor", redirect: "/ui/overview" },
-        { path: "logs", redirect: "/ui/overview" },
+        { path: "monitor", redirect: "/ui/observability" },
+        { path: "logs", redirect: "/ui/observability" },
         {
           path: "settings",
           name: "settings",

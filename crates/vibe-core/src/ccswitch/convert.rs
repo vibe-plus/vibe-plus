@@ -62,10 +62,7 @@ pub fn draft_from_ccswitch(
         name,
         group_name,
         avatar_url: None,
-        kind: protocols
-            .first()
-            .map(|p| p.kind)
-            .unwrap_or(primary_kind),
+        kind: protocols.first().map(|p| p.kind).unwrap_or(primary_kind),
         base_url: protocols
             .first()
             .map(|p| p.base_url.clone())
@@ -117,8 +114,9 @@ fn map_primary_kind(
         CcSwitchAppType::Codex | CcSwitchAppType::Opencode | CcSwitchAppType::Openclaw => {
             detect_kind_from_base_url(base_url).unwrap_or(ProviderKind::OpenaiResponses)
         }
-        CcSwitchAppType::Hermes => detect_kind_from_base_url(base_url)
-            .unwrap_or(ProviderKind::OpenaiResponses),
+        CcSwitchAppType::Hermes => {
+            detect_kind_from_base_url(base_url).unwrap_or(ProviderKind::OpenaiResponses)
+        }
     }
 }
 
@@ -126,7 +124,9 @@ fn map_api_format(fmt: &str) -> Option<ProviderKind> {
     match fmt.trim().to_ascii_lowercase().as_str() {
         "anthropic" => Some(ProviderKind::Anthropic),
         "openai_chat" | "openai-chat" | "chat" => Some(ProviderKind::OpenaiChat),
-        "openai_responses" | "openai-responses" | "responses" => Some(ProviderKind::OpenaiResponses),
+        "openai_responses" | "openai-responses" | "responses" => {
+            Some(ProviderKind::OpenaiResponses)
+        }
         "gemini_native" | "gemini-native" | "gemini" => Some(ProviderKind::GeminiNative),
         _ => None,
     }
@@ -209,10 +209,7 @@ fn extract_connection(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
-            let config_toml = settings
-                .get("config")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let config_toml = settings.get("config").and_then(Value::as_str).unwrap_or("");
             let (base_url, wire) = parse_codex_config_toml(config_toml)?;
             Ok((base_url, wire, api_key))
         }
@@ -265,7 +262,10 @@ fn parse_codex_config_toml(raw: &str) -> Result<(Option<String>, Option<String>)
 }
 
 fn toml_string(v: Option<&toml::Value>) -> Option<String> {
-    v.and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    v.and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn fallback_display_name(base_url: &str) -> String {

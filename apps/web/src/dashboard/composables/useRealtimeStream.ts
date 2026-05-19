@@ -3,9 +3,20 @@ import { api, apiUrl, type RealtimeSnapshot } from "../api/client.ts";
 
 export type RealtimeTransport = "connecting" | "stream" | "polling" | "offline";
 
+export interface UseRealtimeStreamOptions {
+  /**
+   * If > 0, the composable keeps the last N snapshots in `history` so consumers
+   * (waveform sparkline, recent-activity strip) can read short timeseries
+   * without each keeping their own ring buffer. 0 disables history entirely.
+   */
+  historySize?: number;
+}
+
 export interface UseRealtimeStreamResult {
   snapshot: Ref<RealtimeSnapshot | null>;
   transport: Ref<RealtimeTransport>;
+  /** Rolling buffer of recent snapshots, oldest first. Empty when historySize is 0. */
+  history: Ref<RealtimeSnapshot[]>;
   /** Force a one-off refresh — useful right after an action that should bump KPIs. */
   refresh: () => Promise<void>;
 }
@@ -25,9 +36,19 @@ const RECONNECT_BACKOFF_MS = [500, 1_000, 2_000, 5_000];
  * The fallback path is what keeps things working on older gateway binaries
  * (the SSE route only exists from this build forward).
  */
-export function useRealtimeStream(): UseRealtimeStreamResult {
+export function useRealtimeStream(options: UseRealtimeStreamOptions = {}): UseRealtimeStreamResult {
+  const historySize = Math.max(0, options.historySize ?? 0);
   const snapshot = shallowRef<RealtimeSnapshot | null>(null);
   const transport = ref<RealtimeTransport>("connecting");
+  const history = shallowRef<RealtimeSnapshot[]>([]);
+
+  function record(next: RealtimeSnapshot) {
+    snapshot.value = next;
+    if (historySize > 0) {
+      const buf = history.value.concat(next);
+      history.value = buf.length > historySize ? buf.slice(buf.length - historySize) : buf;
+    }
+  }
 
   let source: EventSource | null = null;
   let pollTimer: number | null = null;
@@ -58,7 +79,7 @@ export function useRealtimeStream(): UseRealtimeStreamResult {
 
   async function pollOnce() {
     try {
-      snapshot.value = await api.realtime();
+      record(await api.realtime());
       transport.value = "polling";
     } catch {
       transport.value = "offline";
@@ -101,7 +122,7 @@ export function useRealtimeStream(): UseRealtimeStreamResult {
 
     const handle = (raw: string) => {
       try {
-        snapshot.value = JSON.parse(raw) as RealtimeSnapshot;
+        record(JSON.parse(raw) as RealtimeSnapshot);
         transport.value = "stream";
         reconnectAttempt = 0;
       } catch {
@@ -122,7 +143,7 @@ export function useRealtimeStream(): UseRealtimeStreamResult {
 
   async function refresh() {
     try {
-      snapshot.value = await api.realtime();
+      record(await api.realtime());
     } catch {
       // leave previous snapshot in place
     }
@@ -140,5 +161,5 @@ export function useRealtimeStream(): UseRealtimeStreamResult {
     closeStream();
   });
 
-  return { snapshot, transport, refresh };
+  return { snapshot, transport, history, refresh };
 }

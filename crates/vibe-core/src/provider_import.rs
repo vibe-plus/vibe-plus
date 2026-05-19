@@ -57,11 +57,7 @@ fn find_existing_provider(db: &Db, input: &ProviderInput) -> Result<Option<Provi
     Ok(None)
 }
 
-fn attach_ccswitch_credential(
-    db: &Db,
-    provider: &Provider,
-    auth_ref: Option<&str>,
-) -> Result<()> {
+fn attach_ccswitch_credential(db: &Db, provider: &Provider, auth_ref: Option<&str>) -> Result<()> {
     let Some(auth_ref) = auth_ref.filter(|s| !s.trim().is_empty()) else {
         return Ok(());
     };

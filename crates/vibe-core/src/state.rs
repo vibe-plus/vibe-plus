@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use vibe_db::Db;
+use vibe_observability::ObservabilityStore;
+use vibe_plugin_api::PluginRegistry;
 use vibe_protocol::{AppLogEvent, RealtimeProvider, RealtimeRequest, RealtimeSnapshot};
 
 const MAX_IN_MEMORY_APP_LOGS: usize = 500;
@@ -366,6 +368,8 @@ pub struct AppState {
     pub codex_turn_io: Arc<Mutex<HashMap<String, (i64, i64, Instant)>>>,
     pub app_logs: Arc<InMemoryAppLogs>,
     pub realtime: Arc<RealtimeRequests>,
+    pub plugins: PluginRegistry<AppState>,
+    pub observability: ObservabilityStore,
     codex_summary_config: Arc<Mutex<CodexSummaryConfig>>,
     /// Mirrors `codex.route_status_enabled` from disk; updated on config GET/PUT.
     codex_route_status_on: Arc<AtomicBool>,
@@ -375,6 +379,22 @@ pub struct AppState {
 
 impl AppState {
     pub fn init(db: Db, config: Config, port: u16) -> Result<Self> {
+        #[cfg(test)]
+        let observability = ObservabilityStore::memory()?;
+        #[cfg(not(test))]
+        let observability = ObservabilityStore::open(crate::paths::observability_db_path()?)?;
+        Self::init_with_observability(db, config, port, observability)
+    }
+
+    pub fn init_with_observability(
+        db: Db,
+        config: Config,
+        port: u16,
+        observability: ObservabilityStore,
+    ) -> Result<Self> {
+        observability.migrate_from_legacy(&db)?;
+        let plugin = vibe_observability::ObservabilityPlugin::from_store(observability.clone());
+        let plugins = PluginRegistry::new().with_plugin(plugin);
         let http = Client::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(60))
             .timeout(std::time::Duration::from_secs(120))
@@ -401,6 +421,8 @@ impl AppState {
             codex_turn_io: Arc::new(Mutex::new(HashMap::new())),
             app_logs: Arc::new(InMemoryAppLogs::default()),
             realtime: Arc::new(RealtimeRequests::default()),
+            plugins,
+            observability,
         })
     }
 

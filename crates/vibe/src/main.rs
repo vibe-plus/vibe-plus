@@ -49,6 +49,9 @@ enum Command {
     Update,
     /// Open the vibe+ dashboard in the browser (picks fastest CDN).
     Ui,
+    /// Local DB maintenance (slim / vacuum).
+    #[command(subcommand)]
+    Db(cmd::db::DbCommand),
 }
 
 #[tokio::main]
@@ -71,6 +74,7 @@ async fn main() -> Result<()> {
         Some(Command::Install(a)) => cmd::install::run(a).await,
         Some(Command::Update) => cmd::update::run(),
         Some(Command::Ui) => cmd::ui::run().await,
+        Some(Command::Db(c)) => cmd::db::run(c).await,
     }
 }
 

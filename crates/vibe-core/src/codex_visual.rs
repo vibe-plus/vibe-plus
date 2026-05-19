@@ -501,9 +501,8 @@ mod tests {
             remaining: 2_100_000,
             limit: 3_000_000,
         });
-        assert!(
-            status_message_text(&ctx, 1, CodexClientKind::App).contains("\\textsf{Token}=2.1\\textsf{M}")
-        );
+        assert!(status_message_text(&ctx, 1, CodexClientKind::App)
+            .contains("\\textsf{Token}=2.1\\textsf{M}"));
     }
 
     #[test]

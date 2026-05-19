@@ -271,6 +271,147 @@ export interface RealtimeSnapshot {
   codex_ws_active: number;
   codex_last_transport: string | null;
 }
+export interface RequestRecordsQuery {
+  limit?: number;
+  offset?: number;
+  /** Unix seconds; only return requests with `started_at >= since`. */
+  since?: number;
+  provider_id?: string;
+  status_ok?: boolean;
+}
+
+/**
+ * One inbound client request handled by the gateway. Has both the downstream
+ * (client → gateway) and the *aggregate* upstream view; per-attempt detail
+ * lives in `UpstreamAttemptLog`.
+ */
+export interface RequestLog {
+  id: string;
+  started_at: number;
+  app: string | null;
+  provider_id: string | null;
+  requested_model: string | null;
+  upstream_model: string | null;
+  status_code: number | null;
+  error: string | null;
+  latency_ms: number | null;
+  first_token_ms: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  estimated_cost_usd: string;
+  wire?: string | null;
+  route_prefix?: string | null;
+  credential_id?: string | null;
+  cb_key?: string | null;
+  upstream_http_status?: number | null;
+  upstream_error_preview?: string | null;
+  dedupe_key?: string | null;
+  client_transport?: string | null;
+  request_headers?: string | null;
+  request_body?: string | null;
+  response_body?: string | null;
+  client_response_body?: string | null;
+  stream_kind?: string | null;
+  stream_terminal_seen?: boolean | null;
+  stream_end_reason?: string | null;
+  stream_error_detail?: string | null;
+  upstream_first_byte_ms?: number | null;
+  client_first_write_ms?: number | null;
+  last_upstream_event_ms?: number | null;
+  last_client_write_ms?: number | null;
+  upstream_chunk_count?: number;
+  upstream_bytes?: number;
+  client_chunk_count?: number;
+  client_bytes?: number;
+  sse_event_count?: number;
+  sse_data_count?: number;
+  sse_comment_count?: number;
+  sse_keepalive_count?: number;
+  sse_done_count?: number;
+}
+
+export interface LogPage {
+  items: RequestLog[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export type UpstreamAttemptOutcome =
+  | "success"
+  | "failure"
+  | "race_aborted"
+  | "rate_limit"
+  | "auth_error"
+  | "payment_error"
+  | "server_error"
+  | "not_found";
+
+export type UpstreamAttemptPhase = "start" | "first_byte" | "complete" | "abort";
+
+/** One attempt within a wave dispatched for a given inbound request. */
+export interface UpstreamAttemptLog {
+  attempt_id: string;
+  request_id: string;
+  attempt_index: number;
+  wave_index: number;
+  wave_size: number;
+  upstream_id: string | null;
+  started_at: number;
+  ended_at: number | null;
+  provider_id: string | null;
+  credential_id: string | null;
+  wire: string | null;
+  route_prefix: string | null;
+  requested_model: string | null;
+  upstream_model: string | null;
+  phase: UpstreamAttemptPhase;
+  outcome: UpstreamAttemptOutcome;
+  status_code: number | null;
+  upstream_http_status: number | null;
+  error_summary: string | null;
+  latency_ms: number | null;
+  first_token_ms: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  estimated_cost_usd: string;
+  upstream_first_byte_ms: number | null;
+  client_first_write_ms: number | null;
+  last_upstream_event_ms: number | null;
+  last_client_write_ms: number | null;
+  upstream_chunk_count: number;
+  upstream_bytes: number;
+  client_chunk_count: number;
+  client_bytes: number;
+  sse_event_count: number;
+  sse_data_count: number;
+  sse_comment_count: number;
+  sse_keepalive_count: number;
+  sse_done_count: number;
+  parse_error_count: number;
+  first_keepalive_ms: number | null;
+  last_keepalive_ms: number | null;
+  max_gap_between_upstream_events_ms: number | null;
+  max_gap_between_data_events_ms: number | null;
+  keepalive_after_last_data_count: number;
+  last_data_event_ms: number | null;
+  bridge_mode: string | null;
+  status_injected: boolean;
+  terminal_injected: boolean;
+  upstream_terminal_type: string | null;
+  active_upstream_decode_tps_peak: number | null;
+  active_downstream_emit_tps_peak: number | null;
+  request_headers: string | null;
+  request_body: string | null;
+  response_headers: string | null;
+  response_body: string | null;
+}
+
 export interface UsageSummary {
   range: string;
   requests: number;
@@ -796,6 +937,28 @@ export const api = {
       req<AppLogEvent[]>(
         `/_vp/app-logs?limit=${limit}${since !== undefined ? `&since=${since}` : ""}`,
       ),
+  },
+  records: {
+    requests: (opts: RequestRecordsQuery = {}) => {
+      const params = new URLSearchParams();
+      if (opts.limit != null) params.set("limit", String(opts.limit));
+      if (opts.offset != null) params.set("offset", String(opts.offset));
+      if (opts.since != null) params.set("since", String(opts.since));
+      if (opts.provider_id) params.set("provider_id", opts.provider_id);
+      if (opts.status_ok != null) params.set("status_ok", String(opts.status_ok));
+      const qs = params.toString();
+      return req<LogPage>(`/_vp/records/requests${qs ? `?${qs}` : ""}`);
+    },
+    request: (id: string) => req<RequestLog>(`/_vp/records/requests/${encodeURIComponent(id)}`),
+    requestNetwork: (id: string) =>
+      req<UpstreamAttemptLog[]>(`/_vp/records/requests/${encodeURIComponent(id)}/network`),
+    networkAttempts: (opts: { limit?: number; offset?: number } = {}) => {
+      const params = new URLSearchParams();
+      if (opts.limit != null) params.set("limit", String(opts.limit));
+      if (opts.offset != null) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return req<UpstreamAttemptLog[]>(`/_vp/records/network-attempts${qs ? `?${qs}` : ""}`);
+    },
   },
   usage: (hours = 24) => req<UsageSummary>(`/_vp/usage/summary?hours=${hours}`),
   stats: (hours = 24) => req<DashboardStats>(`/_vp/stats/dashboard?hours=${hours}`),

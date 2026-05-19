@@ -38,15 +38,9 @@ jobs:
         with:
           key: windows-cli
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-          package-manager-cache: false
-
       - name: Build CLI
         run: cargo build --release -p vibe
 
-      - name: Smoke test CLI binary and npm wrapper
+      - name: Smoke test gateway
         shell: pwsh
         run: ./.github/scripts/test-windows-cli.ps1 -RepoRoot $env:GITHUB_WORKSPACE -ExePath "$env:GITHUB_WORKSPACE/target/release/vibe.exe"

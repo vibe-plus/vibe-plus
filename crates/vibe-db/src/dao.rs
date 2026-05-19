@@ -645,6 +645,19 @@ impl Db {
             .context("updated provider missing on read-back")
     }
 
+    /// Decide whether a body string goes inline (DB column) or externalised
+    /// (filesystem via `BodyStore`).
+    ///
+    /// Invariant: production callers always have a `BodyStore` configured
+    /// (`Db::open` sets it via `default_body_store_for_db`), so any non-empty
+    /// body goes to the body store, which gzips on write
+    /// (`body_store::write_text`). Reads transparently handle both the new
+    /// gzip-on-disk format and any older raw bytes that predate compression
+    /// (`body_store::read_text` checks the gzip magic prefix).
+    ///
+    /// The inline fallback is reserved for `Db::memory()` / tests. If we hit
+    /// it in production with a non-empty body something is misconfigured —
+    /// log a warning so the operator notices.
     fn body_value_for_insert(
         &self,
         kind: &str,
@@ -653,6 +666,13 @@ impl Db {
     ) -> Result<(Option<String>, Option<String>)> {
         match (self.body_store(), value.as_deref()) {
             (Some(store), Some(text)) => Ok((None, Some(store.write_text(kind, owner_id, text)?))),
+            (None, Some(text)) if !text.is_empty() => {
+                tracing::warn!(
+                    %kind, %owner_id, len = text.len(),
+                    "body_store unavailable; persisting raw body inline (test config?)"
+                );
+                Ok((value.clone(), None))
+            }
             _ => Ok((value.clone(), None)),
         }
     }
@@ -1180,7 +1200,7 @@ impl Db {
         )?;
         self.with_short(|c| {
             c.execute(
-                "INSERT INTO upstream_attempt_logs (
+                "INSERT OR REPLACE INTO upstream_attempt_logs (
                     attempt_id, request_id, attempt_index, wave_index, wave_size, upstream_id, started_at, ended_at,
                     provider_id, credential_id, wire, route_prefix, requested_model, upstream_model,
                     phase, outcome, status_code, upstream_http_status, error_summary,
