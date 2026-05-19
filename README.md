@@ -22,11 +22,21 @@ Install, open the dashboard, import credentials — done. Data stays on your mac
 
 ### Slot
 
-![Slot](docs/assets/features/slot.png)
+See the information you need in familiar places.
+
+![Slot](assets/features/slot.png)
 
 ### Unified history
 
+One history, across all providers.
+
+![Unified history](assets/features/history.png)
+
 ### Wave routing
+
+Wave 3 is the answer, not an endless chain.
+
+![Wave routing](assets/features/wave.png)
 
 ---
 
