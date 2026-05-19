@@ -13,7 +13,7 @@
     },
     "apps/web": {
       "name": "web",
-      "version": "0.0.5",
+      "version": "0.0.6",
       "dependencies": {
         "diff": "^9.0.0",
         "pinia": "^2.3.1",
@@ -59,15 +59,15 @@
     },
     "packages/cli-npm": {
       "name": "@vibe-plus/cli",
-      "version": "0.0.5",
+      "version": "0.0.6",
       "bin": {
         "v": "bin/vibe.js",
         "vibe": "bin/vibe.js",
         "vibe-plus": "bin/vibe.js",
       },
       "optionalDependencies": {
-        "@vibe-plus/cli-darwin-arm64": "0.0.5",
-        "@vibe-plus/cli-win32-x64": "0.0.5",
+        "@vibe-plus/cli-darwin-arm64": "0.0.6",
+        "@vibe-plus/cli-win32-x64": "0.0.6",
       },
     },
     "packages/mcp": {
@@ -427,10 +427,6 @@
     "@vibe-plus/app": ["@vibe-plus/app@workspace:packages/app-npm"],
 
     "@vibe-plus/cli": ["@vibe-plus/cli@workspace:packages/cli-npm"],
-
-    "@vibe-plus/cli-darwin-arm64": ["@vibe-plus/cli-darwin-arm64@0.0.5", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Pq5LgArByllA5q40nng/zyCrhKa0bmT1HYUi8Z0Niz9uVDyMzO4FBDMHkDK/WCGjLPtscnIwVyOgCRNAipUARw=="],
-
-    "@vibe-plus/cli-win32-x64": ["@vibe-plus/cli-win32-x64@0.0.5", "", { "os": "win32", "cpu": "x64" }, "sha512-iA7ByWjvYKVB3/5b0CrKQR90h2a6Yd2Jt8jmZx3eAIG/VuBJ/15QD9FRA8Yz7i0vo8uNp+AGzNpjNqL5VthN0g=="],
 
     "@vibe-plus/mcp": ["@vibe-plus/mcp@workspace:packages/mcp"],
 
