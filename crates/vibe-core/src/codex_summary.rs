@@ -201,8 +201,8 @@ impl SummaryAccumulator {
                 }
             }
             self.emitted = true;
-            // Σusd = turn-total cost (sum of all N tool-call requests this turn).
-            // Always >= ~usd (per-request cost). Fills in after slot reserved.
+            // Σusd = thread-total cost. Fills in after slot reserved so a turn
+            // that does not render a summary does not affect the visible total.
             metrics.thread_cost_usd = self.turn_total_cost();
             // Re-render with turn total included.
             let text = render_summary(&self.cfg, self.client, metrics).unwrap_or(text);
@@ -264,6 +264,9 @@ impl SummaryAccumulator {
                 && v.pointer("/item/type").and_then(Value::as_str) == Some("message")
         });
         if has_message_item_done {
+            return true;
+        }
+        if self.last_text_target.is_some() {
             return true;
         }
         // Fallback: a non-streaming response.completed may carry the full
@@ -361,7 +364,8 @@ impl SummaryAccumulator {
 
     /// Compute the turn-total cost (sum across all N tool-call requests in this turn)
     /// and persist it to the in-memory thread accumulator.
-    /// Returns `Some(turn_total)` — always >= the per-request cost.
+    /// Returns the thread cumulative total when `thread_id` is known. Without a
+    /// thread id there is no honest thread total, so the Σusd field is omitted.
     fn turn_total_cost(&self) -> Option<f64> {
         let (agg_input, agg_output) = match (&self.state, &self.turn_id) {
             (Some(state), Some(turn_id)) => state.get_codex_turn_io(turn_id),
@@ -382,9 +386,9 @@ impl SummaryAccumulator {
         let cost = total_usage.cost_usd(&self.upstream_model)?;
         // Also persist to the thread-level accumulator for future cross-turn tracking.
         if let (Some(state), Some(thread_id)) = (&self.state, self.thread_id.as_deref()) {
-            state.add_codex_thread_cost(thread_id, cost);
+            return Some(state.add_codex_thread_cost(thread_id, cost));
         }
-        Some(cost)
+        None
     }
 
     fn capture_text_frame(&mut self, frame_json: &str) {
@@ -422,11 +426,7 @@ impl SummaryAccumulator {
                 if let Some(text) = item
                     .get("content")
                     .and_then(Value::as_array)
-                    .and_then(|parts| {
-                        parts.iter().rev().find(|part| {
-                            part.get("type").and_then(Value::as_str) == Some("output_text")
-                        })
-                    })
+                    .and_then(|parts| parts.iter().rev().find(|part| is_text_content_part(part)))
                     .and_then(|part| part.get("text"))
                     .and_then(Value::as_str)
                 {
@@ -747,6 +747,9 @@ pub fn reserve_summary_slot(
     turn_id: Option<&str>,
     client: CodexClientKind,
 ) -> bool {
+    let Some(_) = turn_id else {
+        return true;
+    };
     state.remember_codex_summary_key(summary_slot_key(turn_id, client), summary_slot_ttl(turn_id))
 }
 
@@ -896,7 +899,7 @@ fn append_summary_to_content_part_done_frame(frame_json: &mut String, text: &str
     let Some(part) = v.get_mut("part") else {
         return false;
     };
-    if part.get("type").and_then(Value::as_str) != Some("output_text") {
+    if !is_text_content_part(part) {
         return false;
     }
     if append_summary_to_output_text_part(part, text).is_none() {
@@ -952,14 +955,17 @@ fn append_summary_to_output_item_done_frame(frame_json: &mut String, text: &str)
 
 fn append_summary_to_message_item(message: &mut Value, text: &str) -> Option<()> {
     let content = message.get_mut("content")?.as_array_mut()?;
-    let Some(part) = content
-        .iter_mut()
-        .rev()
-        .find(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
-    else {
+    let Some(part) = content.iter_mut().rev().find(|part| is_text_content_part(part)) else {
         return None;
     };
     append_summary_to_output_text_part(part, text)
+}
+
+fn is_text_content_part(part: &Value) -> bool {
+    matches!(
+        part.get("type").and_then(Value::as_str),
+        Some("output_text" | "text")
+    )
 }
 
 fn append_summary_to_output_text_part(part: &mut Value, text: &str) -> Option<()> {
@@ -1533,6 +1539,50 @@ mod tests {
     }
 
     #[test]
+    fn append_summary_accepts_plain_text_content_parts() {
+        let mut response = serde_json::json!({
+            "id": "resp-1",
+            "output": [
+                {
+                    "id": "msg-1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type":"text","text":"real final"}]
+                }
+            ]
+        });
+
+        append_summary_to_response_value(&mut response, "summary").expect("append summary");
+
+        assert_eq!(
+            response["output"][0]["content"][0]["text"],
+            "real final\n\nsummary"
+        );
+    }
+
+    #[test]
+    fn summary_batch_generates_visible_delta_for_plain_text_content_part() {
+        let mut acc = SummaryAccumulator::new(CodexSummaryConfig::default(), CodexClientKind::Cli);
+        let frames = vec![
+            r#"{"type":"response.output_item.done","response_id":"resp_1","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"real final"}]}}"#.to_string(),
+            r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}"#.to_string(),
+        ];
+        let out = acc.maybe_append_to_frame_batch(frames, 1_000);
+        let delta = out
+            .iter()
+            .find_map(|frame| {
+                let v: Value = serde_json::from_str(frame).ok()?;
+                let delta = v.get("delta").and_then(Value::as_str)?;
+                (v.get("type").and_then(Value::as_str) == Some("response.output_text.delta")
+                    && delta.starts_with("\n\n"))
+                .then(|| delta.to_string())
+            })
+            .expect("visible summary delta");
+
+        assert!(delta.contains("in"));
+    }
+
+    #[test]
     fn apply_usage_from_frame_accepts_chat_and_responses_usage_shapes() {
         let mut usage = Usage::default();
         apply_usage_from_frame(
@@ -1680,6 +1730,121 @@ mod tests {
 
         assert!(first.maybe_append_to_frame(completed, 1_000).is_some());
         assert!(second.maybe_append_to_frame(completed, 1_000).is_none());
+    }
+
+    #[test]
+    fn summary_without_turn_id_does_not_globally_dedupe_other_requests() {
+        let state = AppState::init(
+            vibe_db::Db::memory().expect("db"),
+            crate::config::Config::default(),
+            15917,
+        )
+        .expect("state");
+        let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}"#;
+
+        let mut first = SummaryAccumulator::new_for_turn(
+            CodexSummaryConfig::default(),
+            CodexClientKind::App,
+            Some(state.clone()),
+            None,
+            None,
+            "gpt-5.5".into(),
+        );
+        let mut second = SummaryAccumulator::new_for_turn(
+            CodexSummaryConfig::default(),
+            CodexClientKind::App,
+            Some(state),
+            None,
+            None,
+            "gpt-5.5".into(),
+        );
+
+        assert!(first.maybe_append_to_frame(completed, 1_000).is_some());
+        assert!(second.maybe_append_to_frame(completed, 1_000).is_some());
+    }
+
+    #[test]
+    fn summary_without_thread_id_omits_thread_cost() {
+        let mut acc = SummaryAccumulator::new_for_turn(
+            CodexSummaryConfig::default(),
+            CodexClientKind::Cli,
+            None,
+            Some("turn-1".into()),
+            None,
+            "gpt-5.5".into(),
+        );
+        let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}"#;
+        let out = acc.maybe_append_to_frame(completed, 1_000).expect("summary");
+        let text = serde_json::from_str::<Value>(&out)
+            .unwrap()
+            .pointer("/response/output/0/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+
+        assert!(text.contains("~usd $"));
+        assert!(
+            !text.contains("Σusd"),
+            "Σusd should not render without thread_id: {text}"
+        );
+    }
+
+    #[test]
+    fn summary_reports_thread_cumulative_cost_across_turns() {
+        let state = AppState::init(
+            vibe_db::Db::memory().expect("db"),
+            crate::config::Config::default(),
+            15917,
+        )
+        .expect("state");
+        let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}"#;
+
+        let mut first = SummaryAccumulator::new_for_turn(
+            CodexSummaryConfig::default(),
+            CodexClientKind::Cli,
+            Some(state.clone()),
+            Some("turn-1".into()),
+            Some("thread-1".into()),
+            "gpt-5.5".into(),
+        );
+        first.maybe_append_to_frame(completed, 1_000).expect("first summary");
+
+        let mut second = SummaryAccumulator::new_for_turn(
+            CodexSummaryConfig::default(),
+            CodexClientKind::Cli,
+            Some(state),
+            Some("turn-2".into()),
+            Some("thread-1".into()),
+            "gpt-5.5".into(),
+        );
+        let out = second
+            .maybe_append_to_frame(completed, 1_000)
+            .expect("second summary");
+
+        let text = serde_json::from_str::<Value>(&out)
+            .unwrap()
+            .pointer("/response/output/0/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert!(text.contains("~usd $"));
+        let thread_total = text
+            .split("Σusd $")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse::<f64>().ok())
+            .expect("thread total in summary");
+        let turn_cost = text
+            .split("~usd $")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse::<f64>().ok())
+            .expect("turn cost in summary");
+
+        assert!(
+            thread_total > turn_cost,
+            "Σusd should be cumulative across turns, got turn={turn_cost}, thread={thread_total}: {text}"
+        );
     }
 
     // ----- SSE block-structure regression tests -------------------------
@@ -2062,6 +2227,47 @@ mod tests {
             "end slot disappeared on the message-carrying request of a multi-step \
              tool-using turn — the per-turn summary slot was likely consumed by an \
              earlier request that had no message to attach to. Emitted output:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn end_slot_survives_message_followed_by_tool_call_in_same_response() {
+        let mut acc = SummaryAccumulator::new(CodexSummaryConfig::default(), CodexClientKind::Cli);
+        let blocks = [
+            "event: response.output_text.done\n\
+             data: {\"type\":\"response.output_text.done\",\"response_id\":\"resp_1\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"text\":\"visible status\"}",
+            "event: response.content_part.done\n\
+             data: {\"type\":\"response.content_part.done\",\"response_id\":\"resp_1\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"visible status\"}}",
+            "event: response.output_item.done\n\
+             data: {\"type\":\"response.output_item.done\",\"response_id\":\"resp_1\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"visible status\"}]}}",
+            "event: response.output_item.done\n\
+             data: {\"type\":\"response.output_item.done\",\"response_id\":\"resp_1\",\"output_index\":2,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"name\":\"shell\",\"arguments\":\"{}\",\"call_id\":\"call_1\"}}",
+            "event: response.completed\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"visible status\"}]},{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"name\":\"shell\",\"arguments\":\"{}\",\"call_id\":\"call_1\"}],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120}}}",
+        ];
+
+        let mut combined = String::new();
+        for block in &blocks {
+            let emitted = acc
+                .maybe_append_to_sse_block(block, 2_000)
+                .unwrap_or_else(|| block.to_string());
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&emitted);
+        }
+
+        assert!(
+            combined.contains("\"type\":\"response.output_text.delta\""),
+            "expected visible delta to append to the prior message target:\n{combined}"
+        );
+        assert!(
+            combined.contains("visible status\\n\\n"),
+            "expected completed response/message finalization to include the summary suffix:\n{combined}"
+        );
+        assert!(
+            combined.contains("speed") && combined.contains("in 100") && combined.contains("out 20"),
+            "summary text missing from stream:\n{combined}"
         );
     }
 }
