@@ -147,6 +147,9 @@ impl Db {
             M::up(include_str!(
                 "../migrations/027_observability_thread_usage_quota.sql"
             )),
+            M::up(include_str!(
+                "../migrations/028_upstream_attempt_network_target.sql"
+            )),
         ])
     }
 
@@ -218,6 +221,18 @@ fn migrate_short_logs_from_main(
     Ok(())
 }
 
+fn table_columns(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let escaped_table = table.replace('\'', "''");
+    let sql = format!("PRAGMA {schema}.table_info('{escaped_table}')");
+    conn.prepare(&sql)?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect()
+}
+
 fn copy_observability_tables_from_attached(
     conn: &mut Connection,
     source_path: &Path,
@@ -237,11 +252,24 @@ fn copy_observability_tables_from_attached(
     }
     .and_then(|_| {
         if source_tables.contains("upstream_attempt_logs") {
-            conn.execute(
-                "INSERT OR REPLACE INTO upstream_attempt_logs SELECT * FROM source_db.upstream_attempt_logs",
-                [],
-            )
-            .map(|_| ())
+            let target_cols = table_columns(conn, "main", "upstream_attempt_logs")?;
+            let source_cols = table_columns(conn, "source_db", "upstream_attempt_logs")?;
+            let common_cols: Vec<String> = target_cols
+                .into_iter()
+                .filter(|col| source_cols.contains(col))
+                .collect();
+            if common_cols.is_empty() {
+                Ok(())
+            } else {
+                let cols = common_cols.join(", ");
+                conn.execute(
+                    &format!(
+                        "INSERT OR REPLACE INTO upstream_attempt_logs ({cols}) SELECT {cols} FROM source_db.upstream_attempt_logs"
+                    ),
+                    [],
+                )
+                .map(|_| ())
+            }
         } else {
             Ok(())
         }

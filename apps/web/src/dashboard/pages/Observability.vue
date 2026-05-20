@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import {
   api,
+  type CodexThreadMeta,
   type Credential,
   type Provider,
   type RealtimeAttempt,
@@ -27,7 +28,6 @@ import AttemptRow from "../components/observability/attempt-row.vue";
 import Sparkline from "../components/observability/sparkline.vue";
 import { resolveProviderLabel } from "../utils/provider-display.ts";
 import { credentialPrimaryAccountLabel } from "../utils/providers-display.ts";
-import { protocolWireLetter } from "../utils/protocol-label.ts";
 import {
   appNameMatchesWorkspaceView,
   providerMatchesWorkspaceView,
@@ -41,13 +41,12 @@ const router = useRouter();
 const { t } = useI18n();
 const workspaceView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
 
-type SubTab = "upstream" | "downstream" | "logs" | "attempts" | "network" | "waveform";
+type SubTab = "trace" | "attempts" | "network" | "logs" | "waveform";
 const SUB_TABS: { id: SubTab; icon: vp_icon_name; labelKey: string }[] = [
-  { id: "upstream", icon: "server", labelKey: "obs.tabs.upstream" },
-  { id: "downstream", icon: "terminal", labelKey: "obs.tabs.downstream" },
-  { id: "logs", icon: "activity", labelKey: "obs.tabs.logs" },
+  { id: "trace", icon: "route", labelKey: "obs.tabs.trace" },
   { id: "attempts", icon: "layers-3", labelKey: "obs.tabs.attempts" },
   { id: "network", icon: "compass", labelKey: "obs.tabs.network" },
+  { id: "logs", icon: "activity", labelKey: "obs.tabs.logs" },
   { id: "waveform", icon: "zap", labelKey: "obs.tabs.waveform" },
 ];
 
@@ -57,8 +56,8 @@ function subTabFromQuery(): SubTab {
   if (SUB_TABS.some((t) => t.id === tab)) return tab as SubTab;
   if (route.query.attempt) return "attempts";
   if (route.query.wave) return "attempts";
-  if (route.query.request) return "network";
-  return "upstream";
+  if (route.query.request) return "trace";
+  return "trace";
 }
 const activeTab = ref<SubTab>(subTabFromQuery());
 
@@ -112,16 +111,34 @@ const kpiUsdPerHour = computed(() => {
   return total > 0 ? total : null;
 });
 
-function seriesOf(extract: (s: RealtimeSnapshot) => number): number[] {
-  return history.value.map(extract);
+function scopedSnapshotRequests(snapshot: RealtimeSnapshot): RealtimeRequest[] {
+  return snapshot.active_requests.filter((request) => requestMatchesWorkspaceView(request));
 }
 
-const sparkActive = computed(() => seriesOf((s) => s.active_count));
-const sparkTok = computed(() => seriesOf((s) => s.active_output_tokens_per_sec));
-const sparkBytes = computed(() =>
-  seriesOf((s) => s.active_upstream_bytes_per_sec + s.active_downstream_bytes_per_sec),
+function seriesOf(extract: (requests: RealtimeRequest[]) => number): number[] {
+  return history.value.map((snapshot) => extract(scopedSnapshotRequests(snapshot)));
+}
+
+const sparkActive = computed(() => seriesOf((requests) => requests.length));
+const sparkTok = computed(() =>
+  seriesOf((requests) =>
+    requests.reduce((sum, request) => sum + (request.active_output_tokens_per_sec ?? 0), 0),
+  ),
 );
-const sparkUsd = computed(() => seriesOf((s) => s.active_cost_usd_per_hour ?? 0));
+const sparkBytes = computed(() =>
+  seriesOf((requests) =>
+    requests.reduce(
+      (sum, request) =>
+        sum + request.active_upstream_bytes_per_sec + request.active_downstream_bytes_per_sec,
+      0,
+    ),
+  ),
+);
+const sparkUsd = computed(() =>
+  seriesOf((requests) =>
+    requests.reduce((sum, request) => sum + (request.active_cost_usd_per_hour ?? 0), 0),
+  ),
+);
 
 // ── Records polling ─────────────────────────────────────────────────────────
 const POLL_MS = 2_000;
@@ -129,6 +146,8 @@ const attempts = ref<UpstreamAttemptLog[]>([]);
 const requests = ref<RequestLog[]>([]);
 const providers = ref<Provider[]>([]);
 const credentialsByProvider = ref<Record<string, Credential[]>>({});
+const codexThreadMetas = ref<CodexThreadMeta[]>([]);
+const selectedTraceKey = ref<string>(String(route.query.trace ?? ""));
 const recordsLoading = ref(false);
 const recordsError = ref<string | null>(null);
 const entitiesError = ref<string | null>(null);
@@ -143,6 +162,16 @@ async function loadRecords() {
     ]);
     attempts.value = attemptsRes;
     requests.value = requestsRes.items;
+    const threadIds = [
+      ...new Set(
+        requestsRes.items
+          .map((request) => request.thread_id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    codexThreadMetas.value = threadIds.length
+      ? await api.observability.codexThreads(threadIds)
+      : [];
     recordsError.value = null;
   } catch (err) {
     recordsError.value = err instanceof Error ? err.message : String(err);
@@ -208,6 +237,9 @@ const credentialsById = computed(() => {
 const providerById = computed(
   () => new Map(providers.value.map((provider) => [provider.id, provider])),
 );
+const codexThreadById = computed(
+  () => new Map(codexThreadMetas.value.map((thread) => [thread.thread_id, thread])),
+);
 
 function requestMatchesWorkspaceView(request: RequestLog | RealtimeRequest): boolean {
   const view = workspaceView.value;
@@ -244,7 +276,7 @@ function credentialLabelFor(id: string | null | undefined): string | null {
   return credential ? credentialPrimaryAccountLabel(credential) : "credential";
 }
 
-// ── 上游 grouping by request → wave ─────────────────────────────────────────
+// ── Trace grouping by request → model-attempt wave ─────────────────────────
 type WaveGroup = {
   wave_index: number;
   wave_size: number;
@@ -264,6 +296,13 @@ const activeRealtimeAttempts = computed<RealtimeAttempt[]>(() =>
 
 const activeRealtimeAttemptIds = computed(
   () => new Set(activeRealtimeAttempts.value.map((a) => a.attempt_id)),
+);
+
+const scopedRequests = computed(() =>
+  requests.value.filter((request) => requestMatchesWorkspaceView(request)),
+);
+const scopedAttempts = computed(() =>
+  attempts.value.filter((attempt) => attemptMatchesWorkspaceView(attempt)),
 );
 
 const requestGroups = computed<RequestGroup[]>(() => {
@@ -302,22 +341,148 @@ const requestGroups = computed<RequestGroup[]>(() => {
   return [...byReq.values()].sort((a, b) => b.started_at - a.started_at);
 });
 
-// ── 下游 grouping by client app ─────────────────────────────────────────────
-const requestsByApp = computed<Record<string, RequestLog[]>>(() => {
-  const out: Record<string, RequestLog[]> = {};
-  for (const r of scopedRequests.value) {
-    const key = r.app ?? "unknown";
-    (out[key] ??= []).push(r);
+// ── Trace grouping by session/thread/turn ──────────────────────────────────
+type TraceGroup = {
+  key: string;
+  label: string;
+  title: string;
+  project: string | null;
+  cwd: string | null;
+  source: string | null;
+  model: string | null;
+  started_at: number;
+  request_count: number;
+  attempt_count: number;
+  requests: RequestGroup[];
+};
+
+function traceKeyForRequest(request: RequestLog): string {
+  return (
+    request.trace_id || request.turn_id || request.thread_id || request.session_id || request.id
+  );
+}
+
+function traceLabelForRequest(request: RequestLog): string {
+  if (request.thread_id) return `thread ${request.thread_id.slice(0, 8)}`;
+  if (request.trace_id) return `trace ${request.trace_id.slice(0, 8)}`;
+  if (request.turn_id) return `turn ${request.turn_id.slice(0, 8)}`;
+  if (request.session_id) return `session ${request.session_id.slice(0, 8)}`;
+  return `request ${request.id.slice(0, 8)}`;
+}
+
+function codexMetaForRequest(request: RequestLog): CodexThreadMeta | null {
+  return request.thread_id ? (codexThreadById.value.get(request.thread_id) ?? null) : null;
+}
+
+function traceTitleForRequest(request: RequestLog): string {
+  return codexMetaForRequest(request)?.title ?? traceLabelForRequest(request);
+}
+
+const traceGroups = computed<TraceGroup[]>(() => {
+  const requestById = new Map(scopedRequests.value.map((request) => [request.id, request]));
+  const requestGroupById = new Map(requestGroups.value.map((group) => [group.request_id, group]));
+  const out = new Map<string, TraceGroup>();
+  for (const request of scopedRequests.value) {
+    const key = traceKeyForRequest(request);
+    let group = out.get(key);
+    if (!group) {
+      const meta = codexMetaForRequest(request);
+      group = {
+        key,
+        label: traceLabelForRequest(request),
+        title: traceTitleForRequest(request),
+        project: meta?.project ?? null,
+        cwd: meta?.cwd ?? null,
+        source: meta?.source ?? null,
+        model: meta?.model ?? null,
+        started_at: request.started_at,
+        request_count: 0,
+        attempt_count: 0,
+        requests: [],
+      };
+      out.set(key, group);
+    }
+    group.request_count += 1;
+    if (request.started_at < group.started_at) group.started_at = request.started_at;
+    const requestGroup = requestGroupById.get(request.id);
+    if (requestGroup) {
+      group.attempt_count += requestGroup.total_attempts;
+      group.requests.push(requestGroup);
+    }
   }
-  return out;
+  for (const attemptGroup of requestGroups.value) {
+    if (requestById.has(attemptGroup.request_id)) continue;
+    let group = out.get(attemptGroup.request_id);
+    if (!group) {
+      group = {
+        key: attemptGroup.request_id,
+        label: `request ${attemptGroup.request_id.slice(0, 8)}`,
+        title: `request ${attemptGroup.request_id.slice(0, 8)}`,
+        project: null,
+        cwd: null,
+        source: null,
+        model: null,
+        started_at: attemptGroup.started_at,
+        request_count: 0,
+        attempt_count: 0,
+        requests: [],
+      };
+      out.set(attemptGroup.request_id, group);
+    }
+    group.attempt_count += attemptGroup.total_attempts;
+    group.requests.push(attemptGroup);
+  }
+  for (const group of out.values()) {
+    group.requests.sort((a, b) => b.started_at - a.started_at);
+  }
+  return [...out.values()].sort((a, b) => b.started_at - a.started_at);
 });
 
-const scopedRequests = computed(() =>
-  requests.value.filter((request) => requestMatchesWorkspaceView(request)),
+const selectedTrace = computed<TraceGroup | null>(() => {
+  if (!traceGroups.value.length) return null;
+  return (
+    traceGroups.value.find((group) => group.key === selectedTraceKey.value) ??
+    traceGroups.value[0] ??
+    null
+  );
+});
+
+function selectTrace(key: string) {
+  selectedTraceKey.value = key;
+  void router.replace({ path: route.path, query: { ...route.query, trace: key, tab: "trace" } });
+}
+
+watch(
+  traceGroups,
+  (groups) => {
+    if (!groups.length) {
+      selectedTraceKey.value = "";
+      return;
+    }
+    if (!groups.some((group) => group.key === selectedTraceKey.value)) {
+      selectedTraceKey.value = groups[0]?.key ?? "";
+    }
+  },
+  { immediate: true },
 );
-const scopedAttempts = computed(() =>
-  attempts.value.filter((attempt) => attemptMatchesWorkspaceView(attempt)),
-);
+
+function requestTraceMeta(requestId: string): string[] {
+  const request = requests.value.find((row) => row.id === requestId);
+  if (!request) return [];
+  return [
+    request.session_id ? `session:${request.session_id.slice(0, 10)}` : null,
+    request.thread_id ? `thread:${request.thread_id.slice(0, 10)}` : null,
+    request.turn_id ? `turn:${request.turn_id.slice(0, 10)}` : null,
+    request.trace_id ? `trace:${request.trace_id.slice(0, 10)}` : null,
+  ].filter((item): item is string => Boolean(item));
+}
+
+function networkTargetLabel(attempt: UpstreamAttemptLog): string {
+  const scheme = attempt.network_scheme ?? "https";
+  const host = attempt.network_host ?? "—";
+  const path = attempt.network_path ?? "";
+  return host === "—" ? "—" : `${scheme}://${host}${path}`;
+}
 
 function statusTone(code: number | null | undefined): string {
   if (code == null) return "bg-slate-100 text-slate-600";
@@ -352,16 +517,12 @@ function formatUsdPerHour(v: number | null): string {
   return `$${v.toFixed(2)}/h`;
 }
 
-function requestProtocolLetter(wire: string | null | undefined): string {
-  return protocolWireLetter(wire);
-}
-
 function waveLabelFor(waveIndex: number): string {
-  return t("obs.upstream.waveLabel", { wave: waveIndex + 1 });
+  return t("obs.trace.waveLabel", { wave: waveIndex + 1 });
 }
 
 function attemptLabelFor(attemptIndex: number): string {
-  return t("obs.upstream.attemptLabel", { attempt: Math.max(1, attemptIndex) });
+  return t("obs.trace.attemptLabel", { attempt: Math.max(1, attemptIndex) });
 }
 
 function lifecycleLabels() {
@@ -372,6 +533,13 @@ function lifecycleLabels() {
     complete: t("obs.attemptLifecycle.complete"),
     terminal: t("obs.attemptLifecycle.terminal"),
     elapsed: t("obs.attemptLifecycle.elapsed"),
+  };
+}
+
+function byteLabels() {
+  return {
+    upstream: t("obs.bytes.upstream"),
+    client: t("obs.bytes.client"),
   };
 }
 
@@ -548,21 +716,22 @@ function normalizeOutcomeKey(outcome: string): string {
         </TabsTrigger>
       </TabsList>
 
-      <!-- 上游: gateway ↔ upstream provider, grouped by request → wave ── -->
-      <TabsContent value="upstream">
+      <!-- Trace: session/thread/turn → request → model attempts ───────── -->
+      <TabsContent value="trace">
         <Card class="overflow-hidden">
           <div class="flex items-center justify-between border-b border-vp-border px-4 py-3">
             <div class="flex items-center gap-2">
-              <VpIcon name="server" size-class="size-4 text-teal-600" />
+              <VpIcon name="route" size-class="size-4 text-teal-600" />
               <span class="text-sm font-semibold text-vp-text">
-                {{ t("obs.upstream.title") }}
+                {{ t("obs.trace.title") }}
               </span>
             </div>
             <span class="font-mono text-[11px] text-vp-muted">
               {{
-                t("obs.upstream.summary", {
-                  requests: requestGroups.length,
-                  attempts: requestGroups.reduce((sum, group) => sum + group.total_attempts, 0),
+                t("obs.trace.summary", {
+                  traces: traceGroups.length,
+                  requests: scopedRequests.length,
+                  attempts: scopedAttempts.length,
                 })
               }}
             </span>
@@ -573,151 +742,125 @@ function normalizeOutcomeKey(outcome: string): string {
           <div v-if="entitiesError" class="px-4 py-3 text-sm text-amber-700">
             {{ entitiesError }}
           </div>
-          <div
-            v-else-if="!requestGroups.length"
-            class="px-4 py-12 text-center text-sm text-vp-muted"
-          >
+          <div v-else-if="!traceGroups.length" class="px-4 py-12 text-center text-sm text-vp-muted">
             {{ t("obs.empty") }}
           </div>
-          <div v-else class="divide-y divide-vp-border">
-            <div
-              v-for="g in requestGroups"
-              :key="g.request_id"
-              class="px-3 py-2"
-              :class="g.request_id === highlightRequest ? 'bg-amber-50/30' : ''"
-            >
-              <div class="mb-1 flex flex-wrap items-center gap-2 text-xs">
-                <EntityChip
-                  :kind="'request'"
-                  :id="g.request_id"
-                  :label="g.request_id.slice(0, 10)"
-                  variant="chip"
-                />
-                <Badge v-if="g.app" variant="outline" class="font-mono text-[10px]">
-                  {{ g.app }}
-                </Badge>
-                <span class="font-mono text-[11px] text-vp-muted">
-                  {{ formatTime(g.started_at) }}
-                </span>
-                <span class="font-mono text-[11px] text-vp-muted">
-                  {{
-                    t("obs.upstream.attemptsSummary", { n: g.total_attempts, w: g.waves.length })
-                  }}
-                </span>
-              </div>
-              <div
-                v-for="w in g.waves"
-                :key="w.wave_index"
-                class="ml-3 mt-1 rounded-md border border-vp-border/60"
+          <div v-else class="grid min-h-[34rem] md:grid-cols-[20rem_1fr]">
+            <aside class="border-r border-vp-border bg-vp-bg-hover/20">
+              <button
+                v-for="tg in traceGroups"
+                :key="tg.key"
+                type="button"
+                class="block w-full border-b border-vp-border/50 px-3 py-2 text-left hover:bg-vp-bg-hover"
+                :class="tg.key === selectedTrace?.key ? 'bg-vp-surface' : ''"
+                @click="selectTrace(tg.key)"
               >
-                <div
-                  class="border-b border-vp-border bg-vp-bg-hover/40 px-2 py-1 text-[10px] uppercase tracking-wide text-vp-muted"
-                >
-                  {{ waveLabelFor(w.wave_index) }}
+                <div class="truncate text-sm font-medium text-vp-text" :title="tg.title">
+                  {{ tg.title }}
                 </div>
-                <AttemptRow
-                  v-for="a in w.attempts"
-                  :key="a.attempt_id"
-                  :attempt="a"
-                  :provider-name="providerNameFor(a.provider_id)"
-                  :credential-label="credentialLabelFor(a.credential_id)"
-                  :outcome-label="outcomeLabelForAttempt(a)"
-                  :phase-label="phaseLabelFor(a.phase)"
-                  :wave-label="waveLabelFor(a.wave_index)"
-                  :attempt-label="attemptLabelFor(a.attempt_index)"
-                  :lifecycle-labels="lifecycleLabels()"
-                  :highlighted="
-                    a.attempt_id === highlightAttempt ||
-                    `${g.request_id}#${a.wave_index}` === highlightWave
-                  "
-                />
-              </div>
-            </div>
-          </div>
-        </Card>
-      </TabsContent>
-
-      <!-- 下游: gateway ↔ client tool, grouped by app ─────────────────── -->
-      <TabsContent value="downstream">
-        <Card class="overflow-hidden">
-          <div class="flex items-center justify-between border-b border-vp-border px-4 py-3">
-            <div class="flex items-center gap-2">
-              <VpIcon name="terminal" size-class="size-4 text-sky-600" />
-              <span class="text-sm font-semibold text-vp-text">
-                {{ t("obs.downstream.title") }}
-              </span>
-            </div>
-            <span class="font-mono text-[11px] text-vp-muted">
-              {{ t("obs.downstream.summary", { count: scopedRequests.length }) }}
-            </span>
-          </div>
-          <div v-if="!scopedRequests.length" class="px-4 py-12 text-center text-sm text-vp-muted">
-            {{ t("obs.empty") }}
-          </div>
-          <div v-else>
-            <div
-              v-for="(rows, appKey) in requestsByApp"
-              :key="appKey"
-              class="border-b border-vp-border"
-            >
-              <div class="flex items-center gap-2 bg-vp-bg-hover/40 px-3 py-1.5">
-                <Badge variant="outline" class="font-mono text-[10px]">
-                  {{ appKey }}
-                </Badge>
-                <span class="text-[11px] text-vp-muted"
-                  >{{ rows.length }} {{ t("obs.downstream.requests") }}</span
-                >
-              </div>
-              <div class="divide-y divide-vp-border">
-                <div
-                  v-for="r in rows"
-                  :key="r.id"
-                  class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 font-mono text-xs hover:bg-vp-bg-hover"
-                  :class="r.id === highlightRequest ? 'bg-amber-50/30' : ''"
-                >
-                  <span class="text-vp-muted">{{ formatTime(r.started_at) }}</span>
-                  <span class="text-vp-muted">{{ r.route_prefix ?? "—" }}</span>
-                  <span class="text-vp-text">{{ r.requested_model ?? "—" }}</span>
-                  <Badge :class="`font-mono text-[10px] ${statusTone(r.status_code)}`">
-                    {{ r.status_code ?? "—" }}
+                <div class="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-vp-muted">
+                  <Badge v-if="tg.project" variant="outline" class="font-mono text-[10px]">
+                    {{ tg.project }}
                   </Badge>
-                  <span class="text-vp-muted">{{ formatMs(r.latency_ms) }}</span>
-                  <span class="text-vp-muted">↓{{ formatBytes(r.client_bytes) }}</span>
-                  <span v-if="r.output_tokens > 0" class="text-vp-muted">
-                    {{ r.input_tokens }}↦{{ r.output_tokens }} tok
-                  </span>
-                  <span class="ml-auto flex items-center gap-2">
-                    <EntityChip
-                      v-if="r.provider_id"
-                      :kind="'provider'"
-                      :id="r.provider_id"
-                      :label="providerNameFor(r.provider_id) ?? r.provider_id"
-                      variant="inline"
-                    />
-                    <EntityChip
-                      v-if="r.credential_id"
-                      :kind="'credential'"
-                      :id="r.credential_id"
-                      :label="credentialLabelFor(r.credential_id) ?? 'credential'"
-                      variant="inline"
-                    />
-                    <Badge
-                      v-if="r.wire"
-                      variant="outline"
-                      class="font-mono text-[10px] uppercase tracking-wide"
-                    >
-                      {{ requestProtocolLetter(r.wire) }}
-                    </Badge>
+                  <span class="font-mono">{{ tg.label }}</span>
+                </div>
+                <div class="mt-1 font-mono text-[10px] text-vp-muted">
+                  {{ t("obs.trace.counts", { r: tg.request_count, a: tg.attempt_count }) }}
+                </div>
+              </button>
+            </aside>
+            <main v-if="selectedTrace" class="overflow-hidden">
+              <div class="border-b border-vp-border px-4 py-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <h2
+                    class="min-w-0 flex-1 truncate text-base font-semibold text-vp-text"
+                    :title="selectedTrace.title"
+                  >
+                    {{ selectedTrace.title }}
+                  </h2>
+                  <Badge
+                    v-if="selectedTrace.project"
+                    variant="outline"
+                    class="font-mono text-[10px]"
+                  >
+                    {{ selectedTrace.project }}
+                  </Badge>
+                  <Badge v-if="selectedTrace.model" variant="outline" class="font-mono text-[10px]">
+                    {{ selectedTrace.model }}
+                  </Badge>
+                </div>
+                <div
+                  class="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] text-vp-muted"
+                >
+                  <span>{{ selectedTrace.label }}</span>
+                  <span v-if="selectedTrace.source">{{ selectedTrace.source }}</span>
+                  <span v-if="selectedTrace.cwd" class="truncate">{{ selectedTrace.cwd }}</span>
+                </div>
+              </div>
+              <div class="max-h-[44rem] overflow-auto p-3">
+                <div
+                  v-for="g in selectedTrace.requests"
+                  :key="g.request_id"
+                  class="mb-3 rounded-md border border-vp-border/70 px-2 py-2"
+                  :class="g.request_id === highlightRequest ? 'bg-amber-50/30' : ''"
+                >
+                  <div class="mb-1 flex flex-wrap items-center gap-2 text-xs">
                     <EntityChip
                       :kind="'request'"
-                      :id="r.id"
-                      :label="r.id.slice(0, 8)"
-                      variant="inline"
+                      :id="g.request_id"
+                      :label="g.request_id.slice(0, 10)"
+                      variant="chip"
                     />
-                  </span>
+                    <Badge v-if="g.app" variant="outline" class="font-mono text-[10px]">
+                      {{ g.app }}
+                    </Badge>
+                    <span
+                      v-for="meta in requestTraceMeta(g.request_id)"
+                      :key="meta"
+                      class="font-mono text-[10px] text-vp-muted"
+                    >
+                      {{ meta }}
+                    </span>
+                    <span class="font-mono text-[11px] text-vp-muted">
+                      {{
+                        t("obs.trace.modelAttemptsSummary", {
+                          n: g.total_attempts,
+                          w: g.waves.length,
+                        })
+                      }}
+                    </span>
+                  </div>
+                  <div
+                    v-for="w in g.waves"
+                    :key="w.wave_index"
+                    class="ml-3 mt-1 rounded-md border border-vp-border/60"
+                  >
+                    <div
+                      class="border-b border-vp-border bg-vp-bg-hover/40 px-2 py-1 text-[10px] uppercase tracking-wide text-vp-muted"
+                    >
+                      {{ waveLabelFor(w.wave_index) }}
+                    </div>
+                    <AttemptRow
+                      v-for="a in w.attempts"
+                      :key="a.attempt_id"
+                      :attempt="a"
+                      :provider-name="providerNameFor(a.provider_id)"
+                      :credential-label="credentialLabelFor(a.credential_id)"
+                      :outcome-label="outcomeLabelForAttempt(a)"
+                      :phase-label="phaseLabelFor(a.phase)"
+                      :wave-label="waveLabelFor(a.wave_index)"
+                      :attempt-label="attemptLabelFor(a.attempt_index)"
+                      :lifecycle-labels="lifecycleLabels()"
+                      :byte-labels="byteLabels()"
+                      :highlighted="
+                        a.attempt_id === highlightAttempt ||
+                        `${g.request_id}#${a.wave_index}` === highlightWave
+                      "
+                    />
+                  </div>
                 </div>
               </div>
-            </div>
+            </main>
           </div>
         </Card>
       </TabsContent>
@@ -761,6 +904,7 @@ function normalizeOutcomeKey(outcome: string): string {
               :wave-label="waveLabelFor(a.wave_index)"
               :attempt-label="attemptLabelFor(a.attempt_index)"
               :lifecycle-labels="lifecycleLabels()"
+              :byte-labels="byteLabels()"
               :highlighted="
                 a.attempt_id === highlightAttempt ||
                 a.request_id === highlightRequest ||
@@ -793,8 +937,8 @@ function normalizeOutcomeKey(outcome: string): string {
                 class="border-b border-vp-border bg-vp-bg-hover/30 text-left text-[10px] uppercase tracking-wide text-vp-muted"
               >
                 <th class="px-3 py-2 font-medium">{{ t("obs.network.cols.time") }}</th>
+                <th class="px-3 py-2 font-medium">{{ t("obs.network.cols.target") }}</th>
                 <th class="px-3 py-2 font-medium">{{ t("obs.network.cols.provider") }}</th>
-                <th class="px-3 py-2 font-medium">{{ t("obs.network.cols.wire") }}</th>
                 <th class="px-3 py-2 font-medium">{{ t("obs.network.cols.status") }}</th>
                 <th class="px-3 py-2 font-medium">{{ t("obs.network.cols.ttfb") }}</th>
                 <th class="px-3 py-2 font-medium">{{ t("obs.network.cols.bytes") }}</th>
@@ -810,6 +954,12 @@ function normalizeOutcomeKey(outcome: string): string {
                 :class="a.request_id === highlightRequest ? 'bg-amber-50/30' : ''"
               >
                 <td class="px-3 py-1.5 text-vp-muted">{{ formatTime(a.started_at) }}</td>
+                <td
+                  class="max-w-[24rem] truncate px-3 py-1.5 text-vp-text"
+                  :title="networkTargetLabel(a)"
+                >
+                  {{ networkTargetLabel(a) }}
+                </td>
                 <td class="px-3 py-1.5">
                   <EntityChip
                     :kind="'provider'"
@@ -818,7 +968,6 @@ function normalizeOutcomeKey(outcome: string): string {
                     variant="inline"
                   />
                 </td>
-                <td class="px-3 py-1.5 text-vp-muted">{{ requestProtocolLetter(a.wire) }}</td>
                 <td class="px-3 py-1.5">
                   <Badge
                     :class="`font-mono text-[10px] ${statusTone(a.upstream_http_status ?? a.status_code)}`"
@@ -828,7 +977,8 @@ function normalizeOutcomeKey(outcome: string): string {
                 </td>
                 <td class="px-3 py-1.5 text-vp-muted">{{ formatMs(a.upstream_first_byte_ms) }}</td>
                 <td class="px-3 py-1.5 text-vp-muted">
-                  ↓{{ formatBytes(a.upstream_bytes) }} · ↑{{ formatBytes(a.client_bytes) }}
+                  {{ t("obs.bytes.upstream") }} {{ formatBytes(a.upstream_bytes) }} ·
+                  {{ t("obs.bytes.client") }} {{ formatBytes(a.client_bytes) }}
                 </td>
                 <td class="px-3 py-1.5 text-vp-muted">
                   {{ a.sse_event_count }}ev / {{ a.sse_keepalive_count }}ka
@@ -936,13 +1086,24 @@ function normalizeOutcomeKey(outcome: string): string {
         "network": "Network",
         "cost": "Burn rate"
       },
+      "bytes": {
+        "upstream": "upstream",
+        "client": "client"
+      },
       "tabs": {
-        "upstream": "Upstream",
-        "downstream": "Downstream",
+        "trace": "Trace",
         "logs": "Logs",
-        "attempts": "Attempts",
+        "attempts": "Model attempts",
         "network": "Network",
         "waveform": "Waveform"
+      },
+      "trace": {
+        "title": "Session / Thread / Turn trace",
+        "summary": "{traces} traces · {requests} requests · {attempts} model attempts",
+        "counts": "{r} requests · {a} model attempts",
+        "waveLabel": "Wave {wave}",
+        "attemptLabel": "Attempt {attempt}",
+        "modelAttemptsSummary": "{n} model attempts in {w} waves"
       },
       "upstream": {
         "title": "Gateway ↔ Upstream",
@@ -976,15 +1137,15 @@ function normalizeOutcomeKey(outcome: string): string {
         "title": "App-level events"
       },
       "attempts": {
-        "title": "All attempts"
+        "title": "Upstream / downstream model attempts"
       },
       "network": {
-        "title": "Per-attempt network detail",
-        "summary": "{count} attempts",
+        "title": "Gateway → upstream network",
+        "summary": "{count} gateway network attempts",
         "cols": {
           "time": "Time",
+          "target": "Host / path",
           "provider": "Provider",
-          "wire": "Wire",
           "status": "Status",
           "ttfb": "TTFB",
           "bytes": "Bytes",
@@ -1032,13 +1193,24 @@ function normalizeOutcomeKey(outcome: string): string {
         "network": "网络",
         "cost": "烧钱速度"
       },
-      "tabs": {
+      "bytes": {
         "upstream": "上游",
-        "downstream": "下游",
+        "client": "下游"
+      },
+      "tabs": {
+        "trace": "Trace",
         "logs": "日志",
-        "attempts": "尝试",
+        "attempts": "模型尝试",
         "network": "网络",
         "waveform": "波形"
+      },
+      "trace": {
+        "title": "Session / Thread / Turn Trace",
+        "summary": "{traces} 条 trace · {requests} 个请求 · {attempts} 次模型尝试",
+        "counts": "{r} 个请求 · {a} 次模型尝试",
+        "waveLabel": "第 {wave} 波",
+        "attemptLabel": "第 {attempt} 次尝试",
+        "modelAttemptsSummary": "{n} 次模型尝试，分 {w} 波"
       },
       "upstream": {
         "title": "网关 ↔ 上游",
@@ -1072,15 +1244,15 @@ function normalizeOutcomeKey(outcome: string): string {
         "title": "应用层事件"
       },
       "attempts": {
-        "title": "全部尝试"
+        "title": "上游 / 下游模型尝试"
       },
       "network": {
-        "title": "每次尝试的网络细节",
-        "summary": "{count} 次尝试",
+        "title": "网关 → 上游网络",
+        "summary": "{count} 次网关网络访问",
         "cols": {
           "time": "时间",
+          "target": "Host / Path",
           "provider": "供应商",
-          "wire": "协议",
           "status": "状态",
           "ttfb": "TTFB",
           "bytes": "流量",

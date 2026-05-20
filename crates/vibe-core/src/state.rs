@@ -244,10 +244,10 @@ impl RealtimeRequests {
                 .recent
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-                recent.push_front(item);
-                while recent.len() > MAX_RECENT_REALTIME_REQUESTS {
-                    recent.pop_back();
-                }
+            recent.push_front(item);
+            while recent.len() > MAX_RECENT_REALTIME_REQUESTS {
+                recent.pop_back();
+            }
         }
     }
 

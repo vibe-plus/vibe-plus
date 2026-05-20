@@ -152,6 +152,9 @@ pub struct VibeCodexVisual(pub CodexVisualContext);
 #[derive(Clone, Debug)]
 pub struct VibeCodexClientKind(pub CodexClientKind);
 
+#[derive(Clone, Debug)]
+pub struct VibeRequestLogId(pub String);
+
 // ---------------------------------------------------------------------------
 // ChatGPT Codex HTTP API: non-empty `instructions`
 // ---------------------------------------------------------------------------
@@ -600,7 +603,19 @@ pub(crate) fn attempt_log_from_parts(
         request_body: None,
         response_headers: None,
         response_body: None,
+        network_scheme: None,
+        network_host: None,
+        network_path: None,
     }
+}
+
+pub(crate) fn apply_network_target_to_attempt_log(
+    attempt_log: &mut UpstreamAttemptLog,
+    url: &reqwest::Url,
+) {
+    attempt_log.network_scheme = Some(url.scheme().to_string());
+    attempt_log.network_host = url.host_str().map(str::to_string);
+    attempt_log.network_path = Some(url.path().to_string());
 }
 
 pub(crate) fn persist_upstream_attempt_log(state: &AppState, attempt: UpstreamAttemptLog) {
@@ -1735,11 +1750,13 @@ pub(crate) fn stream_response(
     log_ctx: LogCtx,
     request_body: Option<String>,
     visual: CodexVisualContext,
+    network_target: Option<reqwest::Url>,
 ) -> Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     let state_for_task = state.clone();
     let codex_client_kind = log_ctx.codex_client_kind;
     let claude_summary_request_id = log_ctx.dedupe_key.clone().or_else(|| Some(log_id.clone()));
+    let response_log_id = log_id.clone();
 
     tokio::spawn(async move {
         let mut byte_stream = upstream.bytes_stream();
@@ -1973,6 +1990,9 @@ pub(crate) fn stream_response(
         attempt_log.active_upstream_decode_tps_peak = upstream_decode_tps_peak;
         attempt_log.active_downstream_emit_tps_peak = downstream_emit_tps_peak;
         attempt_log.response_headers = resp_headers_snapshot;
+        if let Some(url) = network_target.as_ref() {
+            apply_network_target_to_attempt_log(&mut attempt_log, url);
+        }
         persist_upstream_attempt_log(&state_for_task, attempt_log);
         finalize_stream_request_log(state_for_task, log).await;
         drop(tx);
@@ -1985,6 +2005,7 @@ pub(crate) fn stream_response(
     res.extensions_mut().insert(VibeCodexVisual(visual));
     res.extensions_mut()
         .insert(VibeCodexClientKind(codex_client_kind));
+    res.extensions_mut().insert(VibeRequestLogId(response_log_id));
     res
 }
 
@@ -2082,7 +2103,8 @@ fn extract_thread_turn_trace_session(
     Option<String>,
     Option<String>,
 ) {
-    let (h_thread, h_turn, h_trace, h_session) = extract_thread_turn_trace_session_from_headers(headers);
+    let (h_thread, h_turn, h_trace, h_session) =
+        extract_thread_turn_trace_session_from_headers(headers);
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
         return (h_thread, h_turn, h_trace, h_session);
     };

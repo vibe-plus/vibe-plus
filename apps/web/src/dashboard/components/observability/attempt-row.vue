@@ -15,6 +15,7 @@ const props = defineProps<{
   phaseLabel?: string | null;
   waveLabel?: string | null;
   attemptLabel?: string | null;
+  byteLabels?: { upstream: string; client: string };
   lifecycleLabels?: Partial<
     Record<
       "dispatch" | "upstreamFirstByte" | "clientFirstWrite" | "complete" | "terminal" | "elapsed",
@@ -316,7 +317,8 @@ function formatTime(ts: number): string {
     </span>
     <span class="text-vp-muted">{{ formatMs(latencyMs) }}</span>
     <span class="text-vp-muted">
-      ↓{{ formatBytes(upstreamBytes) }} · ↑{{ formatBytes(clientBytes) }}
+      {{ byteLabels?.upstream ?? "upstream in" }} {{ formatBytes(upstreamBytes) }} ·
+      {{ byteLabels?.client ?? "client out" }} {{ formatBytes(clientBytes) }}
     </span>
     <span v-if="attemptOutputTokens > 0" class="text-vp-muted">
       {{ attemptInputTokens }}↦{{ attemptOutputTokens }} tok

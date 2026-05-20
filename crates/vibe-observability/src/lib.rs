@@ -13,7 +13,9 @@ use axum::{
 use serde::Deserialize;
 use vibe_db::Db;
 use vibe_plugin_api::{EventSink, GatewayEvent, Plugin};
-use vibe_protocol::{AppLogEvent, LogPage, RequestLog, UpstreamAttemptLog, UsageRollupPage};
+use vibe_protocol::{
+    AppLogEvent, CodexThreadMeta, LogPage, RequestLog, UpstreamAttemptLog, UsageRollupPage,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct AppLogRecordsQuery {
@@ -38,6 +40,11 @@ pub struct RequestRecordsQuery {
 pub struct NetworkAttemptsQuery {
     limit: Option<i64>,
     offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CodexThreadsQuery {
+    ids: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +149,10 @@ impl ObservabilityStore {
 
     pub fn network_attempt_list(&self, limit: i64, offset: i64) -> Result<Vec<UpstreamAttemptLog>> {
         self.db.upstream_attempt_list(limit, offset)
+    }
+
+    pub fn codex_threads(&self, ids: &[String]) -> Result<Vec<CodexThreadMeta>> {
+        codex_threads_for_ids(ids)
     }
 
     pub fn app_log_list(&self, limit: i64, since: Option<i64>) -> Result<Vec<AppLogEvent>> {
@@ -297,7 +308,24 @@ pub async fn list_network_attempt_records(
     Ok(Json(rows))
 }
 
-pub async fn list_app_log_records(
+pub async fn list_codex_thread_records(
+    State(store): State<ObservabilityStore>,
+    Query(q): Query<CodexThreadsQuery>,
+) -> Result<Json<Vec<CodexThreadMeta>>, ObservabilityHttpError> {
+    let ids = q
+        .ids
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .take(500)
+        .collect::<Vec<_>>();
+    let rows = run_blocking(store, move |s| s.codex_threads(&ids)).await?;
+    Ok(Json(rows))
+}
+
+async fn list_app_log_records(
     State(store): State<ObservabilityStore>,
     Query(q): Query<AppLogRecordsQuery>,
 ) -> Result<Json<Vec<AppLogEvent>>, ObservabilityHttpError> {
@@ -340,6 +368,7 @@ pub fn router() -> Router<ObservabilityStore> {
         .route("/requests/:id", get(get_request_record))
         .route("/requests/:id/network", get(list_request_network_records))
         .route("/network-attempts", get(list_network_attempt_records))
+        .route("/codex-threads", get(list_codex_thread_records))
         .route("/app-logs", get(list_app_log_records))
         .route("/usage-rollups", get(list_usage_rollups))
 }
@@ -383,6 +412,96 @@ where
         .await
         .map_err(|e| ObservabilityHttpError::internal(e.to_string()))?
         .map_err(|e| ObservabilityHttpError::internal(e.to_string()))
+}
+
+fn codex_threads_for_ids(ids: &[String]) -> Result<Vec<CodexThreadMeta>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let path = codex_state_db_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    let mut out = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT id, title, cwd, source, model, updated_at, updated_at_ms, preview, first_user_message
+         FROM threads WHERE id = ?1",
+    )?;
+    for id in ids {
+        let row = stmt.query_row([id], |r| {
+            let cwd: String = r.get(2)?;
+            let updated_at_ms: Option<i64> = r.get(6)?;
+            let updated_at: i64 = updated_at_ms.map(|v| v / 1000).unwrap_or(r.get(5)?);
+            let title: String = r.get(1)?;
+            let preview: String = r.get::<_, String>(7).or_else(|_| r.get(8))?;
+            Ok(CodexThreadMeta {
+                thread_id: r.get(0)?,
+                title: compact_title(&title, &preview),
+                project: project_name_for_cwd(&cwd),
+                cwd,
+                source: r.get(3)?,
+                model: r.get(4)?,
+                updated_at,
+                preview,
+            })
+        });
+        match row {
+            Ok(meta) => out.push(meta),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(out)
+}
+
+fn codex_state_db_path() -> PathBuf {
+    if let Ok(home) = std::env::var("CODEX_HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("state_5.sqlite");
+        }
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+        .join("state_5.sqlite")
+}
+
+fn project_name_for_cwd(cwd: &str) -> String {
+    Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(cwd)
+        .to_string()
+}
+
+fn compact_title(title: &str, fallback: &str) -> String {
+    let raw = if title.trim().is_empty() {
+        fallback
+    } else {
+        title
+    }
+    .trim();
+    let first_line = raw
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(raw)
+        .trim();
+    let mut out = String::new();
+    for ch in first_line.chars().take(80) {
+        out.push(ch);
+    }
+    if out.is_empty() {
+        "Untitled thread".to_string()
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]

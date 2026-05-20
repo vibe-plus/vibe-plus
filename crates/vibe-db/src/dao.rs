@@ -137,31 +137,6 @@ fn provider_effective_host(p: &Provider) -> Option<String> {
     host_key_from_base(&p.base_url)
 }
 
-fn merge_protocol_lists(
-    existing: Vec<ProviderProtocol>,
-    incoming: Vec<ProviderProtocol>,
-) -> Vec<ProviderProtocol> {
-    let mut out = existing;
-    for proto in incoming {
-        let key = format!(
-            "{}::{}",
-            provider_kind_to_str(proto.kind),
-            proto.base_url.trim_end_matches('/').to_lowercase()
-        );
-        if out.iter().any(|p| {
-            format!(
-                "{}::{}",
-                provider_kind_to_str(p.kind),
-                p.base_url.trim_end_matches('/').to_lowercase()
-            ) == key
-        }) {
-            continue;
-        }
-        out.push(proto);
-    }
-    out
-}
-
 fn primary_from_protocols(protocols: &[ProviderProtocol]) -> Option<(ProviderKind, String)> {
     protocols.first().map(|p| (p.kind, p.base_url.clone()))
 }
@@ -568,8 +543,7 @@ impl Db {
             .as_ref()
             .map(provider_config_from_provider)
             .unwrap_or_default();
-        let incoming_protocols = normalize_protocols(&input);
-        let protocols = merge_protocol_lists(existing_cfg.protocols.clone(), incoming_protocols);
+        let protocols = normalize_protocols(&input);
         let (kind, base_url) = primary_from_protocols(&protocols)
             .map(|(k, u)| (k, u))
             .unwrap_or((input.kind, input.base_url.clone()));
@@ -1340,7 +1314,8 @@ impl Db {
                     bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
                     active_upstream_decode_tps_peak, active_downstream_emit_tps_peak,
                     request_headers, request_body, response_headers, response_body,
-                    request_body_ref, response_body_ref
+                    request_body_ref, response_body_ref,
+                    network_scheme, network_host, network_path
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                     ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
@@ -1349,7 +1324,7 @@ impl Db {
                     ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37,
                     ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50,
                     ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59, ?60, ?61, ?62,
-                    ?63, ?64, ?65, ?66, ?67, ?68, ?69, ?70
+                    ?63, ?64, ?65, ?66, ?67, ?68, ?69, ?70, ?71, ?72, ?73
                  )",
                 params![
                     attempt.attempt_id,
@@ -1422,6 +1397,9 @@ impl Db {
                     response_body_inline,
                     request_body_ref,
                     response_body_ref,
+                    attempt.network_scheme,
+                    attempt.network_host,
+                    attempt.network_path,
                 ],
             )?;
             Ok(())
@@ -2587,7 +2565,8 @@ impl Db {
          bridge_mode, status_injected, terminal_injected, upstream_terminal_type,
          active_upstream_decode_tps_peak, active_downstream_emit_tps_peak,
          request_headers, request_body, response_headers, response_body,
-         request_body_ref, response_body_ref";
+         request_body_ref, response_body_ref,
+         network_scheme, network_host, network_path";
 
     pub fn credential_list_for_provider(
         &self,
@@ -3470,6 +3449,9 @@ fn row_to_attempt(r: &rusqlite::Row) -> rusqlite::Result<UpstreamAttemptLog> {
         request_body: r.get(65)?,
         response_headers: r.get(66)?,
         response_body: r.get(67)?,
+        network_scheme: r.get(70)?,
+        network_host: r.get(71)?,
+        network_path: r.get(72)?,
     })
 }
 
