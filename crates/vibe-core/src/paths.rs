@@ -62,6 +62,10 @@ pub fn pid_path() -> Result<PathBuf> {
     Ok(vibe_dir()?.join("vibe.pid"))
 }
 
+pub fn auto_update_lock_path() -> Result<PathBuf> {
+    Ok(vibe_dir()?.join("auto-update.lock"))
+}
+
 pub fn log_path() -> Result<PathBuf> {
     Ok(vibe_dir()?.join("vibe.log"))
 }
