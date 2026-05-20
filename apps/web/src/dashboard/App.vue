@@ -41,10 +41,16 @@ const views: SidebarView[] = [
   },
 ];
 
-const topTabs: { to: string; labelKey: string; icon: vp_icon_name; scoped?: boolean }[] = [
+const topTabs: {
+  to: string;
+  labelKey: string;
+  icon: vp_icon_name;
+  scoped?: boolean;
+  badge?: string;
+}[] = [
   { to: "/ui/overview", labelKey: "tabs.overview", icon: "layout-dashboard", scoped: true },
   { to: "/ui/providers", labelKey: "tabs.providers", icon: "server", scoped: true },
-  { to: "/ui/observability", labelKey: "tabs.observability", icon: "activity" },
+  { to: "/ui/observability", labelKey: "tabs.observability", icon: "activity", badge: "BETA" },
   { to: "/ui/settings", labelKey: "tabs.settings", icon: "settings", scoped: true },
 ];
 
@@ -258,6 +264,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
             >
               <VpIcon :name="item.icon" size-class="size-4" />
               <span class="truncate">{{ tabLabel(item) }}</span>
+              <span v-if="item.badge" class="top-tab-badge">{{ item.badge }}</span>
             </RouterLink>
           </nav>
           <RouterView />
@@ -277,6 +284,7 @@ function tabLabel(item: (typeof topTabs)[number]) {
       >
         <VpIcon :name="item.icon" size-class="size-4" />
         <span class="text-[11px] leading-none truncate max-w-[4.2rem]">{{ tabLabel(item) }}</span>
+        <span v-if="item.badge" class="mobile-tab-badge">{{ item.badge }}</span>
       </RouterLink>
     </nav>
   </div>

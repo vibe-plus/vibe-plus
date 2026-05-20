@@ -83,6 +83,10 @@
   @apply bg-vp-surface text-vp-text shadow-sm ring-1 ring-vp-border;
 }
 
+@utility top-tab-badge {
+  @apply rounded-full border border-amber-300/70 bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700;
+}
+
 @utility mobile-bottom-bar {
   @apply fixed inset-x-2 bottom-2 z-30 flex items-center gap-0.5 rounded-[1.2rem] border border-white/55 bg-[linear-gradient(180deg,rgba(255,255,255,0.50)_0%,rgba(255,255,255,0.28)_100%)] p-0.75 shadow-[0_-8px_24px_color-mix(in_srgb,var(--vp-text)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.45)] backdrop-blur-xl;
 }
@@ -90,6 +94,10 @@
 @utility mobile-bottom-tab {
   @apply inline-flex h-10 min-w-0 flex-1 shrink-0 flex-col items-center justify-center rounded-[0.95rem] px-1 text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--vp-primary)_35%,transparent)];
   gap: calc(var(--spacing) * 0.375);
+}
+
+@utility mobile-tab-badge {
+  @apply rounded-full border border-amber-300/70 bg-amber-50 px-1 text-[8px] font-semibold uppercase leading-none text-amber-700;
 }
 
 @utility main-canvas {
