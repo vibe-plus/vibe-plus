@@ -17,6 +17,15 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[derive(Parser)]
+struct AutoUpdateChildArgs {
+    #[arg(long, default_value_t = cmd::DEFAULT_PORT)]
+    port: u16,
+
+    #[arg(long)]
+    expected_version: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum CcSwitchCommand {
     /// Dump CC Switch extract summary (secrets redacted).
@@ -25,6 +34,9 @@ enum CcSwitchCommand {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Internal helper used by the detached auto-updater.
+    #[command(name = "auto-update-child", hide = true)]
+    AutoUpdateChild(AutoUpdateChildArgs),
     /// Bring up Vibe Plus: gateway, client takeover, and dashboard.
     Up(cmd::up::UpArgs),
     /// Stop the running daemon.
@@ -63,6 +75,9 @@ async fn main() -> Result<()> {
     init_tracing();
     match cli.command {
         None => cmd::up::run(cmd::up::UpArgs::default()).await,
+        Some(Command::AutoUpdateChild(a)) => {
+            cmd::auto_update::run_updater_child(a.port, a.expected_version)
+        }
         Some(Command::Up(a)) => cmd::up::run(a).await,
         Some(Command::Stop) => cmd::stop::run().await,
         Some(Command::Status) => cmd::status::run().await,

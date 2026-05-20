@@ -6,7 +6,7 @@ use vibe_core::{config::Config, paths, state::AppState};
 use vibe_db::Db;
 use vibe_i18n::text_env;
 
-use super::gateway;
+use super::{auto_update, gateway};
 
 fn default_port() -> u16 {
     super::configured_port()
@@ -148,6 +148,7 @@ pub async fn run_server(port: u16) -> Result<()> {
     let state = AppState::init_with_optional_observability(db, cfg, port, observability)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
     write_pid()?;
+    auto_update::spawn_background_checker(port);
     vibe_core::server::serve(addr, state).await?;
     Ok(())
 }
