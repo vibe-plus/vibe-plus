@@ -27,6 +27,7 @@ const props = withDefaults(
     circuitState?: string | null;
     activeRequestCount?: number;
     tokensPerSec?: number | null;
+    healthTone?: "ok" | "warn" | "bad" | "muted" | null;
     activityLabel?: string | null;
     sizeClass?: string;
     iconSizeClass?: string;
@@ -39,6 +40,7 @@ const props = withDefaults(
     circuitState: "closed",
     activeRequestCount: 0,
     tokensPerSec: null,
+    healthTone: null,
     activityLabel: null,
     sizeClass: "size-9",
     iconSizeClass: "size-5",
@@ -233,8 +235,15 @@ const motionEl = ref<HTMLElement | null>(null);
 let frameId = 0;
 let currentPlaybackRate = 1;
 
-const active = computed(() => props.enabled && props.activeRequestCount > 0);
-const blocked = computed(() => props.circuitState === "open" || props.circuitState === "half-open");
+const inactive = computed(() => !props.enabled || props.healthTone === "muted");
+const blocked = computed(
+  () =>
+    props.circuitState === "open" ||
+    props.circuitState === "half-open" ||
+    props.healthTone === "bad",
+);
+const warn = computed(() => props.healthTone === "warn" && !blocked.value);
+const active = computed(() => props.enabled && props.activeRequestCount > 0 && !blocked.value);
 
 const targetPlaybackRate = computed(() => {
   if (!active.value) return 1;
@@ -288,16 +297,16 @@ onBeforeUnmount(() => {
 });
 
 const statusClass = computed(() => {
-  if (!props.enabled) return "bg-slate-400";
-  if (props.circuitState === "open") return "bg-red-500";
-  if (props.circuitState === "half-open") return "bg-amber-500";
+  if (inactive.value) return "bg-slate-400";
+  if (blocked.value) return "bg-red-500";
+  if (props.circuitState === "half-open" || warn.value) return "bg-amber-500";
   if (active.value) return "bg-emerald-500";
   return "bg-sky-300";
 });
 const title = computed(() => {
-  if (!props.enabled) return t("title.off");
-  if (props.circuitState === "open") return t("title.circuitOpen");
-  if (props.circuitState === "half-open") return t("title.circuitHalfOpen");
+  if (inactive.value) return t("title.off");
+  if (blocked.value) return t("title.circuitOpen");
+  if (props.circuitState === "half-open" || warn.value) return t("title.circuitHalfOpen");
   if (active.value)
     return t("title.active", {
       count: props.activeRequestCount,
@@ -312,8 +321,9 @@ const title = computed(() => {
     class="provider-logo relative grid shrink-0 place-items-center overflow-hidden rounded-lg bg-gradient-to-br from-violet-100 to-cyan-50 ring-1 ring-vp-border"
     :class="[
       sizeClass,
-      !enabled ? 'opacity-65 grayscale' : '',
-      blocked ? 'ring-red-200 bg-red-50' : '',
+      inactive ? 'bg-slate-100 opacity-65 grayscale ring-slate-200' : '',
+      blocked ? 'bg-red-50 ring-red-200 grayscale-[0.15]' : '',
+      warn ? 'bg-amber-50 ring-amber-200' : '',
     ]"
     :title="title"
   >
@@ -323,7 +333,7 @@ const title = computed(() => {
       :class="[
         brandIconClass,
         iconSizeClass,
-        active ? 'provider-logo__spin' : 'provider-logo__breathe',
+        active ? 'provider-logo__spin' : inactive || blocked ? '' : 'provider-logo__breathe',
       ]"
       aria-hidden="true"
     />
@@ -333,7 +343,7 @@ const title = computed(() => {
       :class="[
         protocolIconClass,
         iconSizeClass,
-        active ? 'provider-logo__spin' : 'provider-logo__breathe',
+        active ? 'provider-logo__spin' : inactive || blocked ? '' : 'provider-logo__breathe',
       ]"
       aria-hidden="true"
     />
@@ -361,7 +371,7 @@ const title = computed(() => {
       :class="[
         frameworkIconClass,
         iconSizeClass,
-        active ? 'provider-logo__spin' : 'provider-logo__breathe',
+        active ? 'provider-logo__spin' : inactive || blocked ? '' : 'provider-logo__breathe',
       ]"
       aria-hidden="true"
     />
@@ -377,7 +387,7 @@ const title = computed(() => {
     <span
       v-else
       :ref="setMotionEl"
-      :class="active ? 'provider-logo__spin' : 'provider-logo__breathe'"
+      :class="active ? 'provider-logo__spin' : inactive || blocked ? '' : 'provider-logo__breathe'"
       aria-hidden="true"
     >
       <VpIcon :name="fallbackIconName" :size-class="iconSizeClass" />

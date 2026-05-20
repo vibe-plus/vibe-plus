@@ -1,5 +1,5 @@
 import type { ComposerTranslation } from "vue-i18n";
-import type { AppLogEvent, JsonValue } from "../api/client.ts";
+import type { AppLogEvent, JsonValue, Provider } from "../api/client.ts";
 import {
   entityToken as buildEntityToken,
   type EntityKind,
@@ -14,6 +14,8 @@ export interface RenderedAppLog {
 }
 
 type PayloadObject = Record<string, JsonValue | undefined>;
+
+type ProviderMap = ReadonlyMap<string, Provider>;
 
 function objectValue(value: JsonValue | undefined): PayloadObject | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -32,11 +34,15 @@ function numberValue(value: JsonValue | undefined): number | null {
 function entityToken(
   kind: EntityKind,
   entity: PayloadObject | null,
-  fallbackId?: string | null,
+  providerById?: ProviderMap,
 ): AppLogToken {
-  const id = stringValue(entity?.id) ?? fallbackId ?? "";
-  const label = stringValue(entity?.label) ?? stringValue(entity?.name) ?? undefined;
-  return buildEntityToken({ kind, id, label }, id);
+  const id = stringValue(entity?.id) ?? "";
+  const liveLabel = id ? providerById?.get(id)?.name?.trim() : null;
+  const fallbackLabel = stringValue(entity?.label) ?? stringValue(entity?.name) ?? undefined;
+  return buildEntityToken(
+    { kind, id, label: liveLabel ?? fallbackLabel },
+    liveLabel ?? fallbackLabel,
+  );
 }
 
 function sentence(parts: Array<AppLogToken | string>): AppLogToken[] {
@@ -64,7 +70,11 @@ function legacyCircuitType(event: AppLogEvent): string | undefined {
   return event.event_type;
 }
 
-function renderCircuitEvent(event: AppLogEvent, t: ComposerTranslation): RenderedAppLog | null {
+function renderCircuitEvent(
+  event: AppLogEvent,
+  t: ComposerTranslation,
+  providerById?: ProviderMap,
+): RenderedAppLog | null {
   const legacyPayload = legacyCircuitPayload(event);
   const payload = legacyPayload ?? objectValue(event.payload);
   const subject = objectValue(payload?.subject);
@@ -74,9 +84,9 @@ function renderCircuitEvent(event: AppLogEvent, t: ComposerTranslation): Rendere
   const subjectKind = stringValue(subject?.kind) ?? (credential ? "credential" : "provider");
   const subjectToken =
     subjectKind === "credential"
-      ? entityToken("credential", credential ?? subject)
-      : entityToken("provider", provider ?? subject);
-  const providerToken = entityToken("provider", provider);
+      ? entityToken("credential", credential ?? subject, providerById)
+      : entityToken("provider", provider ?? subject, providerById);
+  const providerToken = entityToken("provider", provider, providerById);
   const failures = numberValue(circuit?.consecutive_failures);
   const timeoutSecs = numberValue(circuit?.open_timeout_secs);
   const timeoutMins = timeoutSecs === null ? null : Math.max(1, Math.round(timeoutSecs / 60));
@@ -132,10 +142,14 @@ function renderCircuitEvent(event: AppLogEvent, t: ComposerTranslation): Rendere
   }
 }
 
-function renderProviderEvent(event: AppLogEvent, t: ComposerTranslation): RenderedAppLog | null {
+function renderProviderEvent(
+  event: AppLogEvent,
+  t: ComposerTranslation,
+  providerById?: ProviderMap,
+): RenderedAppLog | null {
   const payload = objectValue(event.payload);
   const provider = objectValue(payload?.provider);
-  const providerToken = entityToken("provider", provider);
+  const providerToken = entityToken("provider", provider, providerById);
   const actionKey = {
     "provider.created": "events.providerCreated",
     "provider.updated": "events.providerUpdated",
@@ -151,17 +165,20 @@ function renderProviderEvent(event: AppLogEvent, t: ComposerTranslation): Render
   };
 }
 
-function renderCredentialEvent(event: AppLogEvent, t: ComposerTranslation): RenderedAppLog | null {
+function renderCredentialEvent(
+  event: AppLogEvent,
+  t: ComposerTranslation,
+  providerById?: ProviderMap,
+): RenderedAppLog | null {
   const payload = objectValue(event.payload);
   const credential = objectValue(payload?.credential);
   const provider = objectValue(payload?.provider);
-  const credentialId = stringValue(credential?.id);
   const providerId =
     stringValue(provider?.id) ??
     stringValue(credential?.provider_id) ??
     stringValue(payload?.provider_id);
-  const credentialToken = entityToken("credential", credential, credentialId);
-  const providerToken = providerId ? entityToken("provider", provider, providerId) : null;
+  const credentialToken = entityToken("credential", credential, providerById);
+  const providerToken = providerId ? entityToken("provider", provider, providerById) : null;
   const actionKey = {
     "credential.created": "events.credentialCreated",
     "credential.updated": "events.credentialUpdated",
@@ -187,11 +204,15 @@ function renderCredentialEvent(event: AppLogEvent, t: ComposerTranslation): Rend
   return { title, detail: event.detail };
 }
 
-export function renderAppLogEvent(event: AppLogEvent, t: ComposerTranslation): RenderedAppLog {
+export function renderAppLogEvent(
+  event: AppLogEvent,
+  t: ComposerTranslation,
+  providerById?: ProviderMap,
+): RenderedAppLog {
   const rendered =
-    renderCircuitEvent(event, t) ??
-    renderProviderEvent(event, t) ??
-    renderCredentialEvent(event, t);
+    renderCircuitEvent(event, t, providerById) ??
+    renderProviderEvent(event, t, providerById) ??
+    renderCredentialEvent(event, t, providerById);
   if (rendered) return rendered;
   return {
     title: [{ type: "text", text: event.message }],

@@ -32,6 +32,7 @@ const props = defineProps<{
   poolRow: CredentialPoolStatus | undefined;
   planSnap: CredentialPlanSnapshot | null;
   peerCreds: Credential[];
+  toggleBusy?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -43,6 +44,12 @@ const plan = () => primaryPlanPercent(props.planSnap);
 const status = () => mergedPoolStatus(props.credential, props.poolRow);
 const dupFp = () => isDupFingerprint(props.credential, props.peerCreds);
 const showDetail = ref(false);
+
+const active = computed(() => props.credential.enabled);
+const blocked = computed(
+  () => props.poolRow?.circuit_open || props.poolRow?.is_rate_limited || false,
+);
+const activeMotion = computed(() => active.value && !blocked.value);
 const { t } = useI18n();
 
 function statusText(): string {
@@ -139,13 +146,34 @@ function cooldownLabel(): string | null {
 
 <template>
   <div
-    class="group flex min-w-0 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1.5"
+    class="group flex w-full min-w-0 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-left transition-all"
+    :class="[
+      !active ? 'opacity-60 grayscale-[0.08]' : '',
+      blocked ? 'ring-1 ring-red-200 bg-red-50/40' : '',
+      activeMotion ? 'shadow-[0_0_0_1px_rgba(16,185,129,0.08)]' : '',
+    ]"
   >
+    <button
+      type="button"
+      class="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-all hover:scale-[1.02] disabled:cursor-wait"
+      :class="cn(STATUS_TAG_CLASS[statusTag.tone])"
+      :disabled="!!toggleBusy"
+      :aria-pressed="active"
+      :aria-label="active ? t('actions.disable') : t('actions.enable')"
+      :title="active ? t('actions.disable') : t('actions.enable')"
+      @click.stop="emit('toggle', credential)"
+    >
+      <span
+        class="size-2 rounded-full"
+        :class="[
+          !active ? 'bg-slate-400' : blocked ? 'bg-red-500' : 'bg-emerald-500',
+          activeMotion ? 'credential-status-dot' : '',
+        ]"
+      />
+      <span>{{ statusTag.label }}</span>
+    </button>
     <div class="min-w-0 flex-1">
       <div class="flex min-w-0 flex-wrap items-center gap-1 text-[11px]">
-        <UiBadge :class="cn('px-1.5 py-0 text-[10px]', STATUS_TAG_CLASS[statusTag.tone])">
-          {{ statusTag.label }}
-        </UiBadge>
         <span
           class="max-w-[8.5rem] truncate font-medium text-slate-900 sm:max-w-[12rem]"
           :title="credentialPrimaryAccountLabel(credential)"
@@ -190,7 +218,7 @@ function cooldownLabel(): string | null {
       </div>
     </div>
 
-    <div
+    <span
       class="flex shrink-0 items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:pointer-events-none sm:group-hover:opacity-100 sm:group-hover:pointer-events-auto sm:group-focus-within:opacity-100 sm:group-focus-within:pointer-events-auto"
     >
       <button
@@ -220,7 +248,7 @@ function cooldownLabel(): string | null {
       >
         <VpIcon name="trash-2" size-class="size-3.5" />
       </button>
-    </div>
+    </span>
   </div>
 
   <Teleport to="body">
@@ -410,8 +438,10 @@ function cooldownLabel(): string | null {
     "actions": {
       "close": "关闭",
       "delete": "删除",
+      "disable": "禁用",
       "details": "详情",
-      "edit": "编辑"
+      "edit": "编辑",
+      "enable": "启用"
     },
     "authModes": {
       "apiKey": "API Key",
@@ -454,3 +484,21 @@ function cooldownLabel(): string | null {
   }
 }
 </i18n>
+
+<style scoped>
+.credential-status-dot {
+  animation: credential-status-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes credential-status-breathe {
+  0%,
+  100% {
+    transform: scale(0.78);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+}
+</style>

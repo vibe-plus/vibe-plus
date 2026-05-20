@@ -9,6 +9,7 @@ import {
   type ClientToolInfo,
 } from "../../../utils/client-tools.ts";
 import { displayProviderName } from "../../../utils/providers-display.ts";
+import { providerSuccessScore } from "../../../utils/provider-health-score.ts";
 import { providerHasKind } from "../../../utils/provider-protocols.ts";
 import type {
   ProviderCardProtocolBadge,
@@ -37,6 +38,7 @@ export type ProviderSectionText = {
   noCredential: string;
   notTested: string;
   success: (pct: number) => string;
+  successUnknown: string;
   tokensPerSecond: (value: string) => string;
 };
 
@@ -50,6 +52,7 @@ const DEFAULT_TEXT: ProviderSectionText = {
   noCredential: "no cred",
   notTested: "not tested",
   success: (pct) => `${pct}% ok`,
+  successUnknown: "no traffic",
   tokensPerSecond: (value) => `${value} tok/s`,
 };
 
@@ -219,10 +222,13 @@ function providerCompositeScore(
   const pool = input.poolByProviderId[provider.id];
   const rollingTps = rolling?.decode_output_tokens_per_sec || rolling?.output_tokens_per_sec || 0;
   const tps = rollingTps;
-  const successRate =
-    rolling && rolling.requests > 0
-      ? rolling.success_rate
-      : (health?.cumulative.success_rate ?? (provider.enabled ? 1 : 0));
+  const hasRollingTraffic = !!rolling && rolling.requests > 0;
+  const hasCumulativeTraffic = (health?.cumulative.total_requests ?? 0) > 0;
+  const successRate = hasRollingTraffic
+    ? (providerSuccessScore(rolling) ?? rolling.success_rate)
+    : hasCumulativeTraffic
+      ? (health?.cumulative.success_rate ?? 0)
+      : null;
   const latencyMs =
     provider.last_speedtest?.latency_ms ??
     rolling?.avg_latency_ms ??
@@ -243,12 +249,14 @@ function providerCompositeScore(
     Math.min(180, enabledCreds * 40) -
     rateLimited * 120 -
     openCreds * 160 +
-    successRate * 900 +
+    (successRate ?? 0) * 900 +
     latencyScore +
     speedScore +
     priorityScore;
   const reasonParts = [
-    sectionText(input).success(Math.round(successRate * 100)),
+    successRate == null
+      ? sectionText(input).successUnknown
+      : sectionText(input).success(Math.round(successRate * 100)),
     latencyMs == null ? "" : sectionText(input).first(Math.round(latencyMs)),
     tps ? sectionText(input).tokensPerSecond(tps.toFixed(1)) : "",
     availableCreds
@@ -284,6 +292,7 @@ function rankProviderCard(provider: Provider, input: BuildProviderSectionsInput)
   }
   const quality = providerCompositeScore(provider, input);
   const normalizedTitle = title.toLocaleLowerCase("zh-Hans-CN");
+  const availabilityRank = provider.enabled ? 0 : 1;
 
   return {
     provider,
@@ -293,6 +302,14 @@ function rankProviderCard(provider: Provider, input: BuildProviderSectionsInput)
     group,
     qualityScore: quality.score,
     sortReason: quality.reason,
-    sortKey: `${provider.enabled ? "0" : "1"}:${normalizedTitle}:${provider.id}`,
+    sortKey: [
+      availabilityRank.toString().padStart(2, "0"),
+      Math.max(0, 1_000_000 - Math.round(quality.score))
+        .toString()
+        .padStart(7, "0"),
+      provider.priority.toString().padStart(6, "0"),
+      normalizedTitle,
+      provider.id,
+    ].join(":"),
   };
 }
