@@ -28,7 +28,11 @@ import ProviderSmartModal from "./components/provider-smart-modal.vue";
 import ProviderImportModal from "./components/provider-import-modal.vue";
 import CredentialFormModal from "./components/CredentialFormModal.vue";
 
-import { workspaceViewFromQuery, type WorkspaceView } from "../../utils/workspace-view.ts";
+import {
+  providerMatchesWorkspaceView,
+  workspaceViewFromQuery,
+  type WorkspaceView,
+} from "../../utils/workspace-view.ts";
 import { buildProviderSections } from "./utils/provider-sections.ts";
 import {
   isOfficialCodexProvider,
@@ -463,9 +467,20 @@ const activeToolTab = computed<ClientToolInfo | null>(() => {
   return CLIENT_TOOLS.find((tool) => tool.id === activeProviderTab.value) ?? null;
 });
 
+const scopedProviders = computed(() =>
+  providers.value.filter((provider) => providerMatchesWorkspaceView(provider, workspaceView.value)),
+);
+
+const scopedCredsByProvider = computed(() => {
+  const providerIds = new Set(scopedProviders.value.map((provider) => provider.id));
+  return Object.fromEntries(
+    Object.entries(credsByProvider.value).filter(([providerId]) => providerIds.has(providerId)),
+  );
+});
+
 const providerSections = computed<ProviderSectionView[]>(() =>
   buildProviderSections({
-    providers: providers.value,
+    providers: scopedProviders.value,
     selectedTool: activeToolTab.value,
     healthMap: healthMap.value,
     poolByProviderId: poolByProviderId.value,
@@ -846,7 +861,7 @@ watch(
       <UiSkeleton class="h-36 w-full" />
     </div>
     <div
-      v-else-if="providers.length === 0"
+      v-else-if="scopedProviders.length === 0"
       class="rounded-xl border border-dashed border-border bg-card py-12 text-center font-mono text-sm text-muted-foreground"
       :title="t('states.empty')"
       :aria-label="t('states.empty')"
@@ -856,13 +871,13 @@ watch(
     <ProviderSections
       v-else
       data-testid="providers-complete"
-      :data-provider-count="providers.length"
+      :data-provider-count="scopedProviders.length"
       :data-credential-count="
-        Object.values(credsByProvider).reduce((sum, rows) => sum + rows.length, 0)
+        Object.values(scopedCredsByProvider).reduce((sum, rows) => sum + rows.length, 0)
       "
       :sections="providerSections"
       :health-map="healthMap"
-      :creds-by-provider="credsByProvider"
+      :creds-by-provider="scopedCredsByProvider"
       :loading-creds="loadingCreds"
       :toggle-busy="toggleBusy"
       :circuit-reset-busy="circuitResetBusy"
