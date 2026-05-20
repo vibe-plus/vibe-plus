@@ -7,6 +7,7 @@ import {
   type Credential,
   type Provider,
   type RealtimeAttempt,
+  type RealtimeRequest,
   type RequestLog,
   type UpstreamAttemptLog,
   type RealtimeSnapshot,
@@ -27,10 +28,18 @@ import Sparkline from "../components/observability/sparkline.vue";
 import { resolveProviderLabel } from "../utils/provider-display.ts";
 import { credentialPrimaryAccountLabel } from "../utils/providers-display.ts";
 import { protocolWireLetter } from "../utils/protocol-label.ts";
+import {
+  appNameMatchesWorkspaceView,
+  providerMatchesWorkspaceView,
+  routePrefixMatchesWorkspaceView,
+  workspaceViewFromQuery,
+  type WorkspaceView,
+} from "../utils/workspace-view.ts";
 
 const route = useRoute();
 const router = useRouter();
 const { t } = useI18n();
+const workspaceView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
 
 type SubTab = "upstream" | "downstream" | "logs" | "attempts" | "network" | "waveform";
 const SUB_TABS: { id: SubTab; icon: vp_icon_name; labelKey: string }[] = [
@@ -78,14 +87,30 @@ const {
   history,
 } = useRealtimeStream({ historySize: HISTORY_SIZE });
 
-const kpiActiveCount = computed(() => realtime.value?.active_count ?? 0);
-const kpiTokTps = computed(() => realtime.value?.active_output_tokens_per_sec ?? 0);
-const kpiBytesPerSec = computed(
-  () =>
-    (realtime.value?.active_upstream_bytes_per_sec ?? 0) +
-    (realtime.value?.active_downstream_bytes_per_sec ?? 0),
+const scopedRealtimeRequests = computed(() =>
+  (realtime.value?.active_requests ?? []).filter((request) => requestMatchesWorkspaceView(request)),
 );
-const kpiUsdPerHour = computed(() => realtime.value?.active_cost_usd_per_hour ?? null);
+const kpiActiveCount = computed(() => scopedRealtimeRequests.value.length);
+const kpiTokTps = computed(() =>
+  scopedRealtimeRequests.value.reduce(
+    (sum, request) => sum + (request.active_output_tokens_per_sec ?? 0),
+    0,
+  ),
+);
+const kpiBytesPerSec = computed(() =>
+  scopedRealtimeRequests.value.reduce(
+    (sum, request) =>
+      sum + request.active_upstream_bytes_per_sec + request.active_downstream_bytes_per_sec,
+    0,
+  ),
+);
+const kpiUsdPerHour = computed(() => {
+  const total = scopedRealtimeRequests.value.reduce(
+    (sum, request) => sum + (request.active_cost_usd_per_hour ?? 0),
+    0,
+  );
+  return total > 0 ? total : null;
+});
 
 function seriesOf(extract: (s: RealtimeSnapshot) => number): number[] {
   return history.value.map(extract);
@@ -180,6 +205,34 @@ const credentialsById = computed(() => {
   return out;
 });
 
+const providerById = computed(
+  () => new Map(providers.value.map((provider) => [provider.id, provider])),
+);
+
+function requestMatchesWorkspaceView(request: RequestLog | RealtimeRequest): boolean {
+  const view = workspaceView.value;
+  if (view === "overview") return true;
+  if (routePrefixMatchesWorkspaceView(request.route_prefix, view)) return true;
+  if (appNameMatchesWorkspaceView(request.app, view)) return true;
+  if (request.provider_id) {
+    const provider = providerById.value.get(request.provider_id);
+    if (provider) return providerMatchesWorkspaceView(provider, view);
+  }
+  return false;
+}
+
+function attemptMatchesWorkspaceView(attempt: UpstreamAttemptLog | RealtimeAttempt): boolean {
+  const view = workspaceView.value;
+  if (view === "overview") return true;
+  if (routePrefixMatchesWorkspaceView(attempt.route_prefix, view)) return true;
+  if (attempt.provider_id) {
+    const provider = providerById.value.get(attempt.provider_id);
+    if (provider) return providerMatchesWorkspaceView(provider, view);
+  }
+  const request = requests.value.find((row) => row.id === attempt.request_id);
+  return request ? requestMatchesWorkspaceView(request) : false;
+}
+
 function providerNameFor(id: string | null | undefined): string | null {
   if (!id) return null;
   return resolveProviderLabel(id, "", providerNamesById.value);
@@ -206,7 +259,7 @@ type RequestGroup = {
 };
 
 const activeRealtimeAttempts = computed<RealtimeAttempt[]>(() =>
-  (realtime.value?.active_requests ?? []).flatMap((request) => request.attempts ?? []),
+  scopedRealtimeRequests.value.flatMap((request) => request.attempts ?? []),
 );
 
 const activeRealtimeAttemptIds = computed(
@@ -217,7 +270,7 @@ const requestGroups = computed<RequestGroup[]>(() => {
   const byReq = new Map<string, RequestGroup>();
   const rows: Array<UpstreamAttemptLog | RealtimeAttempt> = [
     ...activeRealtimeAttempts.value,
-    ...attempts.value.filter((a) => !activeRealtimeAttemptIds.value.has(a.attempt_id)),
+    ...scopedAttempts.value.filter((a) => !activeRealtimeAttemptIds.value.has(a.attempt_id)),
   ];
   for (const a of rows) {
     let g = byReq.get(a.request_id);
@@ -225,7 +278,7 @@ const requestGroups = computed<RequestGroup[]>(() => {
       g = {
         request_id: a.request_id,
         started_at: a.started_at,
-        app: requests.value.find((r) => r.id === a.request_id)?.app ?? null,
+        app: scopedRequests.value.find((r) => r.id === a.request_id)?.app ?? null,
         total_attempts: 0,
         waves: [],
       };
@@ -252,12 +305,19 @@ const requestGroups = computed<RequestGroup[]>(() => {
 // ── 下游 grouping by client app ─────────────────────────────────────────────
 const requestsByApp = computed<Record<string, RequestLog[]>>(() => {
   const out: Record<string, RequestLog[]> = {};
-  for (const r of requests.value) {
+  for (const r of scopedRequests.value) {
     const key = r.app ?? "unknown";
     (out[key] ??= []).push(r);
   }
   return out;
 });
+
+const scopedRequests = computed(() =>
+  requests.value.filter((request) => requestMatchesWorkspaceView(request)),
+);
+const scopedAttempts = computed(() =>
+  attempts.value.filter((attempt) => attemptMatchesWorkspaceView(attempt)),
+);
 
 function statusTone(code: number | null | undefined): string {
   if (code == null) return "bg-slate-100 text-slate-600";
@@ -502,7 +562,7 @@ function normalizeOutcomeKey(outcome: string): string {
               {{
                 t("obs.upstream.summary", {
                   requests: requestGroups.length,
-                  attempts: attempts.length,
+                  attempts: requestGroups.reduce((sum, group) => sum + group.total_attempts, 0),
                 })
               }}
             </span>
@@ -588,10 +648,10 @@ function normalizeOutcomeKey(outcome: string): string {
               </span>
             </div>
             <span class="font-mono text-[11px] text-vp-muted">
-              {{ t("obs.downstream.summary", { count: requests.length }) }}
+              {{ t("obs.downstream.summary", { count: scopedRequests.length }) }}
             </span>
           </div>
-          <div v-if="!requests.length" class="px-4 py-12 text-center text-sm text-vp-muted">
+          <div v-if="!scopedRequests.length" class="px-4 py-12 text-center text-sm text-vp-muted">
             {{ t("obs.empty") }}
           </div>
           <div v-else>
@@ -672,7 +732,7 @@ function normalizeOutcomeKey(outcome: string): string {
             </div>
           </div>
           <div class="max-h-[32rem] w-full overflow-auto">
-            <LogsPanel />
+            <LogsPanel :view="workspaceView" :providers="providers" />
           </div>
         </Card>
       </TabsContent>
@@ -685,14 +745,14 @@ function normalizeOutcomeKey(outcome: string): string {
               <VpIcon name="layers-3" size-class="size-4 text-indigo-600" />
               <span class="text-sm font-semibold text-vp-text">{{ t("obs.attempts.title") }}</span>
             </div>
-            <span class="font-mono text-[11px] text-vp-muted">{{ attempts.length }}</span>
+            <span class="font-mono text-[11px] text-vp-muted">{{ scopedAttempts.length }}</span>
           </div>
-          <div v-if="!attempts.length" class="px-4 py-12 text-center text-sm text-vp-muted">
+          <div v-if="!scopedAttempts.length" class="px-4 py-12 text-center text-sm text-vp-muted">
             {{ t("obs.empty") }}
           </div>
           <div v-else>
             <AttemptRow
-              v-for="a in attempts"
+              v-for="a in scopedAttempts"
               :key="a.attempt_id"
               :attempt="a"
               :provider-name="providerNameFor(a.provider_id)"
@@ -721,10 +781,10 @@ function normalizeOutcomeKey(outcome: string): string {
               <span class="text-sm font-semibold text-vp-text">{{ t("obs.network.title") }}</span>
             </div>
             <span class="font-mono text-[11px] text-vp-muted">
-              {{ t("obs.network.summary", { count: attempts.length }) }}
+              {{ t("obs.network.summary", { count: scopedAttempts.length }) }}
             </span>
           </div>
-          <div v-if="!attempts.length" class="px-4 py-12 text-center text-sm text-vp-muted">
+          <div v-if="!scopedAttempts.length" class="px-4 py-12 text-center text-sm text-vp-muted">
             {{ t("obs.empty") }}
           </div>
           <table v-else class="w-full text-xs">
@@ -744,7 +804,7 @@ function normalizeOutcomeKey(outcome: string): string {
             </thead>
             <tbody>
               <tr
-                v-for="a in attempts"
+                v-for="a in scopedAttempts"
                 :key="a.attempt_id"
                 class="border-b border-vp-border/40 font-mono hover:bg-vp-bg-hover"
                 :class="a.request_id === highlightRequest ? 'bg-amber-50/30' : ''"

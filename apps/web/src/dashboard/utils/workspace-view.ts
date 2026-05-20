@@ -20,3 +20,32 @@ export function providerMatchesWorkspaceView(provider: Provider, view: Workspace
   if (view === "claude") return providerHasKind(provider, "anthropic");
   return providerHasKind(provider, "openai-responses");
 }
+
+export function routePrefixMatchesWorkspaceView(
+  routePrefix: string | null | undefined,
+  view: WorkspaceView,
+): boolean {
+  if (view === "overview") return true;
+  const prefix = (routePrefix ?? "").toLowerCase();
+  if (view === "claude") return prefix.includes("claude");
+  return prefix.includes("codex") || prefix.includes("opencode");
+}
+
+export function appNameMatchesWorkspaceView(
+  app: string | null | undefined,
+  view: WorkspaceView,
+): boolean {
+  if (view === "overview") return true;
+  const value = (app ?? "").toLowerCase();
+  if (view === "claude") return value.includes("claude");
+  return value.includes("codex") || value.includes("opencode");
+}
+
+export function providerKindMatchesWorkspaceView(
+  kind: string | null | undefined,
+  view: WorkspaceView,
+): boolean {
+  if (view === "overview") return true;
+  if (view === "claude") return kind === "anthropic";
+  return kind === "openai-responses" || kind === "openai-chat";
+}

@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 import { computed, shallowRef, onMounted, onUnmounted, watch } from "vue";
-import { api, type AppLogEvent } from "../api/client.ts";
+import { api, type AppLogEvent, type Provider } from "../api/client.ts";
 import { renderAppLogEvent } from "../utils/app-log-renderer.ts";
+import { providerMatchesWorkspaceView, type WorkspaceView } from "../utils/workspace-view.ts";
 
-const props = withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
+const props = withDefaults(
+  defineProps<{ compact?: boolean; view?: WorkspaceView; providers?: Provider[] }>(),
+  { compact: false, view: "overview", providers: () => [] },
+);
 const MAX_LINES = 500;
 const lines = shallowRef<AppLogEvent[]>([]);
 const live = shallowRef(true);
@@ -13,6 +17,9 @@ const LOG_REFRESH_INTERVAL_MS = 5_000;
 let logRefreshTimer: number | null = null;
 let loadInFlight: Promise<void> | null = null;
 const { t } = useI18n();
+const providerById = computed(
+  () => new Map(props.providers.map((provider) => [provider.id, provider])),
+);
 
 function eventSubjectKey(line: AppLogEvent): string {
   const payload =
@@ -53,6 +60,7 @@ function collapseKey(line: AppLogEvent): string {
 const renderedLines = computed(() => {
   const seen = new Set<string>();
   return lines.value
+    .filter((line) => appLogMatchesWorkspaceView(line))
     .filter((line) => {
       const key = collapseKey(line);
       if (seen.has(key)) return false;
@@ -64,6 +72,22 @@ const renderedLines = computed(() => {
       rendered: renderAppLogEvent(line, t),
     }));
 });
+
+function appLogMatchesWorkspaceView(line: AppLogEvent): boolean {
+  if (props.view === "overview") return true;
+  const payload =
+    line.payload && typeof line.payload === "object" && !Array.isArray(line.payload)
+      ? line.payload
+      : null;
+  const provider =
+    payload?.provider && typeof payload.provider === "object" && !Array.isArray(payload.provider)
+      ? payload.provider
+      : null;
+  const providerId = typeof provider?.id === "string" ? provider.id : null;
+  if (!providerId) return false;
+  const providerRow = providerById.value.get(providerId);
+  return providerRow ? providerMatchesWorkspaceView(providerRow, props.view) : false;
+}
 
 function logKey(log: AppLogEvent): string {
   return `${log.ts}:${log.event_type ?? "legacy.message"}:${log.message}`;

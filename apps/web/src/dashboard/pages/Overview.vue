@@ -30,7 +30,9 @@ import {
   UNKNOWN_PROVIDER_LABEL,
 } from "../utils/provider-display.ts";
 import {
+  appNameMatchesWorkspaceView,
   providerMatchesWorkspaceView,
+  routePrefixMatchesWorkspaceView,
   workspaceViewFromQuery,
   type WorkspaceView,
 } from "../utils/workspace-view.ts";
@@ -143,14 +145,37 @@ const realtimeProviderById = computed(
   () =>
     new Map((realtime.value?.providers ?? []).map((provider) => [provider.provider_id, provider])),
 );
-const realtimeActiveCount = computed(() => realtime.value?.active_count ?? 0);
-const realtimeOutputTps = computed(() => realtime.value?.active_output_tokens_per_sec ?? 0);
-const realtimeNetworkBytesPerSec = computed(
-  () =>
-    (realtime.value?.active_upstream_bytes_per_sec ?? 0) +
-    (realtime.value?.active_downstream_bytes_per_sec ?? 0),
+const scopedRealtimeRequests = computed(() =>
+  (realtime.value?.active_requests ?? []).filter((request) => {
+    if (view.value === "overview") return true;
+    if (routePrefixMatchesWorkspaceView(request.route_prefix, view.value)) return true;
+    if (appNameMatchesWorkspaceView(request.app, view.value)) return true;
+    if (!request.provider_id) return false;
+    const provider = providerById.value.get(request.provider_id);
+    return provider ? providerMatchesWorkspaceView(provider, view.value) : false;
+  }),
 );
-const realtimeUsdPerHour = computed(() => realtime.value?.active_cost_usd_per_hour ?? null);
+const realtimeActiveCount = computed(() => scopedRealtimeRequests.value.length);
+const realtimeOutputTps = computed(() =>
+  scopedRealtimeRequests.value.reduce(
+    (sum, request) => sum + (request.active_output_tokens_per_sec ?? 0),
+    0,
+  ),
+);
+const realtimeNetworkBytesPerSec = computed(() =>
+  scopedRealtimeRequests.value.reduce(
+    (sum, request) =>
+      sum + request.active_upstream_bytes_per_sec + request.active_downstream_bytes_per_sec,
+    0,
+  ),
+);
+const realtimeUsdPerHour = computed(() => {
+  const total = scopedRealtimeRequests.value.reduce(
+    (sum, request) => sum + (request.active_cost_usd_per_hour ?? 0),
+    0,
+  );
+  return total > 0 ? total : null;
+});
 const windowUsdPerHour = computed(() => {
   const estimatedCostUsd = Number.parseFloat(stats.value?.estimated_cost_usd_in_window ?? "");
   const hours = Number(stats.value?.window_hours ?? 0);
@@ -949,7 +974,7 @@ function rateOr(n: unknown, fallback = 1): number {
               <span class="font-mono text-xs text-vp-muted">{{ t("logs.memoryOnly") }}</span>
             </div>
             <div class="max-h-[18rem] w-full overflow-auto">
-              <LogsPanel compact />
+              <LogsPanel compact :view="view" :providers="providers" />
             </div>
           </Card>
         </section>

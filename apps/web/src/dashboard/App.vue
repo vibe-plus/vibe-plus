@@ -82,17 +82,16 @@ function isActive(to: string): boolean {
 }
 
 function tabTo(item: (typeof topTabs)[number]) {
-  if (!item.scoped) return item.to;
   return currentView.value === "overview"
     ? item.to
-    : { path: item.to, query: { view: currentView.value } };
+    : { path: item.to, query: { ...route.query, view: currentView.value } };
 }
 
 function setView(view: WorkspaceView) {
   const query = { ...route.query };
   if (view === "overview") delete query.view;
   else query.view = view;
-  void router.push({ path: "/ui/overview", query });
+  void router.replace({ path: route.path, query });
 }
 
 function tabLabel(item: (typeof topTabs)[number]) {
