@@ -5,7 +5,7 @@ use crate::codex_summary;
 use crate::codex_upstream_ws::{StatusDecision, UpstreamWsOutcome};
 use crate::codex_visual;
 use crate::forward;
-use crate::forward::{VibeCodexClientKind, VibeCodexVisual};
+use crate::forward::{VibeCodexClientKind, VibeCodexVisual, VibeRequestLogId};
 use crate::providers::Wire;
 use crate::state::AppState;
 use crate::transforms;

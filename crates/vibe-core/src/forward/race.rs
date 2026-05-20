@@ -15,14 +15,15 @@
 use super::outcome;
 use super::selector::ExpandedPick;
 use super::{
-    attempt_log_from_parts, body_wants_stream, build_log, codex_visual_context,
-    copy_response_headers, emit_circuit_event, extract_rl_headers, fire_credential_disable,
-    fire_credential_failure, fire_credential_rate_limit_only, fire_credential_success, fire_health,
-    forget_codex_sticky_route_if_present, format_routing_attempt,
-    inject_chatgpt_codex_instructions_if_missing, lossy_optional_body, maybe_record_codex_plan,
-    needs_chat_to_responses_bridge, new_attempt_ctx, persist_log, persist_upstream_attempt_log,
-    publish_upstream_attempt_started, remember_codex_sticky_route_for_pick, resolve_oauth_token,
-    sanitized_headers_json, stream_response, LogCtx, VibeCodexClientKind, VibeCodexVisual,
+    apply_network_target_to_attempt_log, attempt_log_from_parts, body_wants_stream, build_log,
+    codex_visual_context, copy_response_headers, emit_circuit_event, extract_rl_headers,
+    fire_credential_disable, fire_credential_failure, fire_credential_rate_limit_only,
+    fire_credential_success, fire_health, forget_codex_sticky_route_if_present,
+    format_routing_attempt, inject_chatgpt_codex_instructions_if_missing, lossy_optional_body,
+    maybe_record_codex_plan, needs_chat_to_responses_bridge, new_attempt_ctx, persist_log,
+    persist_upstream_attempt_log, publish_upstream_attempt_started,
+    remember_codex_sticky_route_for_pick, resolve_oauth_token, sanitized_headers_json,
+    stream_response, LogCtx, VibeCodexClientKind, VibeCodexVisual, VibeRequestLogId,
 };
 use crate::cache;
 use crate::claude_summary::ClaudeClientKind;
@@ -348,6 +349,10 @@ pub(crate) async fn try_one_pick(
             };
         }
     };
+    let network_target = req
+        .try_clone()
+        .and_then(|r| r.build().ok())
+        .map(|r| r.url().clone());
     let req = if ctx.wire == Wire::Anthropic {
         // Claude Messages streams can take 10+ minutes for long thinking blocks; we
         // give them a wide-but-finite cap so the underlying reqwest socket doesn't
@@ -383,7 +388,7 @@ pub(crate) async fn try_one_pick(
                 &epick.credential_id,
                 format!("connection error: {msg}"),
             );
-            let attempt_log = attempt_log_from_parts(
+            let mut attempt_log = attempt_log_from_parts(
                 &log_ctx,
                 &attempt,
                 UpstreamAttemptPhase::Failed,
@@ -394,6 +399,9 @@ pub(crate) async fn try_one_pick(
                 Some(msg.clone()),
                 Usage::default(),
             );
+            if let Some(url) = network_target.as_ref() {
+                apply_network_target_to_attempt_log(&mut attempt_log, url);
+            }
             persist_upstream_attempt_log(&state, attempt_log);
             return PickResult::Retry {
                 last_error: format!("connection to {}: {msg}", provider.id),
@@ -451,6 +459,9 @@ pub(crate) async fn try_one_pick(
                 Usage::default(),
             );
             attempt_log.response_headers = retryable_resp_headers_snapshot.clone();
+            if let Some(url) = network_target.as_ref() {
+                apply_network_target_to_attempt_log(&mut attempt_log, url);
+            }
 
             persist_upstream_attempt_log(&state, attempt_log);
             return PickResult::Retry {
@@ -517,6 +528,9 @@ pub(crate) async fn try_one_pick(
             Usage::default(),
         );
         attempt_log.response_headers = retryable_resp_headers_snapshot;
+        if let Some(url) = network_target.as_ref() {
+            apply_network_target_to_attempt_log(&mut attempt_log, url);
+        }
 
         persist_upstream_attempt_log(&state, attempt_log);
         return PickResult::Retry {
@@ -563,6 +577,9 @@ pub(crate) async fn try_one_pick(
             Usage::default(),
         );
         attempt_log.response_headers = resp_headers_snapshot;
+        if let Some(url) = network_target.as_ref() {
+            apply_network_target_to_attempt_log(&mut attempt_log, url);
+        }
 
         persist_upstream_attempt_log(&state, attempt_log);
         let log = build_log(
@@ -649,6 +666,7 @@ pub(crate) async fn try_one_pick(
             log_ctx,
             None,
             visual,
+            network_target,
         ));
     }
 
@@ -824,6 +842,9 @@ pub(crate) async fn try_one_pick(
     response
         .extensions_mut()
         .insert(VibeCodexClientKind(log_ctx.codex_client_kind));
+    response
+        .extensions_mut()
+        .insert(VibeRequestLogId(ctx.log_id.clone()));
     PickResult::Final(response)
 }
 

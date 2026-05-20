@@ -798,6 +798,15 @@ pub struct UpstreamAttemptLog {
     pub request_body: Option<String>,
     pub response_headers: Option<String>,
     pub response_body: Option<String>,
+    /// Gateway→upstream network URL scheme (http/https/ws/wss), separated from model semantics.
+    #[serde(default)]
+    pub network_scheme: Option<String>,
+    /// Gateway→upstream network host, separated from provider/model semantics.
+    #[serde(default)]
+    pub network_host: Option<String>,
+    /// Gateway→upstream request path (query intentionally omitted).
+    #[serde(default)]
+    pub network_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1248,6 +1257,19 @@ pub struct CodexHistorySummary {
     pub rollout_files_changed: usize,
     pub rollout_fields_changed: usize,
     pub backups_created: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../packages/protocol/types/CodexThreadMeta.ts")]
+pub struct CodexThreadMeta {
+    pub thread_id: String,
+    pub title: String,
+    pub cwd: String,
+    pub project: String,
+    pub source: String,
+    pub model: Option<String>,
+    pub updated_at: i64,
+    pub preview: String,
 }
 
 /// Enhanced stats for the dashboard.

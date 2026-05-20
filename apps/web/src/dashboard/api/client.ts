@@ -62,6 +62,20 @@ export interface ProviderProtocol {
   model_aliases: ModelAlias[];
 }
 
+export interface ProviderProbeProtocol {
+  kind: ProviderKind;
+  label: string;
+  base_url: string;
+  status: number;
+}
+
+export interface ProviderProbeResult {
+  host: string;
+  display_name: string;
+  protocols: ProviderProbeProtocol[];
+  note: string | null;
+}
+
 export interface Upstream {
   id: string;
   provider_id: string;
@@ -272,6 +286,10 @@ export interface RealtimeAttempt {
   updated_at: number;
   provider_id: string | null;
   credential_id: string | null;
+  thread_id?: string | null;
+  turn_id?: string | null;
+  trace_id?: string | null;
+  session_id?: string | null;
   wire: string | null;
   route_prefix: string | null;
   requested_model: string | null;
@@ -336,6 +354,10 @@ export interface RequestLog {
   started_at: number;
   app: string | null;
   provider_id: string | null;
+  thread_id?: string | null;
+  turn_id?: string | null;
+  trace_id?: string | null;
+  session_id?: string | null;
   requested_model: string | null;
   upstream_model: string | null;
   status_code: number | null;
@@ -386,6 +408,17 @@ export interface LogPage {
   has_more: boolean;
 }
 
+export interface CodexThreadMeta {
+  thread_id: string;
+  title: string;
+  cwd: string;
+  project: string;
+  source: string;
+  model: string | null;
+  updated_at: number;
+  preview: string;
+}
+
 export type UpstreamAttemptOutcome =
   | import("../../../../../crates/vibe-protocol/packages/protocol/types/UpstreamAttemptOutcome.ts").UpstreamAttemptOutcome
   // Legacy observability rows kept for backward-compatible rendering.
@@ -431,6 +464,10 @@ export interface UpstreamAttemptLog {
   ended_at: number | null;
   provider_id: string | null;
   credential_id: string | null;
+  thread_id?: string | null;
+  turn_id?: string | null;
+  trace_id?: string | null;
+  session_id?: string | null;
   wire: string | null;
   route_prefix: string | null;
   requested_model: string | null;
@@ -477,6 +514,9 @@ export interface UpstreamAttemptLog {
   request_body: string | null;
   response_headers: string | null;
   response_body: string | null;
+  network_scheme?: string | null;
+  network_host?: string | null;
+  network_path?: string | null;
 }
 
 export interface UsageSummary {
@@ -938,6 +978,8 @@ export const api = {
       }),
     refreshModels: (id: string) =>
       req<Provider>(`/_vp/providers/${id}/models/refresh`, { method: "POST" }),
+    probe: (host: string) =>
+      req<ProviderProbeResult>(`/_vp/providers/probe?host=${encodeURIComponent(host)}`),
     scanLocal: () => req<LocalCandidate[]>("/_vp/providers/import-local"),
     importLocal: (clients: string[]) =>
       req<Provider[]>("/_vp/providers/import-local", {
@@ -1026,6 +1068,12 @@ export const api = {
       if (opts.offset != null) params.set("offset", String(opts.offset));
       const qs = params.toString();
       return req<UpstreamAttemptLog[]>(`/_vp/observability/network-attempts${qs ? `?${qs}` : ""}`);
+    },
+    codexThreads: (ids: string[]) => {
+      const params = new URLSearchParams();
+      if (ids.length) params.set("ids", ids.join(","));
+      const qs = params.toString();
+      return req<CodexThreadMeta[]>(`/_vp/observability/codex-threads${qs ? `?${qs}` : ""}`);
     },
   },
   usage: (hours = 24) => req<UsageSummary>(`/_vp/usage/summary?hours=${hours}`),
