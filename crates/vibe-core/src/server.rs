@@ -113,6 +113,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1beta/models/*path", post(post_gemini))
         // providers CRUD
         .route("/_vp/providers", get(list_providers).post(create_provider))
+        .route("/_vp/providers/probe", get(probe_provider_host))
         .route(
             "/_vp/providers/import-local",
             get(scan_import_local).post(import_local),

@@ -38,13 +38,13 @@ pub fn provider_is_chatgpt_codex_official(p: &Provider) -> bool {
 pub fn candidates(providers: &[Provider], wire: Wire, requested_model: &str) -> Vec<Pick> {
     let kinds: &[ProviderKind] = match wire {
         Wire::Anthropic => &[ProviderKind::Anthropic],
-        Wire::OpenaiChat => &[ProviderKind::OpenaiChat, ProviderKind::OpenaiResponses],
+        Wire::OpenaiChat => &[ProviderKind::OpenaiChat],
         // Codex CLI uses the OpenAI Responses API (/v1/responses).
-        // Any OpenAI-compat provider can serve this wire — the adapter will call
-        // <base_url>/v1/responses on it. Providers that only expose Chat Completions
-        // should be registered as OpenaiCompat, and if their upstream supports
-        // /v1/responses it will work; if not, the error comes from upstream (not a 503).
-        Wire::OpenaiResponses => &[ProviderKind::OpenaiResponses, ProviderKind::OpenaiChat],
+        // Vibe Plus intentionally has no Responses→Chat bridge: Chat-only
+        // providers must not receive Codex traffic, because many OpenAI-chat
+        // gateways return 404 for Responses-shaped requests and should remain
+        // visible only to chat clients such as OpenCode.
+        Wire::OpenaiResponses => &[ProviderKind::OpenaiResponses],
         Wire::GeminiNative => &[ProviderKind::GeminiNative],
     };
 
@@ -205,5 +205,12 @@ mod tests {
             candidates(&list, Wire::OpenaiResponses, "gpt-unknown").is_empty(),
             "compat provider with restricted aliases must not match arbitrary models"
         );
+    }
+
+    #[test]
+    fn chat_wire_does_not_include_responses_only_providers() {
+        let codex = sample_codex_provider();
+        let list = vec![codex];
+        assert!(candidates(&list, Wire::OpenaiChat, "gpt-4o").is_empty());
     }
 }

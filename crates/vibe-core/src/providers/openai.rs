@@ -1,20 +1,19 @@
 //! OpenAI adapter (Chat Completions and Responses).
 //!
-//! When a `Wire::OpenaiResponses` request is routed to an `OpenaiChat` provider
-//! (which only supports `/v1/chat/completions`), this adapter automatically:
-//!   1. Converts the Responses API body → Chat Completions body
-//!   2. Calls `/v1/chat/completions` instead of `/v1/responses`
+//! OpenAI Chat providers receive Chat Completions traffic, and OpenAI Responses
+//! providers receive Responses traffic. Vibe Plus intentionally does not bridge
+//! Responses requests to Chat Completions providers.
 //!
 //! `OpenaiResponses`-kind providers receive the original body on `/v1/responses`,
 //! except for the ChatGPT Codex OAuth endpoint (chatgpt.com/backend-api/codex)
-//! which uses `/responses` without the `/v1/` prefix.
+//! which uses `/responses` without the `/v1/` prefix. Base URLs that already end
+//! in `/v1` are detected automatically to avoid `/v1/v1/...` URLs.
 
 use super::{Adapter, Wire};
-use crate::transforms;
 use crate::usage::{estimate_output_tokens, Usage};
 use anyhow::Result;
 use reqwest::{Client, RequestBuilder};
-use vibe_protocol::{Provider, ProviderKind};
+use vibe_protocol::Provider;
 
 pub struct OpenaiAdapter;
 
@@ -28,41 +27,8 @@ impl Adapter for OpenaiAdapter {
         body: &[u8],
         _upstream_path: Option<&str>,
     ) -> Result<RequestBuilder> {
-        // When an OpenaiChat provider is asked to serve a Responses-wire request,
-        // downconvert to Chat Completions (the only endpoint it exposes).
-        let (path, effective_body): (&str, std::borrow::Cow<[u8]>) =
-            if wire == Wire::OpenaiResponses && provider.kind == ProviderKind::OpenaiChat {
-                let converted = transforms::responses_to_chat(body);
-                // Translate reasoning_effort → provider-native thinking param when needed.
-                let model_str = serde_json::from_slice::<serde_json::Value>(body)
-                    .ok()
-                    .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
-                    .unwrap_or_default();
-                let converted = transforms::translate_reasoning_effort(&converted, &model_str)
-                    .unwrap_or(converted);
-                (
-                    "/v1/chat/completions",
-                    std::borrow::Cow::Owned(converted.to_vec()),
-                )
-            } else {
-                let p = match wire {
-                    Wire::OpenaiChat => "/v1/chat/completions",
-                    Wire::OpenaiResponses => {
-                        // ChatGPT Codex OAuth endpoint omits the /v1/ prefix:
-                        //   https://chatgpt.com/backend-api/codex/responses
-                        // All other OpenAI-compat upstreams use /v1/responses.
-                        if provider.base_url.contains("chatgpt.com/backend-api") {
-                            "/responses"
-                        } else {
-                            "/v1/responses"
-                        }
-                    }
-                    Wire::Anthropic | Wire::GeminiNative => {
-                        anyhow::bail!("openai adapter cannot serve {:?} wire", wire)
-                    }
-                };
-                (p, std::borrow::Cow::Borrowed(body))
-            };
+        let path = openai_path(provider, wire)?;
+        let effective_body = std::borrow::Cow::Borrowed(body);
 
         let url = format!("{}{}", provider.base_url.trim_end_matches('/'), path);
         let mut req = client.post(url).header("content-type", "application/json");
@@ -100,6 +66,37 @@ impl Adapter for OpenaiAdapter {
 
         for text in openai_stream_text_deltas(&v) {
             acc.output_tokens += estimate_output_tokens(text);
+        }
+    }
+}
+
+fn base_url_has_v1_suffix(base_url: &str) -> bool {
+    base_url
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+        .ends_with("/v1")
+}
+
+fn openai_path(provider: &Provider, wire: Wire) -> Result<&'static str> {
+    match wire {
+        Wire::OpenaiChat => Ok(if base_url_has_v1_suffix(&provider.base_url) {
+            "/chat/completions"
+        } else {
+            "/v1/chat/completions"
+        }),
+        Wire::OpenaiResponses => {
+            // ChatGPT Codex OAuth endpoint omits the /v1/ prefix:
+            //   https://chatgpt.com/backend-api/codex/responses
+            if provider.base_url.contains("chatgpt.com/backend-api") {
+                Ok("/responses")
+            } else if base_url_has_v1_suffix(&provider.base_url) {
+                Ok("/responses")
+            } else {
+                Ok("/v1/responses")
+            }
+        }
+        Wire::Anthropic | Wire::GeminiNative => {
+            anyhow::bail!("openai adapter cannot serve {:?} wire", wire)
         }
     }
 }
@@ -158,6 +155,7 @@ fn apply_openai_usage(usage: &serde_json::Value, acc: &mut Usage) {
 mod tests {
     use super::*;
     use crate::providers::Adapter;
+    use vibe_protocol::ProviderKind;
 
     #[test]
     fn parses_chat_completion_usage_body() {
@@ -195,5 +193,41 @@ mod tests {
         assert_eq!(usage.input_tokens, 9);
         assert_eq!(usage.output_tokens, 6);
         assert_eq!(usage.cache_read_tokens, 4);
+    }
+
+    #[test]
+    fn normalizes_openai_paths_with_v1_suffix() {
+        let provider = Provider {
+            id: "p".into(),
+            name: "p".into(),
+            group_name: None,
+            avatar_url: None,
+            upstreams: vec![],
+            upstream_summary: None,
+            kind: ProviderKind::OpenaiChat,
+            base_url: "https://api.example.com/v1".into(),
+            protocols: vec![],
+            host: None,
+            auth_ref: None,
+            enabled: true,
+            priority: 1,
+            supports_websocket: None,
+            passthrough_mode: true,
+            remote_models: vec![],
+            remote_models_fetched_at: None,
+            last_speedtest: None,
+            model_aliases: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        assert_eq!(
+            openai_path(&provider, Wire::OpenaiChat).unwrap(),
+            "/chat/completions"
+        );
+        assert_eq!(
+            openai_path(&provider, Wire::OpenaiResponses).unwrap(),
+            "/responses"
+        );
     }
 }
