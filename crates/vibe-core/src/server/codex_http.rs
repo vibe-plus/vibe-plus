@@ -316,6 +316,15 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    tracing::debug!(
+        log_row_id = ?log_row_id,
+        summary_turn_id = ?summary_turn_id,
+        summary_thread_id = ?summary_thread_id,
+        status = %parts.status,
+        content_type = %content_type_hdr,
+        client_kind = ?codex_client_kind,
+        "codex http-sse wrapper start"
+    );
 
     if !content_type_hdr.contains("event-stream") {
         return Response::from_parts(parts, body);
@@ -345,6 +354,8 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
         let mut trace = String::new();
         let mut mode = CodexHttpSseMode::Undecided;
         let mut status_injection: Option<CodexStatusInjection> = None;
+        let debug_summary_turn_id = summary_turn_id.clone();
+        let debug_summary_thread_id = summary_thread_id.clone();
         let mut summary_injection = codex_summary::SummaryAccumulator::new_for_turn(
             state.codex_summary_config(),
             codex_client_kind,
@@ -355,6 +366,13 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
                 .as_ref()
                 .map(|v| v.upstream_model.clone())
                 .unwrap_or_default(),
+        );
+        tracing::debug!(
+            log_row_id = ?log_row_id,
+            summary_turn_id = ?debug_summary_turn_id,
+            summary_thread_id = ?debug_summary_thread_id,
+            visual = visual.is_some(),
+            "codex http-sse stream task start"
         );
         let mut trace_stats = StreamTraceStats::new("sse", "chat_to_responses");
 
@@ -454,6 +472,23 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
                                 started.elapsed().as_millis() as i64,
                             )
                             .unwrap_or_else(|| event_block.to_owned());
+                        if block_to_forward != event_block {
+                            tracing::debug!(
+                                mode = "passthrough",
+                                original_len = event_block.len(),
+                                forwarded_len = block_to_forward.len(),
+                                contains_vibe = block_to_forward.contains("Vibe+"),
+                                contains_summary_delta = block_to_forward
+                                    .contains("\"type\":\"response.output_text.delta\"")
+                                    || block_to_forward
+                                        .contains("\"type\":\"response.output_text.delta\""),
+                                event_preview = %block_to_forward
+                                    .chars()
+                                    .take(240)
+                                    .collect::<String>(),
+                                "codex http-sse summary transformed block"
+                            );
+                        }
                         if !emit_raw_frame(tx, trace, trace_stats, started, &block_to_forward).await
                         {
                             return false;
@@ -485,6 +520,19 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
                             ),
                             started.elapsed().as_millis() as i64,
                         ) {
+                            if ws_frame.contains("Vibe+")
+                                || ws_frame.contains("\"type\":\"response.output_text.delta\"")
+                            {
+                                tracing::debug!(
+                                    mode = "c2r",
+                                    frame_len = ws_frame.len(),
+                                    frame_preview = %ws_frame
+                                        .chars()
+                                        .take(240)
+                                        .collect::<String>(),
+                                    "codex http-sse summary emitted frame"
+                                );
+                            }
                             if !emit_c2r_frame(tx, trace, trace_stats, started, &ws_frame).await {
                                 return false;
                             }
@@ -561,6 +609,8 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
                         log_row_id,
                         trace,
                         Some(trace_stats),
+                        debug_summary_turn_id,
+                        debug_summary_thread_id,
                     )
                     .await;
                     return;
@@ -619,7 +669,22 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
             trace_stats.finish("upstream_eof");
         }
         drop(tx);
-        persist_codex_client_response_body(&state, log_row_id, trace, Some(trace_stats)).await;
+        tracing::debug!(
+            log_row_id = ?log_row_id,
+            trace_len = trace.len(),
+            terminal_seen = trace_stats.terminal_seen(),
+            end_reason = ?trace_stats.end_reason(),
+            "codex http-sse stream task finished, persisting client trace"
+        );
+        persist_codex_client_response_body(
+            &state,
+            log_row_id,
+            trace,
+            Some(trace_stats),
+            debug_summary_turn_id,
+            debug_summary_thread_id,
+        )
+        .await;
     });
 
     let mut out = Response::new(Body::from_stream(ReceiverStream::new(rx)));
@@ -643,17 +708,19 @@ pub(super) async fn persist_codex_client_response_body(
     row_id: Option<String>,
     trace: String,
     stats: Option<StreamTraceStats>,
+    turn_id: Option<String>,
+    thread_id: Option<String>,
 ) {
     let Some(row_id) = row_id else {
         return;
     };
     let mut log = vibe_protocol::RequestLog {
-        id: row_id,
+        id: row_id.clone(),
         started_at: 0,
         app: None,
         provider_id: None,
-        thread_id: None,
-        turn_id: None,
+        thread_id,
+        turn_id,
         trace_id: None,
         session_id: None,
         requested_model: None,
@@ -719,25 +786,61 @@ pub(super) async fn persist_codex_client_response_body(
     if let Some(stats) = stats {
         stats.apply_to_log(&mut log);
     }
+    log.status_code = Some(200);
+    log.upstream_http_status = Some(200);
+    tracing::debug!(
+        row_id = %row_id,
+        turn_id = ?log.turn_id,
+        thread_id = ?log.thread_id,
+        trace_len = log.client_response_body.as_ref().map(|s| s.len()).unwrap_or(0),
+        stream_kind = ?log.stream_kind,
+        terminal_seen = ?log.stream_terminal_seen,
+        end_reason = ?log.stream_end_reason,
+        client_chunks = log.client_chunk_count,
+        client_bytes = log.client_bytes,
+        "persist codex client response trace begin"
+    );
+    let Some(observability) = state.observability.clone() else {
+        tracing::debug!(
+            row_id = %row_id,
+            "skip codex client response trace persistence: observability store unavailable"
+        );
+        return;
+    };
     for attempt in 0..20 {
-        let db = state.db.clone();
+        let store = observability.clone();
         let log = log.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            db.log_update_client_trace_and_stream_fields(&log)
-        })
-        .await
-        .unwrap_or_else(|e| Err(anyhow::anyhow!("join error: {e}")));
+        let result = tokio::task::spawn_blocking(move || store.update_request_client_trace(&log))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("join error: {e}")));
         match result {
-            Ok(()) => return,
+            Ok(()) => {
+                tracing::debug!(
+                    row_id = %row_id,
+                    attempt,
+                    "persist codex client response trace ok"
+                );
+                return;
+            }
             Err(e) if attempt < 19 && e.to_string().contains("no row for id") => {
+                tracing::debug!(
+                    row_id = %row_id,
+                    attempt,
+                    error = %e,
+                    "persist codex client response trace waiting for request log row"
+                );
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             Err(e) => {
-                tracing::warn!(?e, "persist codex client response trace failed");
+                tracing::warn!(row_id = %row_id, ?e, "persist codex client response trace failed");
                 return;
             }
         }
     }
+    tracing::warn!(
+        row_id = %row_id,
+        "persist codex client response trace gave up waiting for request log row"
+    );
 }
 
 pub(super) fn codex_sse_block_to_ws_frames(

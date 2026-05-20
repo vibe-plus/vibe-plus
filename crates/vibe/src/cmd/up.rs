@@ -43,9 +43,17 @@ fn auto_takeover(base_url: &str) {
     }
 }
 
-/// Unify Codex local history metadata under `vibeplus`. Non-fatal.
+/// Unify Codex local history when the Codex home fingerprint or gateway version changed.
 fn auto_unify_codex_history() {
-    let Some(summary) = vibe_core::codex_history::try_auto_unify() else {
+    let Ok(db_path) = vibe_core::paths::db_path() else {
+        return;
+    };
+    let Ok(db) = vibe_db::Db::open(&db_path) else {
+        return;
+    };
+    let Some(summary) =
+        vibe_core::gateway_maintenance::run_codex_unify_if_due(&db, vibe_core::VERSION)
+    else {
         return;
     };
     let changes = summary.sqlite_rows_changed + summary.rollout_fields_changed;

@@ -371,36 +371,6 @@ pub(crate) fn publish_request_started(
     );
 }
 
-pub(crate) fn persist_request_log_placeholder(
-    state: &AppState,
-    id: &str,
-    started_at: i64,
-    app: &Option<String>,
-    log_ctx: &LogCtx,
-    provider_id: Option<&str>,
-    requested_model: &str,
-) {
-    let started_instant = Instant::now();
-    let log = build_log(
-        log_ctx,
-        id,
-        started_at,
-        &started_instant,
-        app,
-        provider_id,
-        requested_model,
-        "",
-        None,
-        None,
-        None,
-        None,
-        Usage::default(),
-        None,
-        None,
-    );
-    persist_request_log_to_db(state, log);
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct AttemptCtx {
     pub attempt_id: String,
@@ -1308,12 +1278,60 @@ pub(crate) fn fire_credential_failure(
 /// breaker on top: the breaker is for transient upstream pain, and a key that
 /// fails auth is gone, not slow.
 pub(crate) fn fire_credential_disable(state: &AppState, credential_id: String, reason: String) {
+    let state = state.clone();
     let db = state.db.clone();
     let id_for_log = credential_id.clone();
     let reason_for_log = reason.clone();
     tokio::task::spawn_blocking(move || {
         match db.credential_disable_with_reason(&credential_id, &reason) {
             Ok(true) => {
+                let credential = db.credential_get(&credential_id).ok().flatten();
+                let provider = credential
+                    .as_ref()
+                    .and_then(|c| db.provider_get(&c.provider_id).ok().flatten());
+                let credential_label = credential
+                    .as_ref()
+                    .map(|c| c.label.as_str())
+                    .unwrap_or(id_for_log.as_str());
+                let mut payload = serde_json::json!({
+                    "schema": 1,
+                    "actor": { "type": "system", "source": "gateway" },
+                    "reason": reason_for_log.clone(),
+                    "credential": credential.as_ref().map(|c| serde_json::json!({
+                        "id": c.id,
+                        "label": c.label,
+                        "provider_id": c.provider_id,
+                    })).unwrap_or_else(|| serde_json::json!({
+                        "id": id_for_log.clone(),
+                        "label": id_for_log.clone(),
+                    })),
+                    "provider": provider.as_ref().map(|p| serde_json::json!({
+                        "id": p.id,
+                        "name": p.name,
+                    })).or_else(|| credential.as_ref().map(|c| serde_json::json!({
+                        "id": c.provider_id,
+                    }))),
+                });
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert(
+                        "changes".to_string(),
+                        serde_json::json!([{ "field": "enabled", "from": true, "to": false }]),
+                    );
+                }
+                let ev = AppLogEvent {
+                    ts: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                    level: AppLogLevel::Warn,
+                    event_type: "credential.auto_disabled".to_string(),
+                    payload,
+                    category: "credential".to_string(),
+                    message: format!("Credential auto-disabled by gateway: {credential_label}"),
+                    detail: Some(reason_for_log.clone()),
+                };
+                state.app_logs.push(ev.clone());
+                state.plugins.emit(GatewayEvent::AppLog(ev));
                 tracing::warn!(
                     credential_id = %id_for_log,
                     reason = %reason_for_log,
@@ -1591,15 +1609,6 @@ pub async fn forward(
         claude_client_kind,
     };
     publish_request_started(
-        &state,
-        &log_id,
-        started_at,
-        &app,
-        &request_start_ctx,
-        None,
-        &requested_model,
-    );
-    persist_request_log_placeholder(
         &state,
         &log_id,
         started_at,
@@ -2005,7 +2014,8 @@ pub(crate) fn stream_response(
     res.extensions_mut().insert(VibeCodexVisual(visual));
     res.extensions_mut()
         .insert(VibeCodexClientKind(codex_client_kind));
-    res.extensions_mut().insert(VibeRequestLogId(response_log_id));
+    res.extensions_mut()
+        .insert(VibeRequestLogId(response_log_id));
     res
 }
 
@@ -2122,7 +2132,11 @@ fn extract_thread_turn_trace_session(
         .or_else(|| s("/metadata/user_id"));
     let session = h_session
         .or_else(|| s("/session_id"))
+        .or_else(|| s("/sessionId"))
+        .or_else(|| s("/metadata/session_id"))
+        .or_else(|| s("/metadata/sessionId"))
         .or_else(|| s("/client_metadata/session_id"))
+        .or_else(|| s("/client_metadata/sessionId"))
         .or_else(|| s("/previous_response_id"));
     (thread, turn, trace, session)
 }

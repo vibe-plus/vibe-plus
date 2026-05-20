@@ -268,14 +268,6 @@ function providerDisplaySuccessRate(row: DashboardStats["per_provider"][number])
   return providerSuccessScoreOrRaw(row);
 }
 
-function poolSuccessRate(providerId: string): number | null {
-  const pool = poolByProviderId.value.get(providerId);
-  if (!pool?.credentials?.length) return null;
-  const totalReq = pool.credentials.reduce((s, c) => s + c.rolling_requests, 0);
-  const totalOk = pool.credentials.reduce((s, c) => s + c.rolling_successes, 0);
-  return totalReq > 0 ? totalOk / totalReq : null;
-}
-
 function providerOverviewStat(provider: Provider): DashboardStats["per_provider"][number] | null {
   const summary = providerHealthSummaryById.value.get(provider.id);
   const rolling = summary?.rolling;

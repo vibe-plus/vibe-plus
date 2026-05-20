@@ -1,4 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    io::BufRead,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use axum::{
@@ -11,10 +16,13 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use serde_json::Value;
 use vibe_db::Db;
 use vibe_plugin_api::{EventSink, GatewayEvent, Plugin};
 use vibe_protocol::{
-    AppLogEvent, CodexThreadMeta, LogPage, RequestLog, UpstreamAttemptLog, UsageRollupPage,
+    AppLogEvent, CodexThreadMeta, LogPage, ObservabilityConversation,
+    ObservabilityConversationSource, ObservabilityConversationStatus, RequestLog,
+    UpstreamAttemptLog, UsageRollupPage,
 };
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +103,10 @@ impl ObservabilityStore {
         self.db.log_insert(log)
     }
 
+    pub fn update_request_client_trace(&self, log: &RequestLog) -> Result<()> {
+        self.db.log_update_client_trace_and_stream_fields(log)
+    }
+
     pub fn insert_upstream_attempt(&self, attempt: &UpstreamAttemptLog) -> Result<()> {
         self.db.upstream_attempt_insert(attempt)
     }
@@ -153,6 +165,12 @@ impl ObservabilityStore {
 
     pub fn codex_threads(&self, ids: &[String]) -> Result<Vec<CodexThreadMeta>> {
         codex_threads_for_ids(ids)
+    }
+
+    pub fn conversation_list(&self) -> Result<Vec<ObservabilityConversation>> {
+        let requests = self.db.log_list(i64::MAX / 4, 0)?.items;
+        let attempts = self.db.upstream_attempt_list(i64::MAX / 4, 0)?;
+        conversations_from_local_history_and_logs(&requests, &attempts)
     }
 
     pub fn app_log_list(&self, limit: i64, since: Option<i64>) -> Result<Vec<AppLogEvent>> {
@@ -308,6 +326,13 @@ pub async fn list_network_attempt_records(
     Ok(Json(rows))
 }
 
+pub async fn list_conversation_records(
+    State(store): State<ObservabilityStore>,
+) -> Result<Json<Vec<ObservabilityConversation>>, ObservabilityHttpError> {
+    let rows = run_blocking(store, move |s| s.conversation_list()).await?;
+    Ok(Json(rows))
+}
+
 pub async fn list_codex_thread_records(
     State(store): State<ObservabilityStore>,
     Query(q): Query<CodexThreadsQuery>,
@@ -368,6 +393,7 @@ pub fn router() -> Router<ObservabilityStore> {
         .route("/requests/:id", get(get_request_record))
         .route("/requests/:id/network", get(list_request_network_records))
         .route("/network-attempts", get(list_network_attempt_records))
+        .route("/conversations", get(list_conversation_records))
         .route("/codex-threads", get(list_codex_thread_records))
         .route("/app-logs", get(list_app_log_records))
         .route("/usage-rollups", get(list_usage_rollups))
@@ -412,6 +438,369 @@ where
         .await
         .map_err(|e| ObservabilityHttpError::internal(e.to_string()))?
         .map_err(|e| ObservabilityHttpError::internal(e.to_string()))
+}
+
+#[derive(Debug, Clone)]
+struct LocalConversationSeed {
+    source: ObservabilityConversationSource,
+    conversation_id: String,
+    title: String,
+    project_path: Option<String>,
+    project_name: Option<String>,
+    updated_at: i64,
+    preview: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConversationLogStats {
+    request_count: i64,
+    attempt_count: i64,
+    latest_request_id: Option<String>,
+    latest_started_at: i64,
+    latest_status_code: Option<i32>,
+    active: bool,
+}
+
+fn conversations_from_local_history_and_logs(
+    requests: &[RequestLog],
+    attempts: &[UpstreamAttemptLog],
+) -> Result<Vec<ObservabilityConversation>> {
+    let mut by_key: HashMap<(String, String), LocalConversationSeed> = HashMap::new();
+    for seed in read_codex_conversation_seeds()? {
+        by_key.insert(
+            (source_key(&seed.source), seed.conversation_id.clone()),
+            seed,
+        );
+    }
+    for seed in read_claude_conversation_seeds()? {
+        by_key.insert(
+            (source_key(&seed.source), seed.conversation_id.clone()),
+            seed,
+        );
+    }
+
+    let mut stats: HashMap<(String, String), ConversationLogStats> = HashMap::new();
+    for request in requests {
+        if let Some(thread_id) = request.thread_id.as_deref().filter(|v| !v.is_empty()) {
+            let key = ("codex".to_string(), thread_id.to_string());
+            let entry = stats.entry(key.clone()).or_default();
+            entry.request_count += 1;
+            if request.started_at >= entry.latest_started_at {
+                entry.latest_started_at = request.started_at;
+                entry.latest_request_id = Some(request.id.clone());
+                entry.latest_status_code = request.status_code;
+            }
+            by_key.entry(key).or_insert_with(|| {
+                seed_from_request(ObservabilityConversationSource::Codex, thread_id, request)
+            });
+        }
+        if let Some(session_id) = request.session_id.as_deref().filter(|v| !v.is_empty()) {
+            let source = if looks_like_codex_id(session_id) {
+                ObservabilityConversationSource::Codex
+            } else {
+                ObservabilityConversationSource::Claude
+            };
+            let key = (source_key(&source), session_id.to_string());
+            let entry = stats.entry(key.clone()).or_default();
+            entry.request_count += 1;
+            if request.started_at >= entry.latest_started_at {
+                entry.latest_started_at = request.started_at;
+                entry.latest_request_id = Some(request.id.clone());
+                entry.latest_status_code = request.status_code;
+            }
+            by_key
+                .entry(key)
+                .or_insert_with(|| seed_from_request(source, session_id, request));
+        }
+    }
+    for attempt in attempts {
+        if let Some(thread_id) = attempt.thread_id.as_deref().filter(|v| !v.is_empty()) {
+            stats
+                .entry(("codex".to_string(), thread_id.to_string()))
+                .or_default()
+                .attempt_count += 1;
+        }
+        if let Some(session_id) = attempt.session_id.as_deref().filter(|v| !v.is_empty()) {
+            let source_key = if looks_like_codex_id(session_id) {
+                "codex"
+            } else {
+                "claude"
+            };
+            stats
+                .entry((source_key.to_string(), session_id.to_string()))
+                .or_default()
+                .attempt_count += 1;
+        }
+    }
+
+    let mut out = Vec::new();
+    for ((source_slug, id), seed) in by_key {
+        let stat = stats.remove(&(source_slug, id)).unwrap_or_default();
+        let status = if stat.active {
+            ObservabilityConversationStatus::Running
+        } else if stat.request_count == 0 {
+            ObservabilityConversationStatus::NoData
+        } else if stat
+            .latest_status_code
+            .map(|s| (200..300).contains(&s))
+            .unwrap_or(false)
+        {
+            ObservabilityConversationStatus::Ok
+        } else {
+            ObservabilityConversationStatus::Failed
+        };
+        out.push(ObservabilityConversation {
+            source: seed.source,
+            conversation_id: seed.conversation_id,
+            title: seed.title,
+            project_path: seed.project_path,
+            project_name: seed.project_name,
+            updated_at: seed.updated_at.max(stat.latest_started_at),
+            status,
+            request_count: stat.request_count,
+            attempt_count: stat.attempt_count,
+            latest_request_id: stat.latest_request_id,
+            preview: seed.preview,
+        });
+    }
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(out)
+}
+
+fn seed_from_request(
+    source: ObservabilityConversationSource,
+    id: &str,
+    request: &RequestLog,
+) -> LocalConversationSeed {
+    LocalConversationSeed {
+        source,
+        conversation_id: id.to_string(),
+        title: request
+            .requested_model
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .unwrap_or(id)
+            .to_string(),
+        project_path: None,
+        project_name: None,
+        updated_at: request.started_at,
+        preview: request.app.clone().unwrap_or_default(),
+    }
+}
+
+fn source_key(source: &ObservabilityConversationSource) -> String {
+    match source {
+        ObservabilityConversationSource::Codex => "codex".to_string(),
+        ObservabilityConversationSource::Claude => "claude".to_string(),
+    }
+}
+
+fn looks_like_codex_id(id: &str) -> bool {
+    id.starts_with("019")
+}
+
+fn read_codex_conversation_seeds() -> Result<Vec<LocalConversationSeed>> {
+    let path = codex_state_db_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, title, cwd, source, model, updated_at, updated_at_ms, preview, first_user_message
+         FROM threads WHERE archived = 0 ORDER BY updated_at DESC LIMIT 1000",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let id: String = r.get(0)?;
+        let title: String = r.get(1)?;
+        let cwd: String = r.get(2)?;
+        let updated_at_ms: Option<i64> = r.get(6)?;
+        let updated_at: i64 = updated_at_ms.map(|v| v / 1000).unwrap_or(r.get(5)?);
+        let preview: String = r.get::<_, String>(7).or_else(|_| r.get(8))?;
+        let title = compact_title(&title, &preview);
+        Ok(LocalConversationSeed {
+            source: ObservabilityConversationSource::Codex,
+            conversation_id: id,
+            title,
+            project_path: (!cwd.trim().is_empty()).then_some(cwd.clone()),
+            project_name: (!cwd.trim().is_empty()).then(|| project_name_for_cwd(&cwd)),
+            updated_at,
+            preview,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn read_claude_conversation_seeds() -> Result<Vec<LocalConversationSeed>> {
+    let mut map: HashMap<String, LocalConversationSeed> = HashMap::new();
+    read_claude_history_file(&mut map)?;
+    read_claude_project_jsonl_files(&mut map)?;
+    Ok(map.into_values().collect())
+}
+
+fn read_claude_history_file(map: &mut HashMap<String, LocalConversationSeed>) -> Result<()> {
+    let path = claude_home_dir().join("history.jsonl");
+    if !path.exists() {
+        return Ok(());
+    }
+    let file = fs::File::open(path)?;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(session_id) = v.get("sessionId").and_then(Value::as_str) else {
+            continue;
+        };
+        let display = v.get("display").and_then(Value::as_str).unwrap_or("");
+        let project = v.get("project").and_then(Value::as_str).map(str::to_string);
+        let updated_at = v
+            .get("timestamp")
+            .and_then(Value::as_i64)
+            .map(|v| v / 1000)
+            .unwrap_or(0);
+        upsert_claude_seed(map, session_id, display, project.as_deref(), updated_at);
+    }
+    Ok(())
+}
+
+fn read_claude_project_jsonl_files(map: &mut HashMap<String, LocalConversationSeed>) -> Result<()> {
+    let root = claude_home_dir().join("projects");
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            read_claude_project_jsonl_file(map, &path)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_claude_project_jsonl_file(
+    map: &mut HashMap<String, LocalConversationSeed>,
+    path: &Path,
+) -> Result<()> {
+    let file = fs::File::open(path)?;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(session_id) = v.get("sessionId").and_then(Value::as_str) else {
+            continue;
+        };
+        let cwd = v.get("cwd").and_then(Value::as_str);
+        let content = claude_user_content(&v).unwrap_or_default();
+        let updated_at = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_seconds)
+            .unwrap_or_else(|| {
+                fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0)
+            });
+        if !content.is_empty() || cwd.is_some() {
+            upsert_claude_seed(map, session_id, &content, cwd, updated_at);
+        }
+    }
+    Ok(())
+}
+
+fn claude_user_content(v: &Value) -> Option<String> {
+    if v.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    let content = v.pointer("/message/content")?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(items) = content.as_array() {
+        let parts = items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        if !parts.is_empty() {
+            return Some(parts.join(" "));
+        }
+    }
+    None
+}
+
+fn upsert_claude_seed(
+    map: &mut HashMap<String, LocalConversationSeed>,
+    session_id: &str,
+    text: &str,
+    project_path: Option<&str>,
+    updated_at: i64,
+) {
+    let entry = map
+        .entry(session_id.to_string())
+        .or_insert_with(|| LocalConversationSeed {
+            source: ObservabilityConversationSource::Claude,
+            conversation_id: session_id.to_string(),
+            title: compact_title(text, text),
+            project_path: project_path.map(str::to_string),
+            project_name: project_path.map(project_name_for_cwd),
+            updated_at,
+            preview: text.to_string(),
+        });
+    if updated_at >= entry.updated_at {
+        entry.updated_at = updated_at;
+        if !text.trim().is_empty() {
+            entry.preview = text.to_string();
+            if entry.title == "Untitled thread" || entry.title == entry.conversation_id {
+                entry.title = compact_title(text, text);
+            }
+        }
+    }
+    if entry.project_path.is_none() {
+        entry.project_path = project_path.map(str::to_string);
+        entry.project_name = project_path.map(project_name_for_cwd);
+    }
+    if entry.title.trim().is_empty() || entry.title == "Untitled thread" {
+        entry.title = compact_title(text, session_id);
+    }
+}
+
+fn claude_home_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("CLAUDE_HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+}
+
+fn parse_rfc3339_seconds(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
 }
 
 fn codex_threads_for_ids(ids: &[String]) -> Result<Vec<CodexThreadMeta>> {

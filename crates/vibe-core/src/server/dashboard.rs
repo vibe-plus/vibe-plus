@@ -280,6 +280,116 @@ fn credential_app_event_payload(c: &Credential, provider: Option<&Provider>) -> 
     })
 }
 
+fn credential_update_changes(before: &Credential, after: &Credential) -> Vec<serde_json::Value> {
+    let mut changes = Vec::new();
+
+    if before.label != after.label {
+        changes.push(serde_json::json!({
+            "field": "label",
+            "from": before.label,
+            "to": after.label,
+        }));
+    }
+    if before.enabled != after.enabled {
+        changes.push(serde_json::json!({
+            "field": "enabled",
+            "from": before.enabled,
+            "to": after.enabled,
+        }));
+    }
+    if before.priority != after.priority {
+        changes.push(serde_json::json!({
+            "field": "priority",
+            "from": before.priority,
+            "to": after.priority,
+        }));
+    }
+    if before.plan_type != after.plan_type {
+        changes.push(serde_json::json!({
+            "field": "plan_type",
+            "from": before.plan_type,
+            "to": after.plan_type,
+        }));
+    }
+    if before.notes != after.notes {
+        changes.push(serde_json::json!({ "field": "notes" }));
+    }
+    if before.auth_ref != after.auth_ref || before.auth_fingerprint != after.auth_fingerprint {
+        changes.push(serde_json::json!({ "field": "auth" }));
+    }
+    if before.oauth_expires_at != after.oauth_expires_at
+        || before.oauth_has_refresh != after.oauth_has_refresh
+        || before.oauth_account_email != after.oauth_account_email
+        || before.oauth_account_subject != after.oauth_account_subject
+        || before.oauth_chatgpt_plan_slug != after.oauth_chatgpt_plan_slug
+    {
+        changes.push(serde_json::json!({ "field": "oauth" }));
+    }
+    if before.upstream_vendor != after.upstream_vendor {
+        changes.push(serde_json::json!({
+            "field": "upstream_vendor",
+            "from": before.upstream_vendor.as_ref().map(|v| serde_json::to_value(v).unwrap_or_default()),
+            "to": after.upstream_vendor.as_ref().map(|v| serde_json::to_value(v).unwrap_or_default()),
+        }));
+    }
+    if before.upstream_username != after.upstream_username {
+        changes.push(serde_json::json!({
+            "field": "upstream_username",
+            "from": before.upstream_username,
+            "to": after.upstream_username,
+        }));
+    }
+    if before.upstream_has_session != after.upstream_has_session
+        || before.upstream_session_expires_at != after.upstream_session_expires_at
+    {
+        changes.push(serde_json::json!({ "field": "upstream_session" }));
+    }
+    if before.upstream_group != after.upstream_group {
+        changes.push(serde_json::json!({
+            "field": "upstream_group",
+            "from": before.upstream_group,
+            "to": after.upstream_group,
+        }));
+    }
+    if (before.price_multiplier - after.price_multiplier).abs() > f64::EPSILON {
+        changes.push(serde_json::json!({
+            "field": "price_multiplier",
+            "from": before.price_multiplier,
+            "to": after.price_multiplier,
+        }));
+    }
+
+    changes
+}
+
+fn credential_update_detail(changes: &[serde_json::Value]) -> Option<String> {
+    if changes.is_empty() {
+        return Some("No visible fields changed".to_string());
+    }
+
+    let labels: Vec<&str> = changes
+        .iter()
+        .filter_map(|change| change.get("field").and_then(|v| v.as_str()))
+        .map(|field| match field {
+            "label" => "name",
+            "enabled" => "enabled state",
+            "priority" => "priority",
+            "plan_type" => "plan",
+            "notes" => "notes",
+            "auth" => "secret/auth",
+            "oauth" => "OAuth token",
+            "upstream_vendor" => "upstream vendor",
+            "upstream_username" => "upstream username",
+            "upstream_session" => "upstream session",
+            "upstream_group" => "upstream group",
+            "price_multiplier" => "price multiplier",
+            _ => "settings",
+        })
+        .collect();
+
+    Some(format!("Changed: {}", labels.join(", ")))
+}
+
 pub(super) fn emit_app_log(state: &AppState, level: AppLogLevel, category: &str, message: String) {
     emit_app_event(
         state,
@@ -691,21 +801,63 @@ pub(super) async fn update_credential(
         input.auth_ref.as_deref(),
         input.oauth_access_token.as_deref(),
     );
-    let (mut c, provider) = run_blocking(state.clone(), move |s| {
+    let (before, mut c, provider) = run_blocking(state.clone(), move |s| {
+        let before =
+            s.db.credential_get(&id)?
+                .ok_or_else(|| anyhow::anyhow!("credential {id} not found"))?;
         let c = s.db.credential_update(&id, input, Some(fp))?;
         let provider = s.db.provider_get(&c.provider_id)?;
-        Ok::<_, anyhow::Error>((c, provider))
+        Ok::<_, anyhow::Error>((before, c, provider))
     })
     .await?;
     crate::oauth_identity::credential_attach_oauth_identity(&mut c);
+    let changes = credential_update_changes(&before, &c);
+    let mut payload = credential_app_event_payload(&c, provider.as_ref());
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "actor".to_string(),
+            serde_json::json!({ "type": "operator", "source": "dashboard" }),
+        );
+        obj.insert(
+            "changes".to_string(),
+            serde_json::Value::Array(changes.clone()),
+        );
+    }
+    let (event_type, level, message) = if before.enabled != c.enabled {
+        if c.enabled {
+            (
+                "credential.enabled",
+                AppLogLevel::Info,
+                format!("Credential enabled by operator: {}", c.label),
+            )
+        } else {
+            (
+                "credential.disabled",
+                AppLogLevel::Warn,
+                format!("Credential disabled by operator: {}", c.label),
+            )
+        }
+    } else if before.label != c.label {
+        (
+            "credential.updated",
+            AppLogLevel::Info,
+            format!("Credential renamed: {} -> {}", before.label, c.label),
+        )
+    } else {
+        (
+            "credential.updated",
+            AppLogLevel::Info,
+            format!("Credential settings updated: {label}"),
+        )
+    };
     emit_app_event(
         &state,
-        AppLogLevel::Info,
+        level,
         "credential",
-        "credential.updated",
-        credential_app_event_payload(&c, provider.as_ref()),
-        format!("Credential updated: {label}"),
-        None,
+        event_type,
+        payload,
+        message,
+        credential_update_detail(&changes),
     );
     Ok(Json(c))
 }
@@ -931,8 +1083,17 @@ pub(super) async fn enable_credential(
         AppLogLevel::Info,
         "credential",
         "credential.enabled",
-        credential_app_event_payload(&c, provider.as_ref()),
-        format!("Credential enabled: {}", c.label),
+        {
+            let mut payload = credential_app_event_payload(&c, provider.as_ref());
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "actor".to_string(),
+                    serde_json::json!({ "type": "operator", "source": "dashboard" }),
+                );
+            }
+            payload
+        },
+        format!("Credential enabled by operator: {}", c.label),
         None,
     );
     Ok(Json(c))
@@ -955,8 +1116,17 @@ pub(super) async fn disable_credential(
         AppLogLevel::Warn,
         "credential",
         "credential.disabled",
-        credential_app_event_payload(&c, provider.as_ref()),
-        format!("Credential disabled: {}", c.label),
+        {
+            let mut payload = credential_app_event_payload(&c, provider.as_ref());
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "actor".to_string(),
+                    serde_json::json!({ "type": "operator", "source": "dashboard" }),
+                );
+            }
+            payload
+        },
+        format!("Credential disabled by operator: {}", c.label),
         None,
     );
     Ok(Json(c))

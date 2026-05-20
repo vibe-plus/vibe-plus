@@ -738,7 +738,7 @@ impl Db {
 
     // --- request logs -------------------------------------------------------
 
-    pub fn log_insert(&self, log: &RequestLog) -> Result<()> {
+    fn log_insert_row(&self, log: &RequestLog) -> Result<()> {
         let (request_body_inline, request_body_ref) =
             self.body_value_for_insert("request", &log.id, &log.request_body)?;
         let (response_body_inline, response_body_ref) =
@@ -814,38 +814,38 @@ impl Db {
                     request_headers = excluded.request_headers,
                     request_body = excluded.request_body,
                     response_body = excluded.response_body,
-                    client_response_body = excluded.client_response_body,
+                    client_response_body = COALESCE(excluded.client_response_body, request_logs.client_response_body),
                     request_body_ref = excluded.request_body_ref,
                     response_body_ref = excluded.response_body_ref,
-                    client_response_body_ref = excluded.client_response_body_ref,
-                    stream_kind = excluded.stream_kind,
-                    stream_terminal_seen = excluded.stream_terminal_seen,
-                    stream_end_reason = excluded.stream_end_reason,
-                    stream_error_detail = excluded.stream_error_detail,
-                    upstream_first_byte_ms = excluded.upstream_first_byte_ms,
-                    client_first_write_ms = excluded.client_first_write_ms,
-                    last_upstream_event_ms = excluded.last_upstream_event_ms,
-                    last_client_write_ms = excluded.last_client_write_ms,
-                    upstream_chunk_count = excluded.upstream_chunk_count,
-                    upstream_bytes = excluded.upstream_bytes,
-                    client_chunk_count = excluded.client_chunk_count,
-                    client_bytes = excluded.client_bytes,
-                    sse_event_count = excluded.sse_event_count,
-                    sse_data_count = excluded.sse_data_count,
-                    sse_comment_count = excluded.sse_comment_count,
-                    sse_keepalive_count = excluded.sse_keepalive_count,
-                    sse_done_count = excluded.sse_done_count,
-                    parse_error_count = excluded.parse_error_count,
-                    first_keepalive_ms = excluded.first_keepalive_ms,
-                    last_keepalive_ms = excluded.last_keepalive_ms,
-                    max_gap_between_upstream_events_ms = excluded.max_gap_between_upstream_events_ms,
-                    max_gap_between_data_events_ms = excluded.max_gap_between_data_events_ms,
-                    keepalive_after_last_data_count = excluded.keepalive_after_last_data_count,
-                    last_data_event_ms = excluded.last_data_event_ms,
-                    bridge_mode = excluded.bridge_mode,
-                    status_injected = excluded.status_injected,
-                    terminal_injected = excluded.terminal_injected,
-                    upstream_terminal_type = excluded.upstream_terminal_type",
+                    client_response_body_ref = COALESCE(excluded.client_response_body_ref, request_logs.client_response_body_ref),
+                    stream_kind = COALESCE(excluded.stream_kind, request_logs.stream_kind),
+                    stream_terminal_seen = COALESCE(excluded.stream_terminal_seen, request_logs.stream_terminal_seen),
+                    stream_end_reason = COALESCE(excluded.stream_end_reason, request_logs.stream_end_reason),
+                    stream_error_detail = COALESCE(excluded.stream_error_detail, request_logs.stream_error_detail),
+                    upstream_first_byte_ms = COALESCE(excluded.upstream_first_byte_ms, request_logs.upstream_first_byte_ms),
+                    client_first_write_ms = COALESCE(excluded.client_first_write_ms, request_logs.client_first_write_ms),
+                    last_upstream_event_ms = COALESCE(excluded.last_upstream_event_ms, request_logs.last_upstream_event_ms),
+                    last_client_write_ms = COALESCE(excluded.last_client_write_ms, request_logs.last_client_write_ms),
+                    upstream_chunk_count = CASE WHEN excluded.upstream_chunk_count > 0 THEN excluded.upstream_chunk_count ELSE request_logs.upstream_chunk_count END,
+                    upstream_bytes = CASE WHEN excluded.upstream_bytes > 0 THEN excluded.upstream_bytes ELSE request_logs.upstream_bytes END,
+                    client_chunk_count = CASE WHEN excluded.client_chunk_count > 0 THEN excluded.client_chunk_count ELSE request_logs.client_chunk_count END,
+                    client_bytes = CASE WHEN excluded.client_bytes > 0 THEN excluded.client_bytes ELSE request_logs.client_bytes END,
+                    sse_event_count = CASE WHEN excluded.sse_event_count > 0 THEN excluded.sse_event_count ELSE request_logs.sse_event_count END,
+                    sse_data_count = CASE WHEN excluded.sse_data_count > 0 THEN excluded.sse_data_count ELSE request_logs.sse_data_count END,
+                    sse_comment_count = CASE WHEN excluded.sse_comment_count > 0 THEN excluded.sse_comment_count ELSE request_logs.sse_comment_count END,
+                    sse_keepalive_count = CASE WHEN excluded.sse_keepalive_count > 0 THEN excluded.sse_keepalive_count ELSE request_logs.sse_keepalive_count END,
+                    sse_done_count = CASE WHEN excluded.sse_done_count > 0 THEN excluded.sse_done_count ELSE request_logs.sse_done_count END,
+                    parse_error_count = CASE WHEN excluded.parse_error_count > 0 THEN excluded.parse_error_count ELSE request_logs.parse_error_count END,
+                    first_keepalive_ms = COALESCE(excluded.first_keepalive_ms, request_logs.first_keepalive_ms),
+                    last_keepalive_ms = COALESCE(excluded.last_keepalive_ms, request_logs.last_keepalive_ms),
+                    max_gap_between_upstream_events_ms = COALESCE(excluded.max_gap_between_upstream_events_ms, request_logs.max_gap_between_upstream_events_ms),
+                    max_gap_between_data_events_ms = COALESCE(excluded.max_gap_between_data_events_ms, request_logs.max_gap_between_data_events_ms),
+                    keepalive_after_last_data_count = CASE WHEN excluded.keepalive_after_last_data_count > 0 THEN excluded.keepalive_after_last_data_count ELSE request_logs.keepalive_after_last_data_count END,
+                    last_data_event_ms = COALESCE(excluded.last_data_event_ms, request_logs.last_data_event_ms),
+                    bridge_mode = COALESCE(excluded.bridge_mode, request_logs.bridge_mode),
+                    status_injected = CASE WHEN excluded.status_injected != 0 THEN excluded.status_injected ELSE request_logs.status_injected END,
+                    terminal_injected = CASE WHEN excluded.terminal_injected != 0 THEN excluded.terminal_injected ELSE request_logs.terminal_injected END,
+                    upstream_terminal_type = COALESCE(excluded.upstream_terminal_type, request_logs.upstream_terminal_type)",
                 params![
                     log.id,
                     log.started_at,
@@ -921,7 +921,15 @@ impl Db {
                 ],
             )?;
             Ok(())
-        })?;
+        })
+    }
+
+    pub fn log_insert_placeholder(&self, log: &RequestLog) -> Result<()> {
+        self.log_insert_row(log)
+    }
+
+    pub fn log_insert(&self, log: &RequestLog) -> Result<()> {
+        self.log_insert_row(log)?;
         let day = day_utc(log.started_at);
         let success = log
             .status_code
@@ -988,6 +996,10 @@ impl Db {
                 "UPDATE request_logs SET
                     client_response_body = ?1,
                     client_response_body_ref = ?2,
+                    status_code = COALESCE(status_code, ?32),
+                    upstream_http_status = COALESCE(upstream_http_status, ?33),
+                    thread_id = COALESCE(thread_id, ?34),
+                    turn_id = COALESCE(turn_id, ?35),
                     stream_kind = ?3,
                     stream_terminal_seen = ?4,
                     stream_end_reason = ?5,
@@ -1049,6 +1061,10 @@ impl Db {
                     i32::from(log.terminal_injected),
                     log.upstream_terminal_type,
                     log.id,
+                    log.status_code,
+                    log.upstream_http_status,
+                    log.thread_id,
+                    log.turn_id,
                 ],
             )?;
             if n == 0 {
@@ -1095,7 +1111,8 @@ impl Db {
                             COALESCE(sum(output_tokens), 0),
                             COALESCE(sum(cache_read_tokens), 0),
                             COALESCE(sum(cache_creation_tokens), 0)
-                     FROM request_logs WHERE started_at >= ?1",
+                     FROM request_logs
+                     WHERE started_at >= ?1 AND (status_code IS NOT NULL OR error IS NOT NULL)",
                     params![since],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )?;
@@ -1114,7 +1131,8 @@ impl Db {
     pub fn count_logs_since(&self, since: i64) -> Result<i64> {
         self.with_short(|c| {
             let n: i64 = c.query_row(
-                "SELECT count(*) FROM request_logs WHERE started_at >= ?1",
+                "SELECT count(*) FROM request_logs
+                 WHERE started_at >= ?1 AND (status_code IS NOT NULL OR error IS NOT NULL)",
                 params![since],
                 |r| r.get(0),
             )?;
@@ -1126,12 +1144,14 @@ impl Db {
     pub fn ok_total_since(&self, since: i64) -> Result<(i64, i64)> {
         self.with(|c| {
             let total: i64 = c.query_row(
-                "SELECT count(*) FROM request_logs WHERE started_at >= ?1",
+                "SELECT count(*) FROM request_logs
+                 WHERE started_at >= ?1 AND (status_code IS NOT NULL OR error IS NOT NULL)",
                 params![since],
                 |r| r.get(0),
             )?;
             let ok: i64 = c.query_row(
                 "SELECT count(*) FROM request_logs WHERE started_at >= ?1
+                   AND (status_code IS NOT NULL OR error IS NOT NULL)
                    AND status_code >= 200 AND status_code < 300",
                 params![since],
                 |r| r.get(0),
@@ -1155,7 +1175,7 @@ impl Db {
                         COALESCE(sum(estimated_cost_usd_micros), 0) as estimated_cost_usd_micros,
                         COALESCE(avg(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), 0) as avg_latency_ms
                  FROM request_logs
-                 WHERE started_at >= ?1",
+                 WHERE started_at >= ?1 AND (status_code IS NOT NULL OR error IS NOT NULL)",
             )?;
             Ok(stmt.query_row(params![since], |r| {
                 let ok_output_tokens: i64 = r.get(4)?;
@@ -1293,6 +1313,27 @@ impl Db {
             &attempt.response_body,
         )?;
         self.with_short(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO request_logs (
+                    id, started_at, thread_id, turn_id, trace_id, session_id,
+                    requested_model, upstream_model, wire, route_prefix,
+                    provider_id, credential_id, estimated_cost_usd, estimated_cost_usd_micros
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '0', 0)",
+                params![
+                    attempt.request_id,
+                    attempt.started_at,
+                    attempt.thread_id,
+                    attempt.turn_id,
+                    attempt.trace_id,
+                    attempt.session_id,
+                    attempt.requested_model,
+                    attempt.upstream_model,
+                    attempt.wire,
+                    attempt.route_prefix,
+                    attempt.provider_id,
+                    attempt.credential_id,
+                ],
+            )?;
             c.execute(
                 "INSERT OR REPLACE INTO upstream_attempt_logs (
                     attempt_id, request_id, attempt_index, wave_index, wave_size, upstream_id, started_at, ended_at,
@@ -3727,6 +3768,82 @@ mod tests {
         }
     }
 
+    fn sample_attempt(attempt_id: &str, request_id: &str, started_at: i64) -> UpstreamAttemptLog {
+        UpstreamAttemptLog {
+            attempt_id: attempt_id.into(),
+            request_id: request_id.into(),
+            attempt_index: 1,
+            wave_index: 0,
+            wave_size: 1,
+            upstream_id: Some("provider:cred".into()),
+            started_at,
+            ended_at: Some(started_at + 1),
+            provider_id: Some("provider-1".into()),
+            credential_id: None,
+            thread_id: Some("thread-1".into()),
+            turn_id: Some("turn-1".into()),
+            trace_id: Some("trace-1".into()),
+            session_id: Some("session-1".into()),
+            wire: Some("openai-responses".into()),
+            route_prefix: Some("codex-v1".into()),
+            requested_model: Some("gpt-5.4".into()),
+            upstream_model: Some("gpt-5.4".into()),
+            phase: UpstreamAttemptPhase::Completed,
+            outcome: UpstreamAttemptOutcome::Success,
+            status_code: Some(200),
+            upstream_http_status: Some(200),
+            error_summary: None,
+            latency_ms: Some(25),
+            first_token_ms: Some(10),
+            input_tokens: 2,
+            output_tokens: 3,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            audio_input_tokens: 0,
+            audio_output_tokens: 0,
+            accepted_prediction_tokens: 0,
+            rejected_prediction_tokens: 0,
+            cost_items: None,
+            estimated_cost_usd: "0.0001".into(),
+            upstream_first_byte_ms: Some(8),
+            client_first_write_ms: Some(12),
+            last_upstream_event_ms: Some(20),
+            last_client_write_ms: Some(24),
+            upstream_chunk_count: 1,
+            upstream_bytes: 100,
+            client_chunk_count: 1,
+            client_bytes: 120,
+            sse_event_count: 1,
+            sse_data_count: 1,
+            sse_comment_count: 0,
+            sse_keepalive_count: 0,
+            sse_done_count: 1,
+            parse_error_count: 0,
+            first_keepalive_ms: None,
+            last_keepalive_ms: None,
+            max_gap_between_upstream_events_ms: None,
+            max_gap_between_data_events_ms: None,
+            keepalive_after_last_data_count: 0,
+            last_data_event_ms: Some(20),
+            bridge_mode: Some("none".into()),
+            status_injected: false,
+            terminal_injected: false,
+            upstream_terminal_type: Some("done".into()),
+            active_upstream_decode_tps_peak: Some(1.0),
+            active_downstream_emit_tps_peak: Some(1.0),
+            request_headers: None,
+            request_body: None,
+            response_headers: None,
+            response_body: None,
+            network_scheme: None,
+            network_host: None,
+            network_path: None,
+        }
+    }
+
     #[test]
     fn provider_crud() {
         let db = Db::memory().unwrap();
@@ -3943,6 +4060,119 @@ mod tests {
         assert_eq!(summary.output_tokens, 20);
         assert_eq!(summary.cache_read_tokens, 3);
         assert_eq!(summary.cache_creation_tokens, 4);
+    }
+
+    #[test]
+    fn log_insert_preserves_client_trace_written_before_final_log() {
+        let db = Db::memory().unwrap();
+        let started_at = now_secs();
+        let mut placeholder = sample_log("trace-before-final", started_at, None, None);
+        placeholder.status_code = None;
+        placeholder.error = None;
+        placeholder.latency_ms = None;
+        placeholder.first_token_ms = None;
+        placeholder.input_tokens = 0;
+        placeholder.output_tokens = 0;
+        placeholder.cache_read_tokens = 0;
+        placeholder.cache_creation_tokens = 0;
+        placeholder.estimated_cost_usd = "0".into();
+        placeholder.client_response_body = None;
+        placeholder.stream_kind = None;
+        placeholder.stream_terminal_seen = None;
+        placeholder.stream_end_reason = None;
+        placeholder.client_first_write_ms = None;
+        placeholder.client_chunk_count = 0;
+        placeholder.client_bytes = 0;
+        placeholder.status_injected = false;
+        placeholder.terminal_injected = false;
+        db.log_insert_placeholder(&placeholder).unwrap();
+
+        let mut trace = placeholder.clone();
+        trace.client_response_body = Some("client trace".into());
+        trace.stream_kind = Some("sse".into());
+        trace.stream_terminal_seen = Some(true);
+        trace.stream_end_reason = Some("completed".into());
+        trace.client_first_write_ms = Some(12);
+        trace.client_chunk_count = 3;
+        trace.client_bytes = 123;
+        trace.status_injected = true;
+        trace.terminal_injected = true;
+        db.log_update_client_trace_and_stream_fields(&trace)
+            .unwrap();
+
+        let mut final_log = sample_log("trace-before-final", started_at, None, Some(200));
+        final_log.client_response_body = None;
+        final_log.stream_kind = None;
+        final_log.stream_terminal_seen = None;
+        final_log.stream_end_reason = None;
+        final_log.client_first_write_ms = None;
+        final_log.client_chunk_count = 0;
+        final_log.client_bytes = 0;
+        final_log.status_injected = false;
+        final_log.terminal_injected = false;
+        db.log_insert(&final_log).unwrap();
+
+        let saved = db.log_get("trace-before-final").unwrap().unwrap();
+        assert_eq!(saved.status_code, Some(200));
+        assert_eq!(saved.client_response_body.as_deref(), Some("client trace"));
+        assert_eq!(saved.stream_kind.as_deref(), Some("sse"));
+        assert_eq!(saved.stream_terminal_seen, Some(true));
+        assert_eq!(saved.stream_end_reason.as_deref(), Some("completed"));
+        assert_eq!(saved.client_first_write_ms, Some(12));
+        assert_eq!(saved.client_chunk_count, 3);
+        assert_eq!(saved.client_bytes, 123);
+        assert!(saved.status_injected);
+        assert!(saved.terminal_injected);
+
+        let summary = db.usage_summary_last_hours(1).unwrap();
+        assert_eq!(summary.requests, 1);
+        assert_eq!(summary.input_tokens, 10);
+        assert_eq!(summary.output_tokens, 20);
+    }
+
+    #[test]
+    fn upstream_attempt_insert_creates_missing_request_parent_without_request_rollup() {
+        let db = Db::memory().unwrap();
+        let started_at = now_secs();
+        let attempt = sample_attempt("attempt-before-request", "missing-parent", started_at);
+        db.upstream_attempt_insert(&attempt).unwrap();
+
+        let parent = db.log_get("missing-parent").unwrap().unwrap();
+        assert_eq!(parent.id, "missing-parent");
+        assert_eq!(parent.status_code, None);
+        assert_eq!(parent.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(parent.trace_id.as_deref(), Some("trace-1"));
+        assert_eq!(parent.requested_model.as_deref(), Some("gpt-5.4"));
+
+        let attempts = db.upstream_attempts_for_request("missing-parent").unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_id, "attempt-before-request");
+
+        let summary = db.usage_summary_last_hours(1).unwrap();
+        assert_eq!(summary.requests, 0);
+
+        let rollups = db
+            .usage_rollup_list(
+                10,
+                0,
+                None,
+                None,
+                Some("upstream_attempt"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(rollups.items.len(), 1);
+        assert_eq!(rollups.items[0].requests, 1);
+        assert_eq!(rollups.items[0].input_tokens, 2);
+        assert_eq!(rollups.items[0].output_tokens, 3);
     }
 
     #[test]

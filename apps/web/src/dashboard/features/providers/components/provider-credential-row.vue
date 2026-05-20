@@ -38,6 +38,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   edit: [Credential];
   delete: [Credential];
+  toggle: [Credential];
 }>();
 
 const plan = () => primaryPlanPercent(props.planSnap);

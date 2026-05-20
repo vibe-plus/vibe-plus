@@ -31,6 +31,10 @@ function numberValue(value: JsonValue | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function booleanValue(value: JsonValue | undefined): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
 function entityToken(
   kind: EntityKind,
   entity: PayloadObject | null,
@@ -47,6 +51,36 @@ function entityToken(
 
 function sentence(parts: Array<AppLogToken | string>): AppLogToken[] {
   return parts.map((part) => (typeof part === "string" ? { type: "text", text: part } : part));
+}
+
+function changeObjects(payload: PayloadObject | null): PayloadObject[] {
+  const changes = payload?.changes;
+  return Array.isArray(changes)
+    ? changes
+        .map((change) => objectValue(change))
+        .filter((change): change is PayloadObject => !!change)
+    : [];
+}
+
+function actorSuffix(payload: PayloadObject | null, t: ComposerTranslation): string {
+  const actor = objectValue(payload?.actor);
+  const type = stringValue(actor?.type);
+  if (type === "system") return t("events.actorSystem");
+  if (type === "operator") return t("events.actorOperator");
+  return "";
+}
+
+function credentialChangeDetail(
+  payload: PayloadObject | null,
+  fallback: string | null,
+  t: ComposerTranslation,
+): string | null {
+  const names = changeObjects(payload)
+    .map((change) => stringValue(change.field))
+    .filter((field): field is string => !!field)
+    .map((field) => t(`events.changeFields.${field}`));
+  if (!names.length) return fallback;
+  return t("events.changedFields", { fields: names.join(t("events.changeSeparator")) });
 }
 
 function legacyCircuitPayload(event: AppLogEvent): PayloadObject | null {
@@ -185,9 +219,20 @@ function renderCredentialEvent(
     "credential.deleted": "events.credentialDeleted",
     "credential.enabled": "events.credentialEnabled",
     "credential.disabled": "events.credentialDisabled",
+    "credential.auto_disabled": "events.credentialAutoDisabled",
   }[event.event_type ?? ""];
   if (!actionKey) return null;
 
+  const changes = changeObjects(payload);
+  const enabledChange = changes.find((change) => stringValue(change.field) === "enabled");
+  const enabledTo = booleanValue(enabledChange?.to);
+  const effectiveActionKey =
+    event.event_type === "credential.updated" && enabledTo === true
+      ? "events.credentialEnabled"
+      : event.event_type === "credential.updated" && enabledTo === false
+        ? "events.credentialDisabled"
+        : actionKey;
+  const suffix = actorSuffix(payload, t);
   const title = providerToken
     ? sentence([
         t("events.provider"),
@@ -198,10 +243,18 @@ function renderCredentialEvent(
         " “",
         credentialToken,
         "” ",
-        t(actionKey),
+        t(effectiveActionKey),
+        suffix,
       ])
-    : sentence([t("events.credential"), " “", credentialToken, "” ", t(actionKey)]);
-  return { title, detail: event.detail };
+    : sentence([
+        t("events.credential"),
+        " “",
+        credentialToken,
+        "” ",
+        t(effectiveActionKey),
+        suffix,
+      ]);
+  return { title, detail: credentialChangeDetail(payload, event.detail, t) };
 }
 
 export function renderAppLogEvent(

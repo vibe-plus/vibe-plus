@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
 use serde::Deserialize;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -8,8 +7,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::npm_registry;
+use vibe_i18n::{text_env, text_env_args};
 
-const PACKAGE_NAME: &str = "@vibe-plus/cli";
 const PACKAGE_LATEST: &str = "@vibe-plus/cli@latest";
 const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(20);
@@ -23,6 +22,25 @@ struct NpmPackageInfo {
     version: String,
 }
 
+fn log_update_step(key: &str) {
+    log_update_msg(&text_env(key));
+}
+
+fn log_update_msg(msg: &str) {
+    tracing::info!(target: "vibe::auto_update", "{msg}");
+    let Ok(path) = vibe_core::paths::log_path() else {
+        return;
+    };
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(
+            file,
+            "{} [auto-update] {}",
+            chrono::Utc::now().to_rfc3339(),
+            msg
+        );
+    }
+}
+
 pub fn disabled() -> bool {
     std::env::var_os(DISABLE_ENV).is_some()
 }
@@ -33,12 +51,15 @@ pub fn spawn_background_checker(port: u16) {
     }
 
     tokio::spawn(async move {
-        log_update_step("background auto-update checker scheduled");
+        log_update_step("auto-update-checker-scheduled");
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
         loop {
-            log_update_step("background auto-update check tick");
+            log_update_step("auto-update-check-tick");
             if let Err(e) = check_once_and_spawn_updater(port).await {
-                log_update_step(&format!("auto-update check skipped: {e:#}"));
+                log_update_msg(&text_env_args(
+                    "auto-update-check-error",
+                    &[("error", &format!("{e:#}"))],
+                ));
                 tracing::debug!(?e, "auto-update check skipped");
             }
             tokio::time::sleep(CHECK_INTERVAL).await;
@@ -48,61 +69,60 @@ pub fn spawn_background_checker(port: u16) {
 
 pub async fn check_once_and_spawn_updater(port: u16) -> Result<bool> {
     if !try_acquire_update_lock() {
-        log_update_step("auto-update lock already held; skipping");
+        log_update_step("auto-update-lock-held");
         tracing::debug!("auto-update lock already held; skipping");
         return Ok(false);
     }
 
-    log_update_step("checking npm registry for latest CLI version");
+    log_update_step("auto-update-query-latest");
     let Some(latest) = fetch_latest_version().await? else {
-        log_update_step("npm registry did not return a latest version; skipping");
+        log_update_step("auto-update-no-latest");
         release_update_lock();
         return Ok(false);
     };
     if !is_newer(&latest, vibe_core::VERSION) {
-        log_update_step(&format!(
-            "no update needed: current {} is not older than remote {latest}",
-            vibe_core::VERSION
+        log_update_msg(&text_env_args(
+            "auto-update-no-update",
+            &[
+                ("current", vibe_core::VERSION),
+                ("remote", latest.as_str()),
+            ],
         ));
-        tracing::debug!(
-            current = vibe_core::VERSION,
-            latest,
-            "vibe CLI is up to date"
-        );
         release_update_lock();
         return Ok(false);
     }
 
-    tracing::info!(
-        current = vibe_core::VERSION,
-        latest,
-        "vibe CLI update available; spawning updater"
-    );
-    log_update_step(&format!(
-        "update available: current {} -> remote {latest}",
-        vibe_core::VERSION
+    log_update_msg(&text_env_args(
+        "auto-update-available",
+        &[
+            ("current", vibe_core::VERSION),
+            ("remote", latest.as_str()),
+        ],
     ));
     if let Err(err) = spawn_detached_updater(port, &latest) {
-        log_update_step(&format!("failed to spawn updater helper: {err:#}"));
+        log_update_msg(&text_env_args(
+            "auto-update-spawn-failed",
+            &[("error", &format!("{err:#}"))],
+        ));
         release_update_lock();
         return Err(err);
     }
-    log_update_step("updater helper spawned; exiting current gateway");
+    log_update_step("auto-update-helper-spawned");
     Ok(true)
 }
 
 async fn fetch_latest_version() -> Result<Option<String>> {
     let registry = std::env::var_os(REGISTRY_URL_ENV)
-        .map(std::path::PathBuf::from)
-        .and_then(|p| p.into_os_string().into_string().ok())
+        .and_then(|v| v.into_string().ok())
         .unwrap_or_else(|| {
             let manager = npm_registry::package_manager();
             npm_registry::pick_registry(manager)
                 .unwrap_or_else(|| npm_registry::DEFAULT_NPM_REGISTRY.to_owned())
         });
     let url = format!(
-        "{}{PACKAGE_NAME}/latest",
-        registry.trim_end_matches('/').to_owned() + "/"
+        "{}{}/latest",
+        registry.trim_end_matches('/'),
+        "/@vibe-plus/cli"
     );
     let client = reqwest::Client::builder()
         .timeout(REGISTRY_TIMEOUT)
@@ -127,62 +147,78 @@ async fn fetch_latest_version() -> Result<Option<String>> {
 
 pub fn run_updater_child(port: u16, expected_version: Option<String>) -> Result<()> {
     release_update_lock();
-    log_update_step("auto-updater child started");
+    log_update_step("auto-update-child-started");
     if let Some(expected) = expected_version.as_deref() {
-        log_update_step(&format!("expected target version: {expected}"));
+        log_update_msg(&text_env_args(
+            "auto-update-expected-version",
+            &[("version", expected)],
+        ));
     }
-    log_update_step("preflight: rechecking remote latest before touching the running gateway");
+    log_update_step("auto-update-preflight");
     let preflight: Result<Option<String>> = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(fetch_latest_version())
     });
     match preflight {
         Ok(Some(latest)) if is_newer(&latest, vibe_core::VERSION) => {
-            log_update_step(&format!("preflight confirmed remote latest {latest}"));
+            log_update_msg(&text_env_args(
+                "auto-update-preflight-confirmed",
+                &[("version", latest.as_str())],
+            ));
         }
         Ok(Some(latest)) => {
-            log_update_step(&format!(
-                "preflight says no update needed anymore (remote {latest}, current {})",
-                vibe_core::VERSION
+            log_update_msg(&text_env_args(
+                "auto-update-preflight-no-update",
+                &[
+                    ("current", vibe_core::VERSION),
+                    ("remote", latest.as_str()),
+                ],
             ));
             relaunch_previous_gateway(port)?;
             return Ok(());
         }
         Ok(None) => {
-            log_update_step("preflight could not read a latest version; restoring old gateway");
+            log_update_step("auto-update-preflight-no-latest");
             relaunch_previous_gateway(port)?;
             return Ok(());
         }
         Err(err) => {
-            log_update_step(&format!(
-                "preflight network/query error: {err:#}; restoring old gateway"
+            log_update_msg(&text_env_args(
+                "auto-update-preflight-error",
+                &[("error", &format!("{err:#}"))],
             ));
             relaunch_previous_gateway(port)?;
             return Ok(());
         }
     }
-    log_update_step("waiting for gateway port to close");
+    log_update_step("auto-update-wait-port");
     wait_for_port_closed(port, Duration::from_secs(15));
-    log_update_step("stopping the running gateway before install");
+    log_update_step("auto-update-stop-gateway");
     shutdown_running_gateway(port);
-    log_update_step(&format!("installing {PACKAGE_LATEST}"));
+    log_update_msg(&text_env_args(
+        "auto-update-installing",
+        &[("package", PACKAGE_LATEST)],
+    ));
     let install_result = (|| -> Result<()> {
         let manager = npm_registry::package_manager();
         npm_registry::install_global(manager, PACKAGE_LATEST)
     })();
-
     match install_result {
         Ok(()) => {
             if let Some(expected) = expected_version.as_deref() {
-                log_update_step(&format!("install succeeded for target {expected}"));
+                log_update_msg(&text_env_args(
+                    "auto-update-install-ok-target",
+                    &[("version", expected)],
+                ));
             } else {
-                log_update_step("install succeeded");
+                log_update_step("auto-update-install-ok");
             }
-            log_update_step("relaunching updated gateway");
+            log_update_step("auto-update-relaunch-updated");
             spawn_updated_gateway(port)?;
         }
         Err(err) => {
-            log_update_step(&format!(
-                "install failed: {err:#}; relaunching previous gateway"
+            log_update_msg(&text_env_args(
+                "auto-update-install-failed",
+                &[("error", &format!("{err:#}"))],
             ));
             eprintln!("vibe auto-updater: update failed: {err:#}");
             relaunch_previous_gateway(port)?;
@@ -205,7 +241,6 @@ fn spawn_detached_updater(port: u16, latest: &str) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-
     spawn_detached(&mut cmd)?;
     std::process::exit(0);
 }
@@ -248,8 +283,8 @@ fn spawn_updated_gateway(port: u16) -> Result<()> {
 }
 
 fn relaunch_previous_gateway(port: u16) -> Result<()> {
-    let relaunch = resolve_relaunch_exe();
-    let mut cmd = std::process::Command::new(relaunch);
+    log_update_step("auto-update-relaunch-previous");
+    let mut cmd = std::process::Command::new(resolve_relaunch_exe());
     cmd.arg("up")
         .arg("--foreground")
         .arg("--port")
@@ -265,19 +300,16 @@ fn resolve_vibe_command() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("vibe"))
 }
-
 fn resolve_relaunch_exe() -> std::path::PathBuf {
     std::env::var_os("VIBE_AUTO_UPDATE_RELAUNCH_EXE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("vibe"))
 }
-
 fn spawn_detached(cmd: &mut std::process::Command) -> Result<()> {
     #[cfg(unix)]
     {
         cmd.spawn().context("spawn detached process")?;
     }
-
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -287,10 +319,8 @@ fn spawn_detached(cmd: &mut std::process::Command) -> Result<()> {
             .spawn()
             .context("spawn detached process")?;
     }
-
     Ok(())
 }
-
 fn wait_for_port_closed(port: u16, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -300,14 +330,12 @@ fn wait_for_port_closed(port: u16, timeout: Duration) {
         std::thread::sleep(Duration::from_millis(250));
     }
 }
-
 fn port_is_listening(port: u16) -> bool {
     let Ok(addr) = format!("127.0.0.1:{port}").parse() else {
         return false;
     };
     std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
-
 fn shutdown_running_gateway(port: u16) {
     let _ = std::process::Command::new(resolve_vibe_command())
         .arg("stop")
@@ -315,7 +343,6 @@ fn shutdown_running_gateway(port: u16) {
         .arg(port.to_string())
         .status();
 }
-
 fn try_acquire_update_lock() -> bool {
     let Ok(path) = vibe_core::paths::auto_update_lock_path() else {
         return false;
@@ -326,25 +353,9 @@ fn try_acquire_update_lock() -> bool {
         .open(path)
         .is_ok()
 }
-
 fn release_update_lock() {
     if let Ok(path) = vibe_core::paths::auto_update_lock_path() {
         let _ = std::fs::remove_file(path);
-    }
-}
-
-fn log_update_step(message: &str) {
-    tracing::info!(target: "vibe::auto_update", "{message}");
-    let Ok(path) = vibe_core::paths::log_path() else {
-        return;
-    };
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(
-            file,
-            "{} [auto-update] {}",
-            Utc::now().to_rfc3339(),
-            message
-        );
     }
 }
 

@@ -18,6 +18,42 @@ pub fn default_codex_home() -> Result<PathBuf> {
     Ok(dirs.home_dir().join(".codex"))
 }
 
+/// Cheap fingerprint of Codex rollout files (count + newest mtime). Used to skip redundant unifies.
+pub fn codex_home_change_stamp() -> Option<String> {
+    let home = default_codex_home().ok()?;
+    if !home.exists() {
+        return None;
+    }
+    let mut file_count = 0u64;
+    let mut max_mtime = 0u64;
+    for dir in [home.join("sessions"), home.join("archived_sessions")] {
+        stamp_rollout_dir(&dir, &mut file_count, &mut max_mtime).ok();
+    }
+    Some(format!("{file_count}:{max_mtime}"))
+}
+
+fn stamp_rollout_dir(dir: &Path, file_count: &mut u64, max_mtime: &mut u64) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            stamp_rollout_dir(&path, file_count, max_mtime)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            *file_count += 1;
+            if let Ok(meta) = fs::metadata(&path) {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(secs) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        *max_mtime = (*max_mtime).max(secs.as_secs());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Best-effort unify on startup / `vibe up`. Skips when `~/.codex` is missing; logs warnings on failure.
 pub fn try_auto_unify() -> Option<CodexHistorySummary> {
     let home = match default_codex_home() {

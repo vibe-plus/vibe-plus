@@ -174,6 +174,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                 stream_log_row_id,
                 client_ws_trace,
                 Some(trace_stats),
+                None,
+                None,
             )
             .await;
             continue;
@@ -245,6 +247,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                 stream_log_row_id,
                                 client_ws_trace,
                                 Some(trace_stats),
+                                None,
+                                None,
                             )
                             .await;
                             return; // client disconnected
@@ -267,6 +271,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                             stream_log_row_id,
                                             client_ws_trace,
                                             Some(trace_stats),
+                                            None,
+                                            None,
                                         )
                                         .await;
                                         return;
@@ -311,6 +317,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                 stream_log_row_id,
                                 client_ws_trace,
                                 Some(trace_stats),
+                                None,
+                                None,
                             )
                             .await;
                             return;
@@ -333,6 +341,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                             stream_log_row_id,
                                             client_ws_trace,
                                             Some(trace_stats),
+                                            None,
+                                            None,
                                         )
                                         .await;
                                         return;
@@ -369,6 +379,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                         stream_log_row_id,
                         client_ws_trace,
                         Some(trace_stats),
+                        None,
+                        None,
                     )
                     .await;
                     return;
@@ -412,6 +424,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                         stream_log_row_id,
                                         client_ws_trace,
                                         Some(trace_stats),
+                                        None,
+                                        None,
                                     )
                                     .await;
                                     return;
@@ -442,6 +456,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                                     stream_log_row_id,
                                                     client_ws_trace,
                                                     Some(trace_stats),
+                                                    None,
+                                                    None,
                                                 )
                                                 .await;
                                                 return;
@@ -470,6 +486,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                                     stream_log_row_id,
                                     client_ws_trace,
                                     Some(trace_stats),
+                                    None,
+                                    None,
                                 )
                                 .await;
                                 return;
@@ -495,6 +513,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
                             stream_log_row_id,
                             client_ws_trace,
                             Some(trace_stats),
+                            None,
+                            None,
                         )
                         .await;
                         return;
@@ -514,6 +534,8 @@ pub(super) async fn codex_ws_bridge(mut socket: WebSocket, state: AppState, ws_h
             stream_log_row_id,
             client_ws_trace,
             Some(trace_stats),
+            None,
+            None,
         )
         .await;
         // Loop back to wait for the next response.create on this same connection.
