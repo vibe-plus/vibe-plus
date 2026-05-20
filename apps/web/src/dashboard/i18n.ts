@@ -11,7 +11,7 @@ function setGlobalI18nLocale(next: UiLanguage) {
 
 export type DashboardMessageSchema = Record<string, unknown>;
 
-export const i18n = createI18n<[DashboardMessageSchema], "en" | "zh-CN">({
+export const i18n = createI18n<[DashboardMessageSchema], "en" | "zh-CN" | "zh">({
   legacy: false,
   globalInjection: true,
   locale: "en",
@@ -25,6 +25,13 @@ export const i18n = createI18n<[DashboardMessageSchema], "en" | "zh-CN">({
       },
     },
     "zh-CN": {
+      errors: {
+        circuitBreakerBlocked:
+          "所有供应商目前都被熔断器暂时阻断。请在 Providers 中重置某个供应商，或稍后重试。",
+        requestFailed: "请求失败（HTTP {status}）。",
+      },
+    },
+    zh: {
       errors: {
         circuitBreakerBlocked:
           "所有供应商目前都被熔断器暂时阻断。请在 Providers 中重置某个供应商，或稍后重试。",
