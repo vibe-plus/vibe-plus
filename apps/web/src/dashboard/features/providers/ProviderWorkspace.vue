@@ -18,7 +18,7 @@ import {
 import { CLIENT_TOOLS, type ClientToolId, type ClientToolInfo } from "../../utils/client-tools.ts";
 import { formatApiError } from "../../utils/api-error.ts";
 import type { ProviderSectionView } from "./types.ts";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { hintsFromAuthJsonTokens } from "../../utils/codex-oauth-hints.ts";
 import VpIcon from "../../components/vp-icon.vue";
 import UiButton from "../../components/ui/button.vue";
@@ -44,6 +44,7 @@ const healthMap = ref<Record<string, ProviderHealthSummary>>({});
 /** `GET /_vp/pools` — credential-level circuit/rate-limit summary, loaded in parallel with the list. */
 const poolByProviderId = ref<Record<string, ProviderAuthPoolSummary>>({});
 const route = useRoute();
+const router = useRouter();
 const { t } = useI18n();
 const workspaceView = computed<WorkspaceView>(() => workspaceViewFromQuery(route.query.view));
 /** Hours for provider health and quota snapshots (not request body logging). */
@@ -493,6 +494,7 @@ const providerSections = computed<ProviderSectionView[]>(() =>
       notTested: t("section.notTested"),
       fastest: (ms) => t("section.fastest", { ms }),
       success: (pct) => t("section.success", { pct }),
+      successUnknown: t("section.successUnknown"),
       first: (ms) => t("section.first", { ms }),
       tokensPerSecond: (value) => t("section.tokensPerSecond", { value }),
     },
@@ -514,20 +516,26 @@ function targetProviderIdFromRoute(): string | null {
   return raw ?? null;
 }
 
-function escapeProviderDomIdSegment(value: string): string {
-  const cssApi = globalThis.CSS;
-  if (cssApi && typeof cssApi.escape === "function") return cssApi.escape(value);
-  return value.replace(/[^a-zA-Z0-9_-]/g, "$&");
+function providerDomId(providerId: string): string {
+  return `provider-${providerId}`;
+}
+
+async function clearProviderQuery(providerId: string) {
+  if (targetProviderIdFromRoute() !== providerId) return;
+  const query = { ...route.query };
+  delete query.provider;
+  await router.replace({ path: route.path, query, hash: route.hash });
 }
 
 async function scrollToTargetProvider() {
   const providerId = targetProviderIdFromRoute();
   if (!providerId) return;
   await nextTick();
-  const el = document.getElementById(`provider-${escapeProviderDomIdSegment(providerId)}`);
+  const el = document.getElementById(providerDomId(providerId));
   if (!el) return;
   highlightedProviderId.value = providerId;
   el.scrollIntoView({ block: "center", behavior: "smooth" });
+  void clearProviderQuery(providerId);
   window.setTimeout(() => {
     if (highlightedProviderId.value === providerId) highlightedProviderId.value = null;
   }, 2200);
@@ -604,6 +612,8 @@ async function toggleProviderEnabled(p: Provider) {
       avatar_url: p.avatar_url ?? null,
       kind: p.kind,
       base_url: p.base_url,
+      host: p.host ?? null,
+      protocols: [...(p.protocols ?? [])],
       auth_ref: null,
       enabled: next,
       priority: p.priority,
@@ -815,10 +825,12 @@ onMounted(() => {
 watch(
   () => route.query.provider,
   () => {
+    if (loading.value) return;
     void scrollToTargetProvider().catch((e) => {
       error.value = toUiError(e);
     });
   },
+  { flush: "post" },
 );
 </script>
 
@@ -1011,6 +1023,7 @@ watch(
       "noCredential": "no cred",
       "notTested": "not tested",
       "success": "{pct}% ok",
+      "successUnknown": "no traffic",
       "tokensPerSecond": "{value} tok/s"
     },
     "speed": { "notTested": "Not tested", "tested": "Tested" }
@@ -1061,6 +1074,7 @@ watch(
       "noCredential": "无凭证",
       "notTested": "未测试",
       "success": "成功率 {pct}%",
+      "successUnknown": "暂无流量",
       "tokensPerSecond": "{value} tok/s"
     },
     "speed": { "notTested": "未测试", "tested": "已测试" }

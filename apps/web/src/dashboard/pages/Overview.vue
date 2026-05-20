@@ -9,6 +9,7 @@ import {
   type DashboardStats,
   type HealthSummary,
   type ProviderHealth,
+  type ProviderHealthSummary,
   type Provider,
   type ProviderAuthPoolSummary,
   type ProviderCodexPlanItem,
@@ -36,6 +37,7 @@ import {
   workspaceViewFromQuery,
   type WorkspaceView,
 } from "../utils/workspace-view.ts";
+import { providerSuccessScore, providerSuccessScoreOrRaw } from "../utils/provider-health-score.ts";
 import {
   buildProviderRowTags,
   STATUS_TAG_CLASS,
@@ -55,6 +57,7 @@ const stats = ref<DashboardStats | null>(null);
 const health = ref<HealthSummary | null>(null);
 const providers = ref<Provider[]>([]);
 const pools = ref<ProviderAuthPoolSummary[]>([]);
+const providerHealthSummaries = ref<ProviderHealthSummary[]>([]);
 const codexPlans = ref<Record<string, ProviderCodexPlanItem[]>>({});
 const loading = ref(true);
 const {
@@ -85,6 +88,7 @@ async function load(options: { silent?: boolean } = {}) {
         health.value = null;
         providers.value = [];
         pools.value = [];
+        providerHealthSummaries.value = [];
         codexPlans.value = {};
       }
     })
@@ -120,6 +124,7 @@ function applyProvidersOverview(overview: ProvidersOverview) {
     healthy_providers: cumulative.filter((provider) => provider.is_healthy).length,
   };
   pools.value = overview.pools;
+  providerHealthSummaries.value = overview.health;
   codexPlans.value = overview.codex_plans;
 }
 
@@ -139,6 +144,12 @@ const providerNamesById = computed(
 );
 const poolByProviderId = computed(
   () => new Map(pools.value.map((pool) => [pool.provider_id, pool])),
+);
+const providerHealthSummaryById = computed(
+  () =>
+    new Map(
+      providerHealthSummaries.value.map((summary) => [summary.cumulative.provider_id, summary]),
+    ),
 );
 
 const realtimeProviderById = computed(
@@ -237,13 +248,94 @@ function mergeTokenRate(
   return (Math.max(0, leftTokens) + Math.max(0, rightTokens)) / totalSeconds;
 }
 
+function weightedAverageLatency(
+  rows: { requests: number; avg_latency_ms: number | null }[],
+): number {
+  let weightedLatency = 0;
+  let weightedRequests = 0;
+  for (const row of rows) {
+    if (row.requests <= 0 || row.avg_latency_ms == null || !Number.isFinite(row.avg_latency_ms)) {
+      continue;
+    }
+    weightedLatency += row.avg_latency_ms * row.requests;
+    weightedRequests += row.requests;
+  }
+  return weightedRequests > 0 ? Math.round(weightedLatency / weightedRequests) : 0;
+}
+
 // Compute success rate from provider/credential health counters.
+function providerDisplaySuccessRate(row: DashboardStats["per_provider"][number]): number {
+  return providerSuccessScoreOrRaw(row);
+}
+
 function poolSuccessRate(providerId: string): number | null {
   const pool = poolByProviderId.value.get(providerId);
   if (!pool?.credentials?.length) return null;
   const totalReq = pool.credentials.reduce((s, c) => s + c.rolling_requests, 0);
   const totalOk = pool.credentials.reduce((s, c) => s + c.rolling_successes, 0);
   return totalReq > 0 ? totalOk / totalReq : null;
+}
+
+function providerOverviewStat(provider: Provider): DashboardStats["per_provider"][number] | null {
+  const summary = providerHealthSummaryById.value.get(provider.id);
+  const rolling = summary?.rolling;
+  if (rolling && rolling.requests > 0) return { ...rolling, provider_name: provider.name };
+
+  const pool = poolByProviderId.value.get(provider.id);
+  const requests =
+    pool?.credentials.reduce((sum, credential) => sum + credential.rolling_requests, 0) ?? 0;
+  if (requests > 0) {
+    const successes =
+      pool?.credentials.reduce((sum, credential) => sum + credential.rolling_successes, 0) ?? 0;
+    const failures =
+      pool?.credentials.reduce((sum, credential) => sum + credential.rolling_failures, 0) ??
+      Math.max(0, requests - successes);
+    return {
+      provider_id: provider.id,
+      provider_name: provider.name,
+      requests,
+      successes,
+      failures,
+      success_rate: successes / requests,
+      avg_latency_ms: weightedAverageLatency(
+        pool?.credentials.map((credential) => ({
+          requests: credential.rolling_requests,
+          avg_latency_ms: credential.rolling_avg_latency_ms,
+        })) ?? [],
+      ),
+      input_tokens: 0,
+      output_tokens: 0,
+      output_tokens_per_sec: 0,
+      decode_output_tokens_per_sec: 0,
+      err_429: pool?.rate_limited_credentials ?? 0,
+      err_503: 0,
+      err_4xx_other: 0,
+      err_5xx_other: pool?.open_circuit_credentials ?? 0,
+    };
+  }
+
+  const cumulative = summary?.cumulative;
+  if (cumulative && cumulative.total_requests > 0) {
+    return {
+      provider_id: provider.id,
+      provider_name: provider.name,
+      requests: cumulative.total_requests,
+      successes: cumulative.total_successes,
+      failures: cumulative.total_failures,
+      success_rate: cumulative.success_rate,
+      avg_latency_ms: cumulative.avg_latency_ms ?? 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      output_tokens_per_sec: 0,
+      decode_output_tokens_per_sec: 0,
+      err_429: 0,
+      err_503: 0,
+      err_4xx_other: 0,
+      err_5xx_other: 0,
+    };
+  }
+
+  return null;
 }
 
 const providerRows = computed(() => {
@@ -268,7 +360,7 @@ const providerRows = computed(() => {
     unknown.requests = totalRequests;
     unknown.successes += row.successes;
     unknown.failures += row.failures;
-    unknown.success_rate = totalRequests > 0 ? unknown.successes / totalRequests : 1;
+    unknown.success_rate = providerSuccessScoreOrRaw(unknown);
     unknown.avg_latency_ms =
       totalRequests > 0
         ? Math.round(
@@ -304,21 +396,27 @@ function emptyProviderStat(
   provider: Provider,
   pool?: ProviderAuthPoolSummary,
 ): DashboardStats["per_provider"][number] {
+  const requests =
+    pool?.credentials.reduce((sum, credential) => sum + credential.rolling_requests, 0) ?? 0;
+  const successes =
+    pool?.credentials.reduce((sum, credential) => sum + credential.rolling_successes, 0) ?? 0;
+  const failures =
+    pool?.credentials.reduce((sum, credential) => sum + credential.rolling_failures, 0) ?? 0;
   return {
     provider_id: provider.id,
     provider_name: provider.name,
-    requests:
-      pool?.credentials.reduce((sum, credential) => sum + credential.rolling_requests, 0) ?? 0,
-    successes:
-      pool?.credentials.reduce((sum, credential) => sum + credential.rolling_successes, 0) ?? 0,
-    failures:
-      pool?.credentials.reduce((sum, credential) => sum + credential.rolling_failures, 0) ?? 0,
-    success_rate: poolSuccessRate(provider.id) ?? 1,
+    requests,
+    successes,
+    failures,
+    success_rate: requests > 0 ? successes / requests : 1,
     avg_latency_ms:
-      pool?.credentials.find((credential) => credential.rolling_avg_latency_ms != null)
-        ?.rolling_avg_latency_ms ??
-      provider.last_speedtest?.latency_ms ??
-      0,
+      weightedAverageLatency(
+        pool?.credentials.map((credential) => ({
+          requests: credential.rolling_requests,
+          avg_latency_ms: credential.rolling_avg_latency_ms,
+        })) ?? [],
+      ) ||
+      (provider.last_speedtest?.latency_ms ?? 0),
     input_tokens: 0,
     output_tokens: 0,
     output_tokens_per_sec: 0,
@@ -337,10 +435,24 @@ const scopedProviderRows = computed(() => {
     return providerMatchesWorkspaceView(provider, view.value);
   });
 
-  const existing = new Set(rows.map((row) => row.provider_id));
+  const rowByProviderId = new Map(rows.map((row) => [row.provider_id, row]));
   for (const provider of providers.value) {
-    if (existing.has(provider.id)) continue;
     if (!providerMatchesWorkspaceView(provider, view.value)) continue;
+
+    const overviewStat = providerOverviewStat(provider);
+    const existingRow = rowByProviderId.get(provider.id);
+    if (overviewStat && (!existingRow || existingRow.requests <= 0)) {
+      if (existingRow) {
+        const index = rows.findIndex((row) => row.provider_id === provider.id);
+        rows[index] = overviewStat;
+      } else {
+        rows.push(overviewStat);
+      }
+      rowByProviderId.set(provider.id, overviewStat);
+      continue;
+    }
+
+    if (existingRow) continue;
     const pool = poolByProviderId.value.get(provider.id);
     const hasCapacity = provider.enabled && (pool?.enabled_credentials ?? 0) > 0;
     const hasAttention =
@@ -353,7 +465,17 @@ const scopedProviderRows = computed(() => {
     }
   }
 
-  return rows;
+  return rows.sort((a, b) => {
+    const aProvider = providerById.value.get(a.provider_id);
+    const bProvider = providerById.value.get(b.provider_id);
+    const aEnabled = aProvider?.enabled ?? true;
+    const bEnabled = bProvider?.enabled ?? true;
+    if (aEnabled !== bEnabled) return aEnabled ? -1 : 1;
+    const aReady = poolByProviderId.value.get(a.provider_id)?.available_credentials ?? 0;
+    const bReady = poolByProviderId.value.get(b.provider_id)?.available_credentials ?? 0;
+    if (aReady !== bReady) return bReady - aReady;
+    return b.requests - a.requests;
+  });
 });
 
 const scopedPools = computed(() =>
@@ -396,10 +518,7 @@ const visibleTokenFlowTps = computed(() => scopedOutputTps.value ?? dashboardWin
 const visibleTokensPerHour = computed(() => visibleTokenFlowTps.value * 3600);
 
 const providerIssueCount = computed(
-  () =>
-    scopedProviderRows.value.filter(
-      (row) => (poolSuccessRate(row.provider_id) ?? row.success_rate) < 0.9,
-    ).length,
+  () => scopedProviderRows.value.filter((row) => providerDisplaySuccessRate(row) < 0.9).length,
 );
 
 const activeProviderCards = computed(() =>
@@ -413,7 +532,7 @@ const activeProviderCards = computed(() =>
       const hasReadyCapacity = (pool?.available_credentials ?? 0) > 0;
       const needsAttention =
         row.failures > 0 ||
-        (poolSuccessRate(row.provider_id) ?? row.success_rate) < 0.9 ||
+        providerDisplaySuccessRate(row) < 0.9 ||
         health?.circuit_state === "open" ||
         health?.circuit_state === "half-open" ||
         !!pool?.provider_circuit_open ||
@@ -422,17 +541,38 @@ const activeProviderCards = computed(() =>
       return hasTraffic || needsAttention || hasReadyCapacity;
     })
     .sort((a, b) => {
-      const aRisk = (poolSuccessRate(a.provider_id) ?? a.success_rate) < 0.9 ? 1 : 0;
-      const bRisk = (poolSuccessRate(b.provider_id) ?? b.success_rate) < 0.9 ? 1 : 0;
-      if (aRisk !== bRisk) return bRisk - aRisk;
-      const aSpeed = a.decode_output_tokens_per_sec || a.output_tokens_per_sec;
-      const bSpeed = b.decode_output_tokens_per_sec || b.output_tokens_per_sec;
+      const aProvider = providerById.value.get(a.provider_id);
+      const bProvider = providerById.value.get(b.provider_id);
+      const aEnabled = aProvider?.enabled ?? true;
+      const bEnabled = bProvider?.enabled ?? true;
+      if (aEnabled !== bEnabled) return aEnabled ? -1 : 1;
+      const aRealtime = realtimeProviderById.value.get(a.provider_id);
+      const bRealtime = realtimeProviderById.value.get(b.provider_id);
+      const aActive = aRealtime?.active_requests ?? 0;
+      const bActive = bRealtime?.active_requests ?? 0;
+      if (aActive !== bActive) return bActive - aActive;
+
+      const aRequests = a.requests;
+      const bRequests = b.requests;
+      if (aRequests !== bRequests) return bRequests - aRequests;
+
+      const aSpeed =
+        aRealtime?.active_output_tokens_per_sec ||
+        a.decode_output_tokens_per_sec ||
+        a.output_tokens_per_sec;
+      const bSpeed =
+        bRealtime?.active_output_tokens_per_sec ||
+        b.decode_output_tokens_per_sec ||
+        b.output_tokens_per_sec;
       if (aSpeed !== bSpeed) return bSpeed - aSpeed;
-      if (a.requests !== b.requests) return b.requests - a.requests;
-      return (
-        (poolByProviderId.value.get(b.provider_id)?.available_credentials ?? 0) -
-        (poolByProviderId.value.get(a.provider_id)?.available_credentials ?? 0)
-      );
+
+      const aReady = poolByProviderId.value.get(a.provider_id)?.available_credentials ?? 0;
+      const bReady = poolByProviderId.value.get(b.provider_id)?.available_credentials ?? 0;
+      if (aReady !== bReady) return bReady - aReady;
+
+      const aRisk = providerDisplaySuccessRate(a) < 0.9 ? 1 : 0;
+      const bRisk = providerDisplaySuccessRate(b) < 0.9 ? 1 : 0;
+      return bRisk - aRisk;
     })
     .slice(0, 6),
 );
@@ -585,7 +725,7 @@ function providerRowTags(row: DashboardStats["per_provider"][number]) {
     totalCredentials: pool?.total_credentials ?? 0,
     rateLimitedCredentials: pool?.rate_limited_credentials ?? 0,
     openCircuitCredentials: pool?.open_circuit_credentials ?? 0,
-    successRate: poolSuccessRate(row.provider_id) ?? row.success_rate,
+    successRate: providerDisplaySuccessRate(row),
     labels: providerRowTagLabels.value,
   });
 }
@@ -658,6 +798,21 @@ function providerCircuitState(row: DashboardStats["per_provider"][number]): stri
   if (provider?.circuit_state === "open" || pool?.provider_circuit_open) return "open";
   if (provider?.circuit_state === "half-open") return "half-open";
   return "closed";
+}
+
+function providerHealthTone(
+  row: DashboardStats["per_provider"][number],
+): "ok" | "warn" | "bad" | "muted" {
+  const provider = providerById.value.get(row.provider_id);
+  const circuit = providerCircuitState(row);
+  if (provider && !provider.enabled) return "muted";
+  if (circuit === "open") return "bad";
+  if (circuit === "half-open") return "warn";
+  const pool = poolByProviderId.value.get(row.provider_id);
+  if (pool?.provider_circuit_open || (pool?.open_circuit_credentials ?? 0) > 0) return "bad";
+  if ((pool?.rate_limited_credentials ?? 0) > 0) return "warn";
+  if (providerDisplaySuccessRate(row) < 0.9) return "warn";
+  return "ok";
 }
 
 function rateOr(n: unknown, fallback = 1): number {
@@ -766,7 +921,11 @@ function rateOr(n: unknown, fallback = 1): number {
                 :tone="realtimeActiveCount > 0 ? 'hot' : 'muted'"
               />
               <div class="mt-1 text-xs text-vp-muted">
-                {{ realtimeActiveCount > 0 ? "并发中" : "空闲" }}
+                {{
+                  realtimeActiveCount > 0
+                    ? t("realtime.activeStatus.busy")
+                    : t("realtime.activeStatus.idle")
+                }}
               </div>
             </div>
             <div class="bg-vp-surface p-3">
@@ -901,6 +1060,7 @@ function rateOr(n: unknown, fallback = 1): number {
                   "
                   :enabled="providerById.get(p.provider_id)?.enabled ?? true"
                   :circuit-state="providerCircuitState(p)"
+                  :health-tone="providerHealthTone(p)"
                   :tokens-per-sec="
                     realtimeProviderById.get(p.provider_id)?.active_output_tokens_per_sec ||
                     p.decode_output_tokens_per_sec ||
@@ -935,28 +1095,24 @@ function rateOr(n: unknown, fallback = 1): number {
                   </span>
                   <Progress
                     class="mt-1.5 h-1"
-                    :value="(poolSuccessRate(p.provider_id) ?? p.success_rate) * 100"
-                    :tone="
-                      (poolSuccessRate(p.provider_id) ?? p.success_rate) < 0.9
-                        ? 'warning'
-                        : 'success'
-                    "
+                    :value="providerDisplaySuccessRate(p) * 100"
+                    :tone="providerDisplaySuccessRate(p) < 0.9 ? 'warning' : 'success'"
                   />
                 </span>
                 <span
                   class="hidden shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[11px] sm:inline"
                   :class="
-                    (poolSuccessRate(p.provider_id) ?? p.success_rate) < 0.9
+                    providerDisplaySuccessRate(p) < 0.9
                       ? 'bg-amber-50 text-amber-800'
                       : 'bg-emerald-50 text-emerald-700'
                   "
                   :title="
-                    poolSuccessRate(p.provider_id) != null
-                      ? t('providers.upstreamAttemptRate')
+                    providerSuccessScore(p) != null
+                      ? t('providers.algorithmicSuccessRate')
                       : t('providers.requestSuccessRate')
                   "
                 >
-                  {{ pct(poolSuccessRate(p.provider_id) ?? p.success_rate) }}
+                  {{ pct(providerDisplaySuccessRate(p)) }}
                 </span>
               </RouterLink>
             </div>
@@ -1071,6 +1227,7 @@ function rateOr(n: unknown, fallback = 1): number {
         "disabledCreds": "{count} disabled",
         "noReady": "not ready"
       },
+      "algorithmicSuccessRate": "server-quality success rate (neutral 4xx/429/503/unknown excluded)",
       "requestSuccessRate": "request success rate",
       "rowMeta": "{requests} req · {latency} avg",
       "status": {
@@ -1089,6 +1246,10 @@ function rateOr(n: unknown, fallback = 1): number {
     "realtime": {
       "burnRate": "Burn rate",
       "burnRateHint": "estimated USD per hour",
+      "activeStatus": {
+        "busy": "active",
+        "idle": "idle"
+      },
       "network": "Network",
       "networkHint": "up + down",
       "noActive": "No active requests right now. Send a client request to see live routing, speed, and token flow here.",
@@ -1185,6 +1346,7 @@ function rateOr(n: unknown, fallback = 1): number {
         "disabledCreds": "{count} 已禁用",
         "noReady": "无就绪"
       },
+      "algorithmicSuccessRate": "服务器质量成功率（已排除中性 4xx/429/503/未知失败）",
       "requestSuccessRate": "请求成功率",
       "rowMeta": "{requests} 请求 · {latency} 平均",
       "status": {
@@ -1203,6 +1365,10 @@ function rateOr(n: unknown, fallback = 1): number {
     "realtime": {
       "burnRate": "烧钱速度",
       "burnRateHint": "估算美元/小时",
+      "activeStatus": {
+        "busy": "并发中",
+        "idle": "空闲"
+      },
       "network": "网速",
       "networkHint": "上行 + 下行",
       "noActive": "当前没有正在进行的请求。发起一次客户端请求后，这里会显示实时路由、速度和 token 流。",

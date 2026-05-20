@@ -23,6 +23,7 @@ import {
   type ProviderRowTagLabels,
 } from "../../../utils/provider-status-tags.ts";
 import { cn } from "../../../../lib/utils.ts";
+import { providerSuccessScore } from "../../../utils/provider-health-score.ts";
 
 type ProviderGroupKey = "native" | "bridged" | "other";
 type ClientToolId = "codex" | "opencode" | "claude-code";
@@ -203,10 +204,10 @@ function websocketLabel(provider: Provider): string {
   return t("websocket.clientToHttp");
 }
 
-function speedtestLabel(provider: Provider): string {
+function speedtestLabel(provider: Provider): string | null {
   const result = provider.last_speedtest;
   if (!result) return t("speed.untested");
-  if (result.error) return result.error;
+  if (result.error) return null;
   const latency = result.latency_ms == null ? "—" : `${result.latency_ms}ms`;
   const status = result.status == null ? "" : ` · HTTP ${result.status}`;
   return `${latency}${status}`;
@@ -270,6 +271,57 @@ const providerRowTagLabels = computed<ProviderRowTagLabels>(() => ({
   noReady: t("tags.noReady"),
 }));
 
+const providerDisplayStat = computed(() => {
+  const rolling = props.health?.rolling;
+  if (rolling && rolling.requests > 0) {
+    return {
+      requests: rolling.requests,
+      avgLatencyMs: rolling.avg_latency_ms,
+      successRate: providerSuccessScore(rolling) ?? rolling.success_rate,
+      source: "rolling" as const,
+    };
+  }
+  const cumulative = props.health?.cumulative;
+  if (cumulative && cumulative.total_requests > 0) {
+    return {
+      requests: cumulative.total_requests,
+      avgLatencyMs: cumulative.avg_latency_ms,
+      successRate: cumulative.success_rate,
+      source: "cumulative" as const,
+    };
+  }
+  return {
+    requests: null,
+    avgLatencyMs: null,
+    successRate: null,
+    source: "none" as const,
+  };
+});
+
+const providerMetaItems = computed(() => {
+  const items = [
+    protocolSummary.value,
+    speedtestLabel(props.card.provider),
+    providerDisplayStat.value.requests == null
+      ? t("providerStats.noRequests")
+      : t("providerStats.requests", { count: providerDisplayStat.value.requests }),
+    formatProviderLatency(providerDisplayStat.value.avgLatencyMs),
+    formatProviderSuccess(providerDisplayStat.value.successRate),
+  ];
+
+  return items.filter((item): item is string => Boolean(item));
+});
+
+function formatProviderLatency(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return t("providerStats.noLatency");
+  return t("providerStats.avgLatency", { ms: Math.round(ms) });
+}
+
+function formatProviderSuccess(rate: number | null | undefined): string {
+  if (rate == null || !Number.isFinite(rate)) return t("providerStats.noSuccess");
+  return t("providerStats.success", { pct: Math.round(rate * 100) });
+}
+
 const providerStatusTags = computed(() => {
   const pool = props.poolRows;
   const rateLimited = pool.filter((row) => row.is_rate_limited).length;
@@ -277,9 +329,8 @@ const providerStatusTags = computed(() => {
   const total = pool.length;
   const enabled = pool.filter((row) => row.enabled).length;
   const available = providerPool.value.available;
-  const rollingRequests = pool.reduce((sum, row) => sum + (row.rolling_requests ?? 0), 0);
-  const rollingSuccesses = pool.reduce((sum, row) => sum + (row.rolling_successes ?? 0), 0);
-  const successRate = rollingRequests > 0 ? rollingSuccesses / rollingRequests : 1;
+  const stat = providerDisplayStat.value;
+  const successRate = stat.successRate ?? 1;
 
   return buildProviderRowTags({
     providerEnabled: providerEnabled.value,
@@ -294,8 +345,16 @@ const providerStatusTags = computed(() => {
   });
 });
 
+const providerHasCircuitBreak = computed(
+  () =>
+    providerEnabled.value &&
+    (providerCircuitState.value !== "closed" ||
+      providerPool.value.open > 0 ||
+      providerPool.value.halfOpen > 0),
+);
+
 const providerCooldownTag = computed(() => {
-  if (providerEnabled.value && providerCircuitState.value !== "closed") {
+  if (providerHasCircuitBreak.value) {
     const label = circuitCooldownText(providerPool.value.cooldownMax);
     if (label) {
       return { key: "cooldown", label, tone: "warn" as const };
@@ -307,12 +366,12 @@ const providerCooldownTag = computed(() => {
 
 <template>
   <div
-    class="group overflow-hidden rounded-xl border border-border bg-card/95 shadow-sm transition-all duration-200"
+    class="group overflow-hidden rounded-xl border border-border bg-card/95 shadow-sm transition-all duration-200 xl:grid xl:grid-cols-[minmax(18rem,1.15fr)_minmax(16rem,0.9fr)_minmax(20rem,1.15fr)_auto] xl:items-stretch xl:rounded-none xl:border-0 xl:border-b xl:shadow-none"
     :class="[!card.provider.enabled ? 'opacity-60 grayscale-[0.1]' : '']"
   >
-    <div class="relative overflow-hidden">
+    <div class="relative overflow-hidden xl:min-w-0">
       <div
-        class="absolute inset-x-0 top-0 h-1"
+        class="absolute inset-x-0 top-0 h-1 xl:inset-y-0 xl:left-0 xl:h-auto xl:w-1"
         :class="
           providerEnabled
             ? 'bg-[linear-gradient(90deg,var(--vp-primary),color-mix(in_srgb,var(--vp-primary)_55%,white))]'
@@ -378,104 +437,65 @@ const providerCooldownTag = computed(() => {
                 </div>
 
                 <p class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <span>{{ protocolSummary }}</span>
-                  <span class="hidden sm:inline">·</span>
-                  <span>{{ upstreamInventoryLabel(card.provider) }}</span>
-                  <span class="hidden sm:inline">·</span>
-                  <span>{{ speedtestLabel(card.provider) }}</span>
+                  <template v-for="(item, index) in providerMetaItems" :key="`${index}-${item}`">
+                    <span v-if="index > 0" class="hidden sm:inline">·</span>
+                    <span>{{ item }}</span>
+                  </template>
                 </p>
               </div>
             </div>
-          </div>
-
-          <div class="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
-            <UiButton
-              size="sm"
-              variant="outline"
-              :disabled="circuitResetBusy"
-              @click="emit('reset-circuit', card.provider.id)"
-            >
-              <VpIcon name="rotate-ccw" size-class="size-4" />
-              {{ t("actions.reset") }}
-            </UiButton>
-            <UiButton size="sm" variant="outline" @click="emit('edit-provider', card.provider)">
-              <VpIcon name="pencil" size-class="size-4" />
-              {{ t("actions.edit") }}
-            </UiButton>
-            <UiButton
-              size="sm"
-              variant="destructive"
-              @click="emit('delete-provider', card.provider.id)"
-            >
-              <VpIcon name="trash-2" size-class="size-4" />
-              {{ t("actions.delete") }}
-            </UiButton>
-          </div>
-        </div>
-
-        <div class="mt-4 grid gap-2 md:grid-cols-2">
-          <div
-            class="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
-          >
-            <div class="flex items-center justify-between gap-2">
-              <span>{{ t("sections.credentials") }}</span>
-              <UiButton
-                size="sm"
-                variant="ghost"
-                class="h-8 px-2"
-                @click="emit('add-cred', card.provider.id)"
-              >
-                <VpIcon name="plus" size-class="size-4" />
-                {{ t("actions.add") }}
-              </UiButton>
-            </div>
-            <p class="mt-1 text-sm text-foreground">
-              {{ t("credentials.total", { count: creds.length }) }}
-            </p>
-          </div>
-          <div
-            class="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
-          >
-            <div class="flex items-center justify-between gap-2">
-              <span>{{ t("sections.routing") }}</span>
-              <span class="text-right text-foreground">{{
-                card.sortReason || `score ${Math.round(card.qualityScore)}`
-              }}</span>
-            </div>
-            <p class="mt-1 text-sm text-foreground">
-              {{ card.provider.base_url }}
-            </p>
-            <p class="mt-1 text-xs text-muted-foreground">
-              {{ websocketLabel(card.provider) }} ·
-              {{ endpointModeLabel(card.provider) }}
-            </p>
-            <p v-if="providerUpstreamSummary" class="mt-1 text-xs text-muted-foreground">
-              {{
-                t("upstream.summary", {
-                  total: providerUpstreamSummary.total_upstreams,
-                  enabled: providerUpstreamSummary.enabled_upstreams,
-                })
-              }}
-            </p>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="border-t border-border bg-muted/20 px-4 py-3 sm:px-5">
+    <div class="border-t border-border px-4 py-3 sm:px-5 xl:min-w-0 xl:border-l xl:border-t-0">
+      <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span>{{ t("sections.routing") }}</span>
+        <span class="text-right text-foreground">{{
+          card.sortReason || `score ${Math.round(card.qualityScore)}`
+        }}</span>
+      </div>
+      <p class="mt-2 truncate text-sm text-foreground" :title="card.provider.base_url">
+        {{ card.provider.base_url }}
+      </p>
+      <p class="mt-1 text-xs text-muted-foreground">
+        {{ upstreamInventoryLabel(card.provider) }} · {{ websocketLabel(card.provider) }} ·
+        {{ endpointModeLabel(card.provider) }}
+      </p>
+      <p v-if="providerUpstreamSummary" class="mt-1 text-xs text-muted-foreground">
+        {{
+          t("upstream.summary", {
+            total: providerUpstreamSummary.total_upstreams,
+            enabled: providerUpstreamSummary.enabled_upstreams,
+          })
+        }}
+      </p>
+      <p class="mt-1 text-xs text-muted-foreground">
+        {{ groupLabel(card.group) }} · {{ t("routing.routeHints", { count: card.badges.length }) }}
+      </p>
+    </div>
+
+    <div
+      class="border-t border-border bg-muted/20 px-4 py-3 sm:px-5 xl:min-w-0 xl:border-l xl:border-t-0 xl:bg-transparent"
+    >
       <div class="flex items-center justify-between gap-3">
         <div class="text-xs text-muted-foreground">
           {{ t("credentials.shown", { count: visibleCreds.length }) }}
-          <span v-if="hiddenCredCount"
-            >· {{ t("credentials.hidden", { count: hiddenCredCount }) }}</span
+          <span v-if="hiddenCredCount">
+            · {{ t("credentials.hidden", { count: hiddenCredCount }) }}</span
           >
         </div>
-        <div class="text-xs text-muted-foreground">
-          {{ groupLabel(card.group) }} ·
-          {{ t("routing.routeHints", { count: card.badges.length }) }}
-        </div>
+        <UiButton
+          size="sm"
+          variant="ghost"
+          class="h-8 px-2"
+          @click="emit('add-cred', card.provider.id)"
+        >
+          <VpIcon name="plus" size-class="size-4" />
+          {{ t("actions.add") }}
+        </UiButton>
       </div>
-
       <div class="mt-3 space-y-2">
         <div v-if="loadingCreds" class="space-y-2">
           <div class="h-10 rounded-lg bg-muted animate-pulse" v-for="i in 2" :key="i" />
@@ -494,11 +514,36 @@ const providerCooldownTag = computed(() => {
             :pool-row="poolRowFor(credential.id)"
             :plan-snap="props.planSnapByCred[credential.id] ?? null"
             :peer-creds="creds"
+            :toggle-busy="credToggleBusy[credential.id] ?? false"
+            @toggle="emit('toggle-cred', $event)"
             @edit="emit('edit-cred', $event)"
             @delete="emit('delete-cred', $event)"
           />
         </template>
       </div>
+    </div>
+
+    <div
+      class="flex flex-wrap items-center gap-2 border-t border-border px-4 py-3 sm:px-5 xl:flex-col xl:items-stretch xl:justify-center xl:border-l xl:border-t-0 xl:px-3"
+    >
+      <UiButton
+        v-if="providerHasCircuitBreak"
+        size="sm"
+        variant="outline"
+        :disabled="circuitResetBusy"
+        @click="emit('reset-circuit', card.provider.id)"
+      >
+        <VpIcon name="rotate-ccw" size-class="size-4" />
+        {{ t("actions.reset") }}
+      </UiButton>
+      <UiButton size="sm" variant="outline" @click="emit('edit-provider', card.provider)">
+        <VpIcon name="pencil" size-class="size-4" />
+        {{ t("actions.edit") }}
+      </UiButton>
+      <UiButton size="sm" variant="destructive" @click="emit('delete-provider', card.provider.id)">
+        <VpIcon name="trash-2" size-class="size-4" />
+        {{ t("actions.delete") }}
+      </UiButton>
     </div>
   </div>
 </template>
@@ -512,7 +557,7 @@ const providerCooldownTag = computed(() => {
       "edit": "Edit",
       "off": "off",
       "on": "on",
-      "reset": "Reset"
+      "reset": "Reset circuit"
     },
     "circuit": {
       "open": "Circuit open",
@@ -552,6 +597,14 @@ const providerCooldownTag = computed(() => {
       "models": "{count} models",
       "passthrough": "passthrough",
       "upstreams": "{enabled}/{total} upstreams"
+    },
+    "providerStats": {
+      "avgLatency": "{ms}ms avg",
+      "noLatency": "no latency",
+      "noRequests": "no traffic",
+      "noSuccess": "no success rate",
+      "requests": "{count} req",
+      "success": "{pct}%"
     },
     "protocol": {
       "chat": "Chat",
@@ -596,7 +649,7 @@ const providerCooldownTag = computed(() => {
       "edit": "编辑",
       "off": "关闭",
       "on": "开启",
-      "reset": "重置"
+      "reset": "解除熔断"
     },
     "circuit": {
       "open": "熔断中",
@@ -636,6 +689,14 @@ const providerCooldownTag = computed(() => {
       "models": "{count} 个模型",
       "passthrough": "透传",
       "upstreams": "{enabled}/{total} 个上游"
+    },
+    "providerStats": {
+      "avgLatency": "平均 {ms}ms",
+      "noLatency": "暂无延迟",
+      "noRequests": "暂无流量",
+      "noSuccess": "暂无成功率",
+      "requests": "{count} 请求",
+      "success": "{pct}%"
     },
     "protocol": {
       "chat": "聊天",

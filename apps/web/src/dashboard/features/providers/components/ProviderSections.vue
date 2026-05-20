@@ -120,10 +120,20 @@ function fastestLabel(value: number | null): string {
         </div>
       </div>
 
-      <div class="space-y-3 p-4 sm:p-5">
+      <div
+        class="hidden border-b border-border bg-muted/25 px-4 py-2 text-[11px] font-medium uppercase tracking-normal text-muted-foreground xl:grid xl:grid-cols-[minmax(18rem,1.15fr)_minmax(16rem,0.9fr)_minmax(20rem,1.15fr)_auto] xl:items-center"
+      >
+        <span>{{ t("table.provider") }}</span>
+        <span>{{ t("table.routing") }}</span>
+        <span>{{ t("table.credentials") }}</span>
+        <span class="text-center">{{ t("table.actions") }}</span>
+      </div>
+
+      <div class="space-y-3 p-4 sm:p-5 xl:space-y-0 xl:p-0">
         <ProviderCard
           v-for="card in section.providers"
           :id="`provider-${card.provider.id}`"
+          :data-provider-id="card.provider.id"
           :key="card.provider.id"
           :card="card"
           :health="healthMap[card.provider.id]"
@@ -170,6 +180,12 @@ function fastestLabel(value: number | null): string {
       "models": "{count} models",
       "nativeBridge": "{native} native · {bridge} bridge",
       "noSpeed": "no speed"
+    },
+    "table": {
+      "actions": "Actions",
+      "credentials": "Credentials",
+      "provider": "Provider",
+      "routing": "Routing"
     }
   },
   "zh-CN": {
@@ -181,6 +197,12 @@ function fastestLabel(value: number | null): string {
       "models": "{count} 个模型",
       "nativeBridge": "{native} 原生 · {bridge} 桥接",
       "noSpeed": "无测速"
+    },
+    "table": {
+      "actions": "操作",
+      "credentials": "凭证",
+      "provider": "供应商",
+      "routing": "上游"
     }
   }
 }

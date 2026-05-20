@@ -69,7 +69,7 @@ const renderedLines = computed(() => {
     })
     .map((line) => ({
       line,
-      rendered: renderAppLogEvent(line, t),
+      rendered: renderAppLogEvent(line, t, providerById.value),
     }));
 });
 

@@ -24,6 +24,12 @@ export interface EntityRef {
 
 export type EntityLinkResolver = (ref: EntityRef) => RouteLocationRaw | null;
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuidEntityId(id: string): boolean {
+  return UUID_RE.test(id.trim());
+}
+
 const defaultResolvers: Record<EntityKind, EntityLinkResolver> = {
   provider: ({ id }) => (id ? { path: "/ui/providers", query: { provider: id } } : null),
   credential: ({ id }) => (id ? { path: "/ui/providers", query: { credential: id } } : null),
@@ -46,7 +52,7 @@ export function resetEntityResolvers(): void {
 }
 
 export function resolveEntityRoute(ref: EntityRef): RouteLocationRaw | null {
-  if (!ref.id) return null;
+  if (!isUuidEntityId(ref.id)) return null;
   const resolver = resolvers[ref.kind];
   return resolver ? resolver(ref) : null;
 }
@@ -73,61 +79,10 @@ export function entityToken(ref: EntityRef, fallback?: string): EntityToken {
 }
 
 /**
- * Best-effort regex scan for known entity ID patterns inside free-form text.
- *
- * Today we recognize:
- *   - UUID v4/v7   → request | attempt (caller must pick which kind by context)
- *   - `req_…`      → request
- *   - `att_…`      → attempt
- *   - `wave_…`     → wave
- *
- * The function returns the text broken into tokens. Callers that already
- * have structured payloads should prefer building tokens directly via
- * `entityToken()` — `linkifyText` is the fallback for legacy free-form
- * messages where we can only guess.
+ * Free-form linkification is intentionally disabled for new structured flows.
+ * Old log text should be rendered as text only; structured entity IDs get
+ * clickable links through `entityToken()`.
  */
-const PATTERNS: Array<{ kind: EntityKind; re: RegExp }> = [
-  { kind: "request", re: /\breq_[A-Za-z0-9]{6,}\b/g },
-  { kind: "attempt", re: /\batt_[A-Za-z0-9]{6,}\b/g },
-  { kind: "wave", re: /\bwave_[A-Za-z0-9]{4,}\b/g },
-];
-
-export function linkifyText(text: string, opts?: { uuidKind?: EntityKind }): EntityToken[] {
-  if (!text) return [];
-
-  type Match = { start: number; end: number; ref: EntityRef };
-  const matches: Match[] = [];
-
-  for (const { kind, re } of PATTERNS) {
-    re.lastIndex = 0;
-    for (const m of text.matchAll(re)) {
-      const start = m.index ?? -1;
-      if (start < 0) continue;
-      matches.push({ start, end: start + m[0].length, ref: { kind, id: m[0] } });
-    }
-  }
-
-  if (opts?.uuidKind) {
-    const uuidRe =
-      /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g;
-    for (const m of text.matchAll(uuidRe)) {
-      const start = m.index ?? -1;
-      if (start < 0) continue;
-      matches.push({ start, end: start + m[0].length, ref: { kind: opts.uuidKind, id: m[0] } });
-    }
-  }
-
-  if (matches.length === 0) return [{ type: "text", text }];
-
-  matches.sort((a, b) => a.start - b.start);
-  const tokens: EntityToken[] = [];
-  let cursor = 0;
-  for (const m of matches) {
-    if (m.start < cursor) continue; // overlap — keep the earlier match
-    if (m.start > cursor) tokens.push({ type: "text", text: text.slice(cursor, m.start) });
-    tokens.push(entityToken(m.ref));
-    cursor = m.end;
-  }
-  if (cursor < text.length) tokens.push({ type: "text", text: text.slice(cursor) });
-  return tokens;
+export function linkifyText(text: string): EntityToken[] {
+  return text ? [{ type: "text", text }] : [];
 }
