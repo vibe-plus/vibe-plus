@@ -128,6 +128,8 @@ function rateLimitLabel(): string | null {
   return `RL ${formatShortDuration(remaining)}`;
 }
 
+const rateLimitBadgeLabel = computed(() => rateLimitLabel());
+
 function cooldownLabel(): string | null {
   const secs = props.poolRow?.circuit_open_remaining_secs;
   if (secs == null) return null;
@@ -167,10 +169,10 @@ function cooldownLabel(): string | null {
         </span>
         <span class="text-slate-500">{{ authModeLabel() }}</span>
         <UiBadge
-          v-if="rateLimitLabel()"
+          v-if="rateLimitBadgeLabel"
           :class="cn('px-1.5 py-0 text-[10px]', STATUS_TAG_CLASS.warn)"
         >
-          {{ rateLimitLabel() }}
+          {{ rateLimitBadgeLabel }}
         </UiBadge>
         <UiBadge
           v-if="cooldownLabel()"
@@ -292,9 +294,6 @@ function cooldownLabel(): string | null {
             {{ t("details.failures") }} {{ credential.consecutive_failures }}
           </p>
           <p v-if="!credential.enabled" class="text-slate-700">{{ t("status.disabledLong") }}</p>
-          <p v-if="rateLimitLabel()" class="text-amber-700">
-            {{ t("details.rateLimit") }} {{ rateLimitLabel() }}
-          </p>
           <p v-if="cooldownLabel()" class="text-red-700">
             {{ t("details.circuit") }} {{ cooldownLabel() }}
           </p>

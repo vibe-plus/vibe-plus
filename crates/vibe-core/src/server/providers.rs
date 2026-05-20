@@ -1,4 +1,5 @@
 use super::*;
+use vibe_protocol::ProviderKind;
 
 // ---------------------------------------------------------------------------
 // Provider CRUD
@@ -9,6 +10,126 @@ pub(super) async fn list_providers(
 ) -> Result<Json<Vec<Provider>>, AppError> {
     let v = run_blocking(state, |s| s.db.provider_list()).await?;
     Ok(Json(v))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProviderProbeQuery {
+    host: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ProviderProbeProtocol {
+    kind: String,
+    label: String,
+    base_url: String,
+    status: u16,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ProviderProbeResult {
+    host: String,
+    display_name: String,
+    protocols: Vec<ProviderProbeProtocol>,
+    note: Option<String>,
+}
+
+fn provider_probe_base_urls(host: &str) -> Vec<(ProviderKind, &'static str, String)> {
+    let h = host.trim().trim_end_matches('/').to_ascii_lowercase();
+    let https = format!("https://{h}");
+    let mut out = Vec::new();
+    if h.contains("anthropic.com") {
+        out.push((ProviderKind::Anthropic, "Messages", https));
+        return out;
+    }
+    if h.contains("generativelanguage.googleapis.com") || h.contains("googleapis.com") {
+        out.push((
+            ProviderKind::GeminiNative,
+            "Generate",
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        ));
+        return out;
+    }
+
+    let base = if h.contains("dashscope.aliyuncs.com") {
+        "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
+    } else if h.contains("api.moonshot.cn") {
+        "https://api.moonshot.cn/v1".to_string()
+    } else if h.contains("open.bigmodel.cn") {
+        "https://open.bigmodel.cn/api/paas/v4".to_string()
+    } else if h.contains("api.groq.com") {
+        "https://api.groq.com/openai".to_string()
+    } else if h.contains("openrouter.ai") {
+        "https://openrouter.ai/api".to_string()
+    } else {
+        https
+    };
+    out.push((ProviderKind::OpenaiResponses, "Responses", base.clone()));
+    out.push((ProviderKind::OpenaiChat, "Chat", base));
+    out
+}
+
+async fn probe_url_ok(http: &reqwest::Client, url: String) -> Option<u16> {
+    let resp = tokio::time::timeout(Duration::from_secs(4), http.get(url).send())
+        .await
+        .ok()?
+        .ok()?;
+    let status = resp.status();
+    if status.is_success()
+        || status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+    {
+        Some(status.as_u16())
+    } else {
+        None
+    }
+}
+
+pub(super) async fn probe_provider_host(
+    State(state): State<AppState>,
+    Query(query): Query<ProviderProbeQuery>,
+) -> Result<Json<ProviderProbeResult>, AppError> {
+    let host = vibe_protocol::canonical_provider_host(&query.host)
+        .ok_or_else(|| anyhow::anyhow!("invalid host"))?;
+    let candidates = provider_probe_base_urls(&host);
+    let mut protocols = Vec::new();
+
+    for (kind, label, base_url) in candidates {
+        let url = match kind {
+            ProviderKind::Anthropic => format!("{}/v1/models", base_url.trim_end_matches('/')),
+            ProviderKind::OpenaiChat | ProviderKind::OpenaiResponses => {
+                if base_url.trim_end_matches('/').ends_with("/v1") {
+                    format!("{}/models", base_url.trim_end_matches('/'))
+                } else {
+                    format!("{}/v1/models", base_url.trim_end_matches('/'))
+                }
+            }
+            ProviderKind::GeminiNative => format!("{}/models", base_url.trim_end_matches('/')),
+        };
+        if let Some(status) = probe_url_ok(&state.http, url).await {
+            protocols.push(ProviderProbeProtocol {
+                kind: vibe_protocol::provider_kind_slug(kind).to_string(),
+                label: label.to_string(),
+                base_url,
+                status,
+            });
+        }
+    }
+
+    let display_name = vibe_protocol::host_to_brand_label(&host)
+        .map(str::to_string)
+        .unwrap_or_else(|| vibe_protocol::host_label_camel_fallback(&host));
+    let note = if protocols.is_empty() {
+        Some("No supported API endpoint responded successfully".to_string())
+    } else {
+        None
+    };
+    Ok(Json(ProviderProbeResult {
+        host,
+        display_name,
+        protocols,
+        note,
+    }))
 }
 
 pub(super) async fn create_provider(

@@ -9,10 +9,11 @@ import type {
   Credential,
   ModelAlias,
 } from "../../../api/client.ts";
+import { api } from "../../../api/client.ts";
 import VpIcon from "../../../components/vp-icon.vue";
 import ProviderLogo from "../../../components/provider-logo.vue";
 import { credentialPrimaryAccountLabel } from "../../../utils/providers-display.ts";
-import { normalizeBaseUrl, providerHasKind } from "../../../utils/provider-protocols.ts";
+import { providerHasKind } from "../../../utils/provider-protocols.ts";
 
 const { t } = useI18n();
 
@@ -45,6 +46,14 @@ const emit = defineEmits<{
 }>();
 
 type Phase = "paste" | "review";
+type ProviderInputForm = Omit<ProviderInput, "protocols"> & { protocols: ProviderProtocol[] };
+type ProviderDetection = {
+  kind: ProviderKind;
+  name: string;
+  host: string;
+  base_url: string;
+  protocols: ProviderProtocol[];
+};
 
 const phase = ref<Phase>("paste");
 const pasteRaw = ref("");
@@ -53,8 +62,11 @@ const parseError = ref("");
 const showAdvanced = ref(false);
 const showAliases = ref(false);
 const showCreds = ref(false);
+const probeBusy = ref(false);
+const probeError = ref("");
+const probedProvider = ref<ProviderDetection | null>(null);
 
-const form = ref<ProviderInput>(emptyForm());
+const form = ref<ProviderInputForm>(emptyForm());
 
 // ── Presets ──────────────────────────────────────────────────────────────────
 
@@ -127,7 +139,7 @@ const PROVIDER_KINDS: ProviderKind[] = [
 
 // ── Form helpers ──────────────────────────────────────────────────────────────
 
-function emptyForm(): ProviderInput {
+function emptyForm(): ProviderInputForm {
   return {
     name: "",
     group_name: null,
@@ -145,7 +157,7 @@ function emptyForm(): ProviderInput {
   };
 }
 
-function providerToForm(p: Provider): ProviderInput {
+function providerToForm(p: Provider): ProviderInputForm {
   return {
     name: p.name,
     group_name: p.group_name ?? null,
@@ -153,7 +165,7 @@ function providerToForm(p: Provider): ProviderInput {
     kind: p.kind,
     base_url: p.base_url,
     protocols: [...(p.protocols ?? [])],
-    host: p.host ?? null,
+    host: p.host ?? hostFromUrlLike(p.base_url),
     auth_ref: null,
     enabled: p.enabled,
     priority: p.priority,
@@ -170,6 +182,8 @@ watch(
     pasteRaw.value = "";
     parseNote.value = "";
     parseError.value = "";
+    probeError.value = "";
+    probedProvider.value = null;
     pendingCredentialAuthRef.value = null;
     credentialTargetId.value = null;
     showAdvanced.value = false;
@@ -182,6 +196,67 @@ watch(
       phase.value = "paste";
       form.value = emptyForm();
     }
+  },
+);
+
+watch(
+  () => form.value.host,
+  (host) => {
+    if (!host?.trim()) return;
+    if (!form.value.name.trim()) {
+      const det = detectProviderFromHostInput(host);
+      form.value.name = det.name || form.value.name;
+    }
+  },
+);
+
+let probeSeq = 0;
+watch(
+  () => form.value.host,
+  (host) => {
+    const seq = ++probeSeq;
+    probeError.value = "";
+    probedProvider.value = null;
+    const trimmed = host?.trim() ?? "";
+    if (!trimmed) return;
+    const local = detectProviderFromHostInput(trimmed);
+    if (!local.base_url) {
+      probeError.value = t("probe.invalidHost");
+      return;
+    }
+    probeBusy.value = true;
+    window.setTimeout(() => {
+      if (seq !== probeSeq) return;
+      api.providers
+        .probe(trimmed)
+        .then((res) => {
+          if (seq !== probeSeq) return;
+          if (!res.protocols.length) {
+            probeError.value = t("probe.noEndpoint");
+            return;
+          }
+          const protocols = res.protocols.map((proto) => ({
+            kind: proto.kind,
+            base_url: proto.base_url,
+            model_aliases: [...form.value.model_aliases],
+          }));
+          probedProvider.value = {
+            kind: protocols[0]?.kind ?? local.kind,
+            name: res.display_name || local.name,
+            host: res.host,
+            base_url: protocols[0]?.base_url ?? local.base_url,
+            protocols,
+          };
+          if (!form.value.name.trim()) form.value.name = res.display_name || local.name;
+        })
+        .catch(() => {
+          if (seq !== probeSeq) return;
+          probeError.value = t("probe.failed");
+        })
+        .finally(() => {
+          if (seq === probeSeq) probeBusy.value = false;
+        });
+    }, 350);
   },
 );
 
@@ -319,21 +394,69 @@ const ENV_KEY_MAP: Record<string, { kind: ProviderKind; name: string; base_url: 
   },
 };
 
-function detectFromUrl(url: string): {
-  kind: ProviderKind;
-  name: string;
-  base_url: string;
-} {
-  const lower = url.toLowerCase();
-  for (const p of WELL_KNOWN) {
-    if (lower.includes(p.urlPart)) return { kind: p.kind, name: p.name, base_url: p.base_url };
-  }
+function hostFromUrlLike(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
   try {
-    const host = new URL(url.includes("://") ? url : `https://${url}`).hostname;
-    return { kind: "openai-responses", name: host, base_url: url };
+    const url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+    if (!/^[a-z0-9.-]+$/i.test(url.hostname)) return null;
+    return url.port ? `${url.hostname}:${url.port}` : url.hostname;
   } catch {
-    return { kind: "openai-responses", name: "Custom", base_url: url };
+    return null;
   }
+}
+
+function normalizeHostInput(input: string): string | null {
+  return hostFromUrlLike(input)?.toLowerCase() ?? null;
+}
+
+function detectProviderFromHostInput(input: string): ProviderDetection {
+  const raw = input.trim();
+  if (!raw) {
+    return {
+      kind: "openai-responses",
+      name: "",
+      host: "",
+      base_url: "",
+      protocols: [],
+    };
+  }
+  const host = hostFromUrlLike(raw);
+  if (!host) {
+    return {
+      kind: "openai-responses",
+      name: raw,
+      host: raw,
+      base_url: "",
+      protocols: [],
+    };
+  }
+  const normalized = host?.toLowerCase() ?? raw.toLowerCase();
+
+  for (const p of WELL_KNOWN) {
+    if (normalized.includes(p.urlPart)) {
+      const protocols = multiProtocolForBase(p.base_url, p.kind);
+      return {
+        kind: p.kind,
+        name: p.name,
+        host: host ?? p.urlPart,
+        base_url: p.base_url,
+        protocols,
+      };
+    }
+  }
+
+  const baseUrl = `https://${host}`;
+  const kind = "openai-responses" as ProviderKind;
+  const name = host ?? "Custom";
+  const protocols = multiProtocolForBase(baseUrl, kind);
+  return {
+    kind,
+    name,
+    host: host ?? hostFromUrlLike(baseUrl) ?? "localhost",
+    base_url: baseUrl,
+    protocols,
+  };
 }
 
 function dedupeProtocols(protocols: ProviderProtocol[]): ProviderProtocol[] {
@@ -372,28 +495,30 @@ function multiProtocolForBase(
   return [{ kind: primaryKind, base_url: baseUrl, model_aliases: [...aliases] }];
 }
 
-function applyProviderDetection(
-  next: ProviderInput,
-  det: { kind: ProviderKind; name: string; base_url: string },
-) {
+function applyProviderDetection(next: ProviderInputForm, det: ProviderDetection) {
   next.name = next.name || det.name;
   next.kind = det.kind;
   next.base_url = det.base_url;
-  next.protocols = multiProtocolForBase(det.base_url, det.kind, next.model_aliases);
-  if (next.protocols[0]) next.kind = next.protocols[0].kind;
+  next.host = det.host;
+  next.protocols = det.protocols.map((proto) => ({
+    ...proto,
+    model_aliases: [...next.model_aliases],
+  }));
 }
 
-function findProvidersForDetection(det: { kind: ProviderKind; base_url: string }): Provider[] {
-  const base = normalizeBaseUrl(det.base_url);
-  return props.existingProviders.filter(
-    (p) => providerHasKind(p, det.kind) && normalizeBaseUrl(p.base_url) === base,
-  );
+function providerHostKey(provider: Pick<Provider, "host" | "base_url">): string | null {
+  return normalizeHostInput(provider.host ?? hostFromUrlLike(provider.base_url) ?? "");
 }
 
-function tryAttachCredentialToExisting(
-  key: string,
-  det: { kind: ProviderKind; name: string; base_url: string },
-): boolean {
+function findProvidersForDetection(det: ProviderDetection): Provider[] {
+  const host = normalizeHostInput(det.host) ?? "";
+  return props.existingProviders.filter((p) => {
+    if (!providerHasKind(p, det.kind)) return false;
+    return providerHostKey(p) === host;
+  });
+}
+
+function tryAttachCredentialToExisting(key: string, det: ProviderDetection): boolean {
   if (props.editTarget) {
     stashCredentialKey(key);
     form.value = providerToForm(props.editTarget);
@@ -427,16 +552,15 @@ function stashCredentialKey(raw: string) {
   pendingCredentialAuthRef.value = normalizeAuthRef(raw);
 }
 
-function detectFromKey(key: string): { kind: ProviderKind; name: string; base_url: string } | null {
+function detectFromKey(key: string): ProviderDetection | null {
   for (const m of KEY_PREFIXES) {
-    if (key.startsWith(m.prefix)) return { kind: m.kind, name: m.name, base_url: m.base_url };
+    if (key.startsWith(m.prefix)) {
+      const det = detectProviderFromHostInput(m.base_url);
+      return { ...det, kind: m.kind, name: m.name };
+    }
   }
   if (key.startsWith("sk-"))
-    return {
-      kind: "openai-responses",
-      name: "OpenAI",
-      base_url: "https://api.openai.com",
-    };
+    return { ...detectProviderFromHostInput("https://api.openai.com"), name: "OpenAI" };
   return null;
 }
 
@@ -456,9 +580,11 @@ function tryParse(raw: string): boolean {
       for (const [envKey, preset] of Object.entries(ENV_KEY_MAP)) {
         const val = obj[envKey];
         if (typeof val === "string" && val.trim()) {
-          if (tryAttachCredentialToExisting(val.trim(), preset)) return true;
+          const det = detectProviderFromHostInput(preset.base_url);
+          if (tryAttachCredentialToExisting(val.trim(), det)) return true;
           const next = emptyForm();
-          applyProviderDetection(next, preset);
+          applyProviderDetection(next, det);
+          next.name = preset.name;
           stashCredentialKey(val.trim());
           form.value = next;
           parseNote.value = t("parseNotes.detectedFromEnv", {
@@ -478,41 +604,14 @@ function tryParse(raw: string): boolean {
         const next = emptyForm();
         if (typeof obj.name === "string") next.name = obj.name.trim();
         if (typeof obj.group_name === "string") next.group_name = obj.group_name.trim() || null;
-        if (typeof obj.kind === "string" && PROVIDER_KINDS.includes(obj.kind as ProviderKind)) {
-          next.kind = obj.kind as ProviderKind;
-        }
-        if (typeof obj.base_url === "string") {
-          next.base_url = obj.base_url.trim();
-          const det = detectFromUrl(next.base_url);
-          if (!next.name) next.name = det.name;
-          if (!obj.kind) next.kind = det.kind;
-        }
+        if (typeof obj.base_url === "string") next.base_url = obj.base_url.trim();
+        if (typeof obj.host === "string") next.host = obj.host.trim() || null;
         if (typeof obj.auth_ref === "string" && obj.auth_ref.trim()) {
           stashCredentialKey(obj.auth_ref.trim());
         }
         if (typeof obj.priority === "number") next.priority = Math.round(obj.priority);
         if (typeof obj.enabled === "boolean") next.enabled = obj.enabled;
         if (typeof obj.passthrough_mode === "boolean") next.passthrough_mode = obj.passthrough_mode;
-        if (Array.isArray(obj.protocols)) {
-          const protocols: ProviderProtocol[] = [];
-          for (const row of obj.protocols) {
-            if (row && typeof row === "object") {
-              const r = row as Record<string, unknown>;
-              if (
-                typeof r.kind === "string" &&
-                PROVIDER_KINDS.includes(r.kind as ProviderKind) &&
-                typeof r.base_url === "string"
-              ) {
-                protocols.push({
-                  kind: r.kind as ProviderKind,
-                  base_url: r.base_url.trim(),
-                  model_aliases: [],
-                });
-              }
-            }
-          }
-          next.protocols = dedupeProtocols(protocols);
-        }
         if (Array.isArray(obj.model_aliases)) {
           const aliases: ModelAlias[] = [];
           for (const row of obj.model_aliases) {
@@ -527,9 +626,25 @@ function tryParse(raw: string): boolean {
           }
           if (aliases.length) next.model_aliases = aliases;
         }
-        if (!next.protocols?.length && next.base_url) {
-          next.protocols = multiProtocolForBase(next.base_url, next.kind, next.model_aliases);
+        const hostLike = next.host ?? hostFromUrlLike(next.base_url) ?? next.base_url;
+        const det = detectProviderFromHostInput(hostLike);
+        applyProviderDetection(next, det);
+        if (!next.name && typeof obj.name === "string") next.name = obj.name.trim();
+        if (typeof obj.kind === "string" && PROVIDER_KINDS.includes(obj.kind as ProviderKind)) {
+          next.kind = obj.kind as ProviderKind;
         }
+        if (typeof obj.base_url === "string" && obj.base_url.trim()) {
+          next.base_url = obj.base_url.trim();
+        }
+        if (typeof obj.host === "string" && obj.host.trim()) {
+          next.host = hostFromUrlLike(obj.host) ?? obj.host.trim();
+        }
+        next.host = next.host ?? hostFromUrlLike(next.base_url) ?? det.host;
+        next.protocols = multiProtocolForBase(
+          next.base_url || det.base_url,
+          next.kind,
+          next.model_aliases,
+        );
         form.value = next;
         parseNote.value = pendingCredentialAuthRef.value
           ? t("parseNotes.providerProfileWithKey")
@@ -548,9 +663,11 @@ function tryParse(raw: string): boolean {
     const envVal = envLineMatch[2].trim().replace(/^["']|["']$/g, "");
     const preset = ENV_KEY_MAP[envKey];
     if (preset && envVal) {
-      if (tryAttachCredentialToExisting(envVal, preset)) return true;
+      const det = detectProviderFromHostInput(preset.base_url);
+      if (tryAttachCredentialToExisting(envVal, det)) return true;
       const next = emptyForm();
-      applyProviderDetection(next, preset);
+      applyProviderDetection(next, det);
+      next.name = preset.name;
       stashCredentialKey(envVal);
       form.value = next;
       parseNote.value = t("parseNotes.detectedFromEnv", {
@@ -563,13 +680,15 @@ function tryParse(raw: string): boolean {
 
   const codexConfig = parseCodexConfig(trimmed);
   if (codexConfig) {
-    const det = detectFromUrl(codexConfig.base_url);
     const next = emptyForm();
-    applyProviderDetection(next, {
-      ...det,
-      kind: codexConfig.kind,
-      base_url: codexConfig.base_url,
-    });
+    applyProviderDetection(next, detectProviderFromHostInput(codexConfig.base_url));
+    next.kind = codexConfig.kind;
+    next.base_url = codexConfig.base_url;
+    next.protocols = multiProtocolForBase(
+      codexConfig.base_url,
+      codexConfig.kind,
+      next.model_aliases,
+    );
     const keyMatch = trimmed.match(API_KEY_RE);
     if (keyMatch) stashCredentialKey(keyMatch[0]);
     form.value = next;
@@ -584,8 +703,8 @@ function tryParse(raw: string): boolean {
   const keyMatch = trimmed.match(API_KEY_RE);
   if (urlMatch) {
     const url = urlMatch[0].replace(/[),.;，。；、\])}]+$/, "");
-    const det = detectFromUrl(url);
     const next = emptyForm();
+    const det = detectProviderFromHostInput(url);
     applyProviderDetection(next, det);
     if (keyMatch) {
       stashCredentialKey(keyMatch[0]);
@@ -645,13 +764,14 @@ async function readClipboard() {
 }
 
 function applyPreset(p: Preset) {
+  const det = detectProviderFromHostInput(p.base_url);
   form.value = {
     name: p.name,
     group_name: p.group_name,
-    kind: p.kind,
-    base_url: p.base_url,
-    protocols: multiProtocolForBase(p.base_url, p.kind),
-    host: null,
+    kind: det.kind,
+    base_url: det.base_url,
+    protocols: det.protocols,
+    host: det.host,
     auth_ref: null,
     avatar_url: null,
     enabled: true,
@@ -699,6 +819,19 @@ const title = computed(() => {
   return phase.value === "review" ? t("title.review") : t("title.add");
 });
 
+const localDetectedProvider = computed(() =>
+  detectProviderFromHostInput(form.value.host ?? form.value.base_url),
+);
+const detectedProvider = computed(() => probedProvider.value ?? localDetectedProvider.value);
+
+const primaryProtocolKind = computed(() => detectedProvider.value.kind);
+const detectedProtocols = computed(() => probedProvider.value?.protocols ?? []);
+const detectedBaseUrl = computed(() => probedProvider.value?.base_url ?? "");
+const detectedHost = computed(() => probedProvider.value?.host ?? localDetectedProvider.value.host);
+const canSave = computed(
+  () => !probeBusy.value && !!probedProvider.value && detectedProtocols.value.length > 0,
+);
+
 const hasLegacyProviderKey = computed(() => !!props.editTarget?.auth_ref?.trim());
 
 function doParseAndAdvance() {
@@ -729,22 +862,23 @@ function handleSave() {
     emit("saveCredentialOnly", credentialTargetId.value, authRef);
     return;
   }
+  const detected = probedProvider.value;
+  if (!detected) {
+    probeError.value = t("probe.required");
+    return;
+  }
   const payload: ProviderInput = {
     ...form.value,
     name: form.value.name.trim(),
     group_name: form.value.group_name?.trim() || null,
     avatar_url: form.value.avatar_url?.trim() || null,
-    base_url: form.value.base_url.trim(),
-    protocols: dedupeProtocols(
-      form.value.protocols?.length
-        ? form.value.protocols
-        : multiProtocolForBase(
-            form.value.base_url.trim(),
-            form.value.kind,
-            form.value.model_aliases,
-          ),
-    ),
-    host: form.value.host?.trim() || null,
+    kind: detected.kind,
+    base_url: detected.base_url.trim(),
+    protocols: detected.protocols.map((proto) => ({
+      ...proto,
+      model_aliases: [...form.value.model_aliases],
+    })),
+    host: detected.host,
     auth_ref: null,
     model_aliases: form.value.model_aliases
       .map((a) => ({
@@ -776,7 +910,7 @@ function handleSave() {
           <div class="flex min-w-0 flex-1 items-center gap-3">
             <ProviderLogo
               v-if="phase === 'review'"
-              :kind="form.kind"
+              :kind="primaryProtocolKind"
               :avatar-url="form.avatar_url ?? null"
               :provider-name="form.name || 'provider'"
               size-class="size-10"
@@ -905,30 +1039,43 @@ function handleSave() {
                   :placeholder="t('fields.providerName')"
                 />
               </label>
-              <!-- Protocol — visible by default, crucial for compatibility -->
-              <label>
-                <span class="mb-1 block text-xs font-medium text-slate-600">{{
-                  t("fields.protocol")
-                }}</span>
-                <select
-                  v-model="form.kind"
-                  class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20"
-                >
-                  <option v-for="k in PROVIDER_KINDS" :key="k" :value="k">
-                    {{ kindLabel(k) }}
-                  </option>
-                </select>
-              </label>
               <label class="sm:col-span-2">
                 <span class="mb-1 block text-xs font-medium text-slate-600">{{
-                  t("fields.baseUrl")
+                  t("fields.host")
                 }}</span>
                 <input
-                  v-model="form.base_url"
+                  v-model="form.host"
                   class="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm text-slate-900 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20"
-                  placeholder="https://api.example.com"
+                  placeholder="api.example.com"
                 />
               </label>
+              <div
+                class="sm:col-span-2 rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2"
+              >
+                <p class="text-xs font-medium text-slate-600">{{ t("fields.autoDetection") }}</p>
+                <div v-if="detectedProtocols.length" class="mt-2 flex flex-wrap gap-1.5">
+                  <span
+                    v-for="proto in detectedProtocols"
+                    :key="`${proto.kind}:${proto.base_url}`"
+                    class="rounded-full border border-violet-200 bg-white px-2 py-0.5 text-xs text-violet-700"
+                  >
+                    {{ kindLabel(proto.kind) }}
+                  </span>
+                </div>
+                <p
+                  v-if="detectedHost && detectedBaseUrl"
+                  class="mt-2 break-all font-mono text-[11px] text-slate-500"
+                >
+                  {{ detectedHost }} → {{ detectedBaseUrl }}
+                </p>
+                <p class="mt-1 text-xs text-slate-500">{{ t("hints.protocols") }}</p>
+                <p v-if="probeBusy" class="mt-2 text-xs text-slate-500">
+                  {{ t("probe.checking") }}
+                </p>
+                <p v-else-if="probeError" class="mt-2 text-xs text-red-600">
+                  {{ probeError }}
+                </p>
+              </div>
             </div>
           </section>
 
@@ -1171,6 +1318,8 @@ function handleSave() {
             v-if="phase === 'review'"
             type="button"
             class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 sm:flex-none"
+            :disabled="!canSave"
+            :class="!canSave ? 'cursor-not-allowed opacity-50 hover:bg-violet-600' : ''"
             @click="handleSave"
           >
             <VpIcon name="check" size-class="size-4" />
@@ -1187,6 +1336,7 @@ function handleSave() {
   "en": {
     "actions": {
       "add": "Add",
+      "addProtocol": "Add protocol",
       "addRow": "Add row",
       "cancel": "Cancel",
       "close": "Close",
@@ -1198,6 +1348,7 @@ function handleSave() {
       "pasteAgain": "Paste again",
       "readClipboard": "Read clipboard",
       "remove": "Remove",
+      "removeProtocol": "Remove protocol",
       "saveChanges": "Save changes",
       "skipManual": "Skip — fill in manually →"
     },
@@ -1207,13 +1358,16 @@ function handleSave() {
       "upstreamModel": "Upstream model ID"
     },
     "fields": {
+      "autoDetection": "Auto-detected endpoint",
       "baseUrl": "Base URL",
       "group": "Group",
       "groupPlaceholder": "e.g. official / personal",
+      "host": "Host",
       "name": "Name",
       "passthrough": "Passthrough model names",
       "priority": "Priority",
       "protocol": "Protocol",
+      "protocols": "Protocols",
       "providerEnabled": "Provider enabled",
       "providerName": "Provider name"
     },
@@ -1224,12 +1378,13 @@ function handleSave() {
       "keysUnderAfter": "on the provider card after you create this provider — never on the provider record itself.",
       "keysUnderBefore": "API keys live under",
       "legacyKeyAfter": "below.",
-      "legacyKeyBefore": "This provider has a legacy provider-level API key. Saving clears it — manage keys under"
+      "legacyKeyBefore": "This provider has a legacy provider-level API key. Saving clears it — manage keys under",
+      "protocols": "Protocol and path are inferred from the host automatically; no manual route setup is required."
     },
     "paste": {
-      "description": "Paste JSON, a base URL, or an env line. API keys are stored as credentials only — never on the provider.",
+      "description": "Paste JSON, a host, or an env line. We auto-detect the path and protocol from the host; API keys are stored as credentials only — never on the provider.",
       "pickPreset": "Or pick a preset",
-      "placeholder": "JSON config / base URL / KEY=value / URL + API key…"
+      "placeholder": "JSON config / host / KEY=value / URL + API key…"
     },
     "parseErrors": {
       "clipboardEmpty": "Clipboard is empty.",
@@ -1247,6 +1402,13 @@ function handleSave() {
       "providerProfile": "Parsed provider profile from JSON.",
       "providerProfileWithKey": "Parsed provider profile; API key will be saved as a credential."
     },
+    "probe": {
+      "checking": "Checking endpoint…",
+      "failed": "Endpoint probe failed.",
+      "invalidHost": "Invalid host.",
+      "noEndpoint": "No supported API endpoint responded successfully.",
+      "required": "Wait for endpoint detection to finish before saving."
+    },
     "sections": {
       "advanced": "Advanced",
       "aliases": "Model aliases",
@@ -1263,6 +1425,7 @@ function handleSave() {
   "zh-CN": {
     "actions": {
       "add": "添加",
+      "addProtocol": "添加协议",
       "addRow": "添加行",
       "cancel": "取消",
       "close": "关闭",
@@ -1274,6 +1437,7 @@ function handleSave() {
       "pasteAgain": "重新粘贴",
       "readClipboard": "读取剪贴板",
       "remove": "移除",
+      "removeProtocol": "移除协议",
       "saveChanges": "保存更改",
       "skipManual": "跳过，手动填写 →"
     },
@@ -1283,13 +1447,16 @@ function handleSave() {
       "upstreamModel": "上游模型 ID"
     },
     "fields": {
+      "autoDetection": "自动识别的端点",
       "baseUrl": "Base URL",
       "group": "分组",
       "groupPlaceholder": "例如 official / personal",
+      "host": "Host",
       "name": "名称",
       "passthrough": "透传模型名",
       "priority": "优先级",
       "protocol": "协议",
+      "protocols": "协议",
       "providerEnabled": "启用供应商",
       "providerName": "供应商名称"
     },
@@ -1300,12 +1467,13 @@ function handleSave() {
       "keysUnderAfter": "中管理，不会写入供应商记录。",
       "keysUnderBefore": "创建后 API Key 会在供应商卡片的",
       "legacyKeyAfter": "中管理。",
-      "legacyKeyBefore": "该供应商存在旧版 provider-level API Key。保存会清除它，请改在"
+      "legacyKeyBefore": "该供应商存在旧版 provider-level API Key。保存会清除它，请改在",
+      "protocols": "协议与路径会根据 Host 自动推断，无需手动新增路由。"
     },
     "paste": {
-      "description": "粘贴 JSON、Base URL 或 env 行。API Key 只会作为凭证保存，绝不存到供应商上。",
+      "description": "粘贴 JSON、Host 或 env 行。我们会根据 Host 自动识别路径和协议；API Key 只会作为凭证保存，绝不存到供应商上。",
       "pickPreset": "或选择预设",
-      "placeholder": "JSON 配置 / Base URL / KEY=value / URL + API Key…"
+      "placeholder": "JSON 配置 / Host / KEY=value / URL + API Key…"
     },
     "parseErrors": {
       "clipboardEmpty": "剪贴板为空。",
@@ -1322,6 +1490,13 @@ function handleSave() {
       "detectedFromUrlKey": "从 URL + Key 识别到 {name}；Key 会保存为凭证。",
       "providerProfile": "已从 JSON 解析供应商配置。",
       "providerProfileWithKey": "已解析供应商配置；API Key 会保存为凭证。"
+    },
+    "probe": {
+      "checking": "正在检测端点…",
+      "failed": "端点检测失败。",
+      "invalidHost": "Host 无效。",
+      "noEndpoint": "没有检测到可用的 API 端点。",
+      "required": "请等待端点检测完成后再保存。"
     },
     "sections": {
       "advanced": "高级",
