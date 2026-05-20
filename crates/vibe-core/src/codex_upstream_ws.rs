@@ -81,15 +81,6 @@ pub async fn try_forward_official_codex_ws(
         None,
         &prepared.requested_model,
     );
-    forward::persist_request_log_placeholder(
-        &state,
-        &prepared.log_id,
-        prepared.started_at,
-        &prepared.app,
-        &prepared.log_ctx,
-        None,
-        &prepared.requested_model,
-    );
     let upstream_id = prepared
         .credential_id
         .as_deref()

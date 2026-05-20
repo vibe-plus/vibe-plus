@@ -955,7 +955,11 @@ fn append_summary_to_output_item_done_frame(frame_json: &mut String, text: &str)
 
 fn append_summary_to_message_item(message: &mut Value, text: &str) -> Option<()> {
     let content = message.get_mut("content")?.as_array_mut()?;
-    let Some(part) = content.iter_mut().rev().find(|part| is_text_content_part(part)) else {
+    let Some(part) = content
+        .iter_mut()
+        .rev()
+        .find(|part| is_text_content_part(part))
+    else {
         return None;
     };
     append_summary_to_output_text_part(part, text)
@@ -1774,7 +1778,9 @@ mod tests {
             "gpt-5.5".into(),
         );
         let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}"#;
-        let out = acc.maybe_append_to_frame(completed, 1_000).expect("summary");
+        let out = acc
+            .maybe_append_to_frame(completed, 1_000)
+            .expect("summary");
         let text = serde_json::from_str::<Value>(&out)
             .unwrap()
             .pointer("/response/output/0/content/0/text")
@@ -1807,7 +1813,9 @@ mod tests {
             Some("thread-1".into()),
             "gpt-5.5".into(),
         );
-        first.maybe_append_to_frame(completed, 1_000).expect("first summary");
+        first
+            .maybe_append_to_frame(completed, 1_000)
+            .expect("first summary");
 
         let mut second = SummaryAccumulator::new_for_turn(
             CodexSummaryConfig::default(),
@@ -2266,7 +2274,9 @@ mod tests {
             "expected completed response/message finalization to include the summary suffix:\n{combined}"
         );
         assert!(
-            combined.contains("speed") && combined.contains("in 100") && combined.contains("out 20"),
+            combined.contains("speed")
+                && combined.contains("in 100")
+                && combined.contains("out 20"),
             "summary text missing from stream:\n{combined}"
         );
     }

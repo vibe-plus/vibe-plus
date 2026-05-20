@@ -11,10 +11,12 @@ use std::sync::{Arc, Mutex};
 
 pub mod body_store;
 pub mod dao;
+pub mod gateway_maintenance;
 pub mod maintenance;
 
 pub use body_store::*;
 pub use dao::*;
+pub use gateway_maintenance::*;
 pub use maintenance::*;
 
 #[derive(Clone)]
@@ -149,6 +151,9 @@ impl Db {
             )),
             M::up(include_str!(
                 "../migrations/028_upstream_attempt_network_target.sql"
+            )),
+            M::up(include_str!(
+                "../migrations/029_gateway_maintenance_tasks.sql"
             )),
         ])
     }

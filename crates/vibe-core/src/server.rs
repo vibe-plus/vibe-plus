@@ -236,7 +236,9 @@ async fn observability_unavailable() -> impl IntoResponse {
 
 pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "vibe-core listening");
+    let listening = vibe_i18n::text_env_args("gateway-listening", &[("addr", &addr.to_string())]);
+    tracing::info!(%addr, "{listening}");
+    state.spawn_deferred_maintenance();
     axum::serve(listener, router(state)).await?;
     Ok(())
 }

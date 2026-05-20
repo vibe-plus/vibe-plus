@@ -22,6 +22,7 @@ pub mod codex_visual;
 pub mod codex_wham_usage;
 pub mod config;
 pub mod forward;
+pub mod gateway_maintenance;
 pub mod model_defaults;
 pub mod oauth_identity;
 pub mod paths;

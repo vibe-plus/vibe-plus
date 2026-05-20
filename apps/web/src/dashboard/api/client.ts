@@ -419,6 +419,23 @@ export interface CodexThreadMeta {
   preview: string;
 }
 
+export type ObservabilityConversationSource = "codex" | "claude";
+export type ObservabilityConversationStatus = "running" | "failed" | "ok" | "no-data";
+
+export interface ObservabilityConversation {
+  source: ObservabilityConversationSource;
+  conversation_id: string;
+  title: string;
+  project_path: string | null;
+  project_name: string | null;
+  updated_at: number;
+  status: ObservabilityConversationStatus;
+  request_count: number;
+  attempt_count: number;
+  latest_request_id: string | null;
+  preview: string;
+}
+
 export type UpstreamAttemptOutcome =
   | import("../../../../../crates/vibe-protocol/packages/protocol/types/UpstreamAttemptOutcome.ts").UpstreamAttemptOutcome
   // Legacy observability rows kept for backward-compatible rendering.
@@ -1075,6 +1092,7 @@ export const api = {
       const qs = params.toString();
       return req<CodexThreadMeta[]>(`/_vp/observability/codex-threads${qs ? `?${qs}` : ""}`);
     },
+    conversations: () => req<ObservabilityConversation[]>("/_vp/observability/conversations"),
   },
   usage: (hours = 24) => req<UsageSummary>(`/_vp/usage/summary?hours=${hours}`),
   stats: (hours = 24) => req<DashboardStats>(`/_vp/stats/dashboard?hours=${hours}`),

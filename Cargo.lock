@@ -4346,8 +4346,10 @@ version = "0.0.6"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

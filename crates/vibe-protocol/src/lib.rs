@@ -1272,6 +1272,49 @@ pub struct CodexThreadMeta {
     pub preview: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/ObservabilityConversationSource.ts"
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservabilityConversationSource {
+    Codex,
+    Claude,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/ObservabilityConversationStatus.ts"
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservabilityConversationStatus {
+    Running,
+    Failed,
+    Ok,
+    NoData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/ObservabilityConversation.ts"
+)]
+pub struct ObservabilityConversation {
+    pub source: ObservabilityConversationSource,
+    pub conversation_id: String,
+    pub title: String,
+    pub project_path: Option<String>,
+    pub project_name: Option<String>,
+    pub updated_at: i64,
+    pub status: ObservabilityConversationStatus,
+    pub request_count: i64,
+    pub attempt_count: i64,
+    pub latest_request_id: Option<String>,
+    pub preview: String,
+}
+
 /// Enhanced stats for the dashboard.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../packages/protocol/types/DashboardStats.ts")]

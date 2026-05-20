@@ -560,9 +560,6 @@ impl AppState {
         port: u16,
         observability: Option<ObservabilityStore>,
     ) -> Result<Self> {
-        if let Some(observability) = observability.as_ref() {
-            observability.migrate_from_legacy(&db)?;
-        }
         let plugins = if let Some(observability) = observability.as_ref() {
             PluginRegistry::new().with_plugin(vibe_observability::ObservabilityPlugin::from_store(
                 observability.clone(),
@@ -599,6 +596,20 @@ impl AppState {
             plugins,
             observability,
         })
+    }
+
+    /// Schedule Codex unify, observability migration, body migration, and prune
+    /// after the HTTP listener is already accepting traffic.
+    pub fn spawn_deferred_maintenance(&self) {
+        let Ok(legacy_db_path) = crate::paths::db_path() else {
+            tracing::warn!("deferred maintenance skipped: cannot resolve db path");
+            return;
+        };
+        crate::gateway_maintenance::spawn_deferred_maintenance(
+            self.db.clone(),
+            self.observability.clone(),
+            legacy_db_path,
+        );
     }
 
     pub fn codex_summary_config(&self) -> CodexSummaryConfig {
