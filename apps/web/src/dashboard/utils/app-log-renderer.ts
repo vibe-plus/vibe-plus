@@ -11,6 +11,12 @@ export type AppLogToken = EntityToken;
 export interface RenderedAppLog {
   title: AppLogToken[];
   detail: string | null;
+  reason: string | null;
+  hint: string | null;
+  /** Machine code emitted by the backend (e.g. `upstream_auth_failed`), surfaced
+   *  as a faint chip so operators can grep it / report it. `null` for events
+   *  that don't carry a structured reason. */
+  code: string | null;
 }
 
 type PayloadObject = Record<string, JsonValue | undefined>;
@@ -70,6 +76,40 @@ function actorSuffix(payload: PayloadObject | null, t: ComposerTranslation): str
   return "";
 }
 
+/** Reason codes the gateway emits on `credential.auto_disabled`. Kept in sync
+ *  with `CredentialDisableReason` in `crates/vibe-core/src/forward/mod.rs`. */
+const KNOWN_DISABLE_REASON_CODES = new Set([
+  "upstream_auth_failed",
+  "upstream_forbidden",
+  "upstream_http_error",
+]);
+
+function autoDisableExplanation(
+  payload: PayloadObject | null,
+  t: ComposerTranslation,
+): { reason: string | null; hint: string | null; code: string | null } {
+  const code = stringValue(payload?.reason_code);
+  if (code && KNOWN_DISABLE_REASON_CODES.has(code)) {
+    const params = objectValue(payload?.reason_params) ?? {};
+    return {
+      reason: t(`events.autoDisable.reason.${code}`, params as Record<string, unknown>),
+      hint: t(`events.autoDisable.hint.${code}`),
+      code,
+    };
+  }
+  // Legacy payloads (pre-structured-reason): surface the raw string so nothing
+  // gets hidden, but flag it as unknown so the operator can spot it.
+  const rawReason = stringValue(payload?.reason);
+  if (rawReason) {
+    return {
+      reason: t("events.autoDisable.reason.unknown", { detail: rawReason }),
+      hint: t("events.autoDisable.hint.unknown"),
+      code: code ?? null,
+    };
+  }
+  return { reason: null, hint: null, code: code ?? null };
+}
+
 function credentialChangeDetail(
   payload: PayloadObject | null,
   fallback: string | null,
@@ -84,6 +124,7 @@ function credentialChangeDetail(
 }
 
 function legacyCircuitPayload(event: AppLogEvent): PayloadObject | null {
+  if (objectValue(event.payload)) return null;
   const match = /^Circuit (opened|recovered|reset): (.+)$/.exec(event.message);
   if (!match) return null;
   const failures = event.detail ? /^(\d+) consecutive failures$/.exec(event.detail)?.[1] : null;
@@ -159,17 +200,23 @@ function renderCircuitEvent(
                     minutes: timeoutMins,
                   }),
             ]);
-      return { title, detail: event.detail };
+      return { title, detail: event.detail, reason: null, hint: null, code: null };
     }
     case "circuit.closed":
       return {
         title: sentence(["“", subjectToken, "” ", t("events.circuitRecovered")]),
         detail: event.detail,
+        reason: null,
+        hint: null,
+        code: null,
       };
     case "circuit.reset":
       return {
         title: sentence(["“", subjectToken, "” ", t("events.circuitReset")]),
         detail: event.detail,
+        reason: null,
+        hint: null,
+        code: null,
       };
     default:
       return null;
@@ -196,6 +243,9 @@ function renderProviderEvent(
   return {
     title: sentence([t("events.provider"), " “", providerToken, "” ", t(actionKey)]),
     detail: event.detail,
+    reason: null,
+    hint: null,
+    code: null,
   };
 }
 
@@ -232,7 +282,10 @@ function renderCredentialEvent(
       : event.event_type === "credential.updated" && enabledTo === false
         ? "events.credentialDisabled"
         : actionKey;
-  const suffix = actorSuffix(payload, t);
+  const isAutoDisabled = event.event_type === "credential.auto_disabled";
+  // For auto-disable, "已自动禁用 / was auto-disabled" already conveys the actor;
+  // the actor suffix becomes redundant noise.
+  const suffix = isAutoDisabled ? "" : actorSuffix(payload, t);
   const title = providerToken
     ? sentence([
         t("events.provider"),
@@ -254,7 +307,23 @@ function renderCredentialEvent(
         t(effectiveActionKey),
         suffix,
       ]);
-  return { title, detail: credentialChangeDetail(payload, event.detail, t) };
+  if (isAutoDisabled) {
+    const explanation = autoDisableExplanation(payload, t);
+    return {
+      title,
+      detail: explanation.reason || explanation.hint ? null : event.detail,
+      reason: explanation.reason,
+      hint: explanation.hint,
+      code: explanation.code,
+    };
+  }
+  return {
+    title,
+    detail: credentialChangeDetail(payload, event.detail, t),
+    reason: null,
+    hint: null,
+    code: null,
+  };
 }
 
 export function renderAppLogEvent(
@@ -270,5 +339,8 @@ export function renderAppLogEvent(
   return {
     title: [{ type: "text", text: event.message }],
     detail: event.detail,
+    reason: null,
+    hint: null,
+    code: null,
   };
 }

@@ -78,6 +78,20 @@ pub(crate) fn emit_circuit_event(
         .or_else(|| provider.as_ref().map(|p| p.name.as_str()))
         .unwrap_or(cb_key);
 
+    let reason_code = match &change {
+        CircuitStateChange::Opened { .. } => Some("circuit_opened"),
+        CircuitStateChange::Closed | CircuitStateChange::ManualReset => None,
+    };
+    let reason_params = match &change {
+        CircuitStateChange::Opened {
+            consecutive_failures,
+        } => serde_json::json!({
+            "consecutive_failures": consecutive_failures,
+            "open_timeout_secs": state.cb.open_remaining_secs(cb_key),
+        }),
+        CircuitStateChange::Closed | CircuitStateChange::ManualReset => serde_json::Value::Null,
+    };
+
     let (level, event_type, message, detail, change_payload) = match change {
         CircuitStateChange::Opened {
             consecutive_failures,
@@ -85,7 +99,7 @@ pub(crate) fn emit_circuit_event(
             AppLogLevel::Warn,
             "circuit.opened",
             format!("Circuit opened: {display_name}"),
-            Some(format!("{consecutive_failures} consecutive failures")),
+            None,
             serde_json::json!({
                 "consecutive_failures": consecutive_failures,
                 "open_timeout_secs": state.cb.open_remaining_secs(cb_key),
@@ -115,6 +129,8 @@ pub(crate) fn emit_circuit_event(
         event_type: event_type.to_string(),
         payload: serde_json::json!({
             "schema": 1,
+            "reason_code": reason_code,
+            "reason_params": reason_params,
             "circuit": change_payload,
             "subject": {
                 "kind": entity_kind,
@@ -796,7 +812,8 @@ pub(crate) async fn prepare_forward_once(
     let sticky_route = sticky_key
         .as_deref()
         .and_then(|k| state.get_codex_sticky_route(k, CODEX_STICKY_ROUTE_TTL));
-    let expanded_picks = selector::apply_sticky_priority(sticky_route.as_ref(), expanded_picks);
+    let expanded_picks =
+        selector::apply_sticky_priority(sticky_route.as_ref(), expanded_picks, &state.cb);
 
     if expanded_picks.is_empty() {
         return Err(PreparedForwardError::NoUsableCredentials {
@@ -1272,18 +1289,78 @@ pub(crate) fn fire_credential_failure(
     });
 }
 
+/// Why the gateway auto-disabled a credential.
+///
+/// The discriminant (`code`) is the only field the dashboard reads to pick a
+/// localized message — no string parsing. `params` becomes `payload.reason_params`,
+/// which feeds the i18n template (e.g. `{status}`). `human()` is the fallback
+/// stored in the DB so anything that reads credentials directly still sees a
+/// meaningful sentence.
+#[derive(Debug, Clone)]
+pub(crate) enum CredentialDisableReason {
+    UpstreamAuthFailed { status: u16, provider_id: String },
+    UpstreamForbidden { status: u16, provider_id: String },
+    UpstreamHttpError { status: u16, provider_id: String },
+}
+
+impl CredentialDisableReason {
+    pub(crate) fn from_upstream_status(status: u16, provider_id: impl Into<String>) -> Self {
+        let provider_id = provider_id.into();
+        match status {
+            401 => Self::UpstreamAuthFailed { status, provider_id },
+            403 => Self::UpstreamForbidden { status, provider_id },
+            _ => Self::UpstreamHttpError { status, provider_id },
+        }
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::UpstreamAuthFailed { .. } => "upstream_auth_failed",
+            Self::UpstreamForbidden { .. } => "upstream_forbidden",
+            Self::UpstreamHttpError { .. } => "upstream_http_error",
+        }
+    }
+
+    pub(crate) fn params(&self) -> serde_json::Value {
+        match self {
+            Self::UpstreamAuthFailed { status, provider_id }
+            | Self::UpstreamForbidden { status, provider_id }
+            | Self::UpstreamHttpError { status, provider_id } => serde_json::json!({
+                "status": status,
+                "provider_id": provider_id,
+            }),
+        }
+    }
+
+    pub(crate) fn human(&self) -> String {
+        match self {
+            Self::UpstreamAuthFailed { status, provider_id }
+            | Self::UpstreamForbidden { status, provider_id }
+            | Self::UpstreamHttpError { status, provider_id } => {
+                format!("HTTP {status} from {provider_id}")
+            }
+        }
+    }
+}
+
 /// Auto-disable a credential after a fatal auth error (401/403). The credential
 /// stays disabled until an operator manually re-enables it from the dashboard —
 /// there is no auto-recovery probe. We deliberately do not trip the circuit
 /// breaker on top: the breaker is for transient upstream pain, and a key that
 /// fails auth is gone, not slow.
-pub(crate) fn fire_credential_disable(state: &AppState, credential_id: String, reason: String) {
+pub(crate) fn fire_credential_disable(
+    state: &AppState,
+    credential_id: String,
+    reason: CredentialDisableReason,
+) {
     let state = state.clone();
     let db = state.db.clone();
     let id_for_log = credential_id.clone();
-    let reason_for_log = reason.clone();
+    let reason_text = reason.human();
+    let reason_code = reason.code();
+    let reason_params = reason.params();
     tokio::task::spawn_blocking(move || {
-        match db.credential_disable_with_reason(&credential_id, &reason) {
+        match db.credential_disable_with_reason(&credential_id, &reason_text) {
             Ok(true) => {
                 let credential = db.credential_get(&credential_id).ok().flatten();
                 let provider = credential
@@ -1296,7 +1373,9 @@ pub(crate) fn fire_credential_disable(state: &AppState, credential_id: String, r
                 let mut payload = serde_json::json!({
                     "schema": 1,
                     "actor": { "type": "system", "source": "gateway" },
-                    "reason": reason_for_log.clone(),
+                    "reason": reason_text.clone(),
+                    "reason_code": reason_code,
+                    "reason_params": reason_params,
                     "credential": credential.as_ref().map(|c| serde_json::json!({
                         "id": c.id,
                         "label": c.label,
@@ -1328,13 +1407,14 @@ pub(crate) fn fire_credential_disable(state: &AppState, credential_id: String, r
                     payload,
                     category: "credential".to_string(),
                     message: format!("Credential auto-disabled by gateway: {credential_label}"),
-                    detail: Some(reason_for_log.clone()),
+                    detail: Some(reason_text.clone()),
                 };
                 state.app_logs.push(ev.clone());
                 state.plugins.emit(GatewayEvent::AppLog(ev));
                 tracing::warn!(
                     credential_id = %id_for_log,
-                    reason = %reason_for_log,
+                    reason_code = %reason_code,
+                    reason = %reason_text,
                     "credential auto-disabled (manual re-enable required)"
                 );
             }
@@ -1548,7 +1628,8 @@ pub async fn forward(
     let sticky_route = sticky_key
         .as_deref()
         .and_then(|k| state.get_codex_sticky_route(k, CODEX_STICKY_ROUTE_TTL));
-    let expanded_picks = selector::apply_sticky_priority(sticky_route.as_ref(), expanded_picks);
+    let expanded_picks =
+        selector::apply_sticky_priority(sticky_route.as_ref(), expanded_picks, &state.cb);
 
     // Router found candidate providers but no credential survived expansion —
     // i.e. every credential on every matching provider is `enabled=0` (and
