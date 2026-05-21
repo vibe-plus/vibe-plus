@@ -15,6 +15,7 @@ const { t } = useI18n();
 import CredentialRow from "./provider-credential-row.vue";
 import UiBadge from "../../../components/ui/badge.vue";
 import UiButton from "../../../components/ui/button.vue";
+import { formatDurationMs } from "../../../utils/format-duration.ts";
 import { primaryPlanPercent } from "../../../utils/providers-display.ts";
 import { brandHintFromHost } from "../../../utils/brand-hint.ts";
 import {
@@ -208,7 +209,7 @@ function speedtestLabel(provider: Provider): string | null {
   const result = provider.last_speedtest;
   if (!result) return t("speed.untested");
   if (result.error) return null;
-  const latency = result.latency_ms == null ? "—" : `${result.latency_ms}ms`;
+  const latency = result.latency_ms == null ? "—" : formatDurationMs(result.latency_ms);
   const status = result.status == null ? "" : ` · HTTP ${result.status}`;
   return `${latency}${status}`;
 }
@@ -314,7 +315,7 @@ const providerMetaItems = computed(() => {
 
 function formatProviderLatency(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return t("providerStats.noLatency");
-  return t("providerStats.avgLatency", { ms: Math.round(ms) });
+  return t("providerStats.avgLatency", { duration: formatDurationMs(ms) });
 }
 
 function formatProviderSuccess(rate: number | null | undefined): string {
@@ -599,7 +600,7 @@ const providerCooldownTag = computed(() => {
       "upstreams": "{enabled}/{total} upstreams"
     },
     "providerStats": {
-      "avgLatency": "{ms}ms avg",
+      "avgLatency": "{duration} avg",
       "noLatency": "no latency",
       "noRequests": "no traffic",
       "noSuccess": "no success rate",
@@ -691,7 +692,7 @@ const providerCooldownTag = computed(() => {
       "upstreams": "{enabled}/{total} 个上游"
     },
     "providerStats": {
-      "avgLatency": "平均 {ms}ms",
+      "avgLatency": "平均 {duration}",
       "noLatency": "暂无延迟",
       "noRequests": "暂无流量",
       "noSuccess": "暂无成功率",

@@ -1,6 +1,7 @@
 import { isRef, watch } from "vue";
 import { createI18n } from "vue-i18n";
 import { useUiLanguage, type UiLanguage } from "./composables/use-ui-language.ts";
+import { observabilityMessages } from "./features/observability/messages.ts";
 
 function setGlobalI18nLocale(next: UiLanguage) {
   const locale = i18n.global.locale;
@@ -23,6 +24,7 @@ export const i18n = createI18n<[DashboardMessageSchema], "en" | "zh-CN" | "zh">(
           "All providers are temporarily unavailable because the circuit breaker is open. Try resetting one in Providers or wait for recovery.",
         requestFailed: "Request failed (HTTP {status}).",
       },
+      ...observabilityMessages.en,
     },
     "zh-CN": {
       errors: {
@@ -30,6 +32,7 @@ export const i18n = createI18n<[DashboardMessageSchema], "en" | "zh-CN" | "zh">(
           "所有供应商目前都被熔断器暂时阻断。请在 Providers 中重置某个供应商，或稍后重试。",
         requestFailed: "请求失败（HTTP {status}）。",
       },
+      ...observabilityMessages["zh-CN"],
     },
     zh: {
       errors: {
@@ -37,6 +40,7 @@ export const i18n = createI18n<[DashboardMessageSchema], "en" | "zh-CN" | "zh">(
           "所有供应商目前都被熔断器暂时阻断。请在 Providers 中重置某个供应商，或稍后重试。",
         requestFailed: "请求失败（HTTP {status}）。",
       },
+      ...observabilityMessages["zh-CN"],
     },
   },
   missingWarn: import.meta.env.DEV,

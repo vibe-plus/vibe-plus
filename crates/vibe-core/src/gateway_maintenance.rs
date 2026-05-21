@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use vibe_db::{Db, GatewayMaintenanceTaskRecord, ShortLogRetentionPolicy};
-use vibe_observability::ObservabilityStore;
+use vibe_db::{Db, GatewayMaintenanceTaskRecord};
+use vibe_observability::{ObservabilityStore, RetentionPolicy};
 use vibe_protocol::{CodexHistorySummary, CodexHistoryUnifyInput};
 
 use crate::codex_history;
@@ -282,9 +282,8 @@ fn prune_due(record: Option<GatewayMaintenanceTaskRecord>) -> bool {
 }
 
 fn run_prune_if_due(db: &Db, observability: Option<&ObservabilityStore>) {
-    let retention = ShortLogRetentionPolicy::default();
     if prune_due(db.maintenance_task_get(TASK_SHORT_LOG_PRUNE).ok().flatten()) {
-        match db.prune_short_logs(&retention) {
+        match db.prune_short_logs(&vibe_db::ShortLogRetentionPolicy::default()) {
             Ok(stats) => {
                 let result = format!(
                     "req={} attempt={} app={} body_files={}",
@@ -306,7 +305,7 @@ fn run_prune_if_due(db: &Db, observability: Option<&ObservabilityStore>) {
     }
     if let Some(obs) = observability {
         if prune_due(db.maintenance_task_get(TASK_OBS_PRUNE).ok().flatten()) {
-            match obs.prune(&retention) {
+            match obs.prune(&RetentionPolicy::default()) {
                 Ok(stats) => {
                     let result = format!(
                         "req={} attempt={} app={}",

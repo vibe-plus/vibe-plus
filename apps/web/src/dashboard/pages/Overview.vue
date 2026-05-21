@@ -37,6 +37,7 @@ import {
   workspaceViewFromQuery,
   type WorkspaceView,
 } from "../utils/workspace-view.ts";
+import { formatDurationMs } from "../utils/format-duration.ts";
 import { providerSuccessScore, providerSuccessScoreOrRaw } from "../utils/provider-health-score.ts";
 import {
   buildProviderRowTags,
@@ -781,7 +782,7 @@ function pct(n: number) {
   return `${(n * 100).toFixed(1)}%`;
 }
 function fmt(ms: number | null) {
-  return ms != null ? `${ms}ms` : "—";
+  return formatDurationMs(ms);
 }
 
 function providerCircuitState(row: DashboardStats["per_provider"][number]): string {

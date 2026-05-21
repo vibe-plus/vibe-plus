@@ -118,11 +118,15 @@ fn slim_one(
     total: &mut SlimSummary,
 ) -> Result<()> {
     let db = if is_observability {
-        Db::open_observability(path)?
+        let store = vibe_observability::ObservabilityStore::open(path)?;
+        return store.with_legacy_db(|db| slim_open_db(db, path, args, total));
     } else {
         Db::open(path)?
     };
+    slim_open_db(&db, path, args, total)
+}
 
+fn slim_open_db(db: &Db, path: &Path, args: &SlimArgs, total: &mut SlimSummary) -> Result<()> {
     let stats = db.slim_stats()?;
     println!(
         "  inline candidates: {} rows / {} (request_logs: {} rows, attempts: {} rows)",

@@ -13,6 +13,7 @@ import ProviderCard from "./provider-card.vue";
 import UiBadge from "../../../components/ui/badge.vue";
 import UiCard from "../../../components/ui/card.vue";
 import type { ProviderSectionView } from "../types.ts";
+import { formatDurationMs } from "../../../utils/format-duration.ts";
 
 const { t } = useI18n();
 
@@ -58,7 +59,9 @@ function tokensPerSec(providerId: string): number | null | undefined {
 }
 
 function fastestLabel(value: number | null): string {
-  return value == null ? t("summary.noSpeed") : t("summary.bestLatency", { ms: Math.round(value) });
+  return value == null
+    ? t("summary.noSpeed")
+    : t("summary.bestLatency", { duration: formatDurationMs(value) });
 }
 </script>
 
@@ -174,7 +177,7 @@ function fastestLabel(value: number | null): string {
   "en": {
     "summary": {
       "activeEndpoints": "{enabled}/{total} active",
-      "bestLatency": "{ms}ms best",
+      "bestLatency": "{duration} best",
       "blockedCredentials": "{count} blocked creds",
       "credentials": "{available}/{enabled} creds",
       "models": "{count} models",
@@ -191,7 +194,7 @@ function fastestLabel(value: number | null): string {
   "zh-CN": {
     "summary": {
       "activeEndpoints": "{enabled}/{total} 已启用",
-      "bestLatency": "最快 {ms}ms",
+      "bestLatency": "最快 {duration}",
       "blockedCredentials": "{count} 个凭证受阻",
       "credentials": "{available}/{enabled} 凭证可用",
       "models": "{count} 个模型",

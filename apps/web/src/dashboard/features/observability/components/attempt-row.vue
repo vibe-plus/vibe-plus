@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { RealtimeAttempt, UpstreamAttemptLog } from "../../api/client.ts";
-import Badge from "../ui/badge.vue";
-import EntityChip from "../ui/entity-chip.vue";
-import { protocolWireLetter } from "../../utils/protocol-label.ts";
-import { credentialPrimaryAccountLabel } from "../../utils/providers-display.ts";
+import type { RealtimeAttempt, UpstreamAttemptLog } from "../../../api/client.ts";
+import Badge from "../../../components/ui/badge.vue";
+import EntityChip from "../../../components/ui/entity-chip.vue";
+import { formatDurationMs } from "../../../utils/format-duration.ts";
+import { protocolWireLetter } from "../../../utils/protocol-label.ts";
+import { credentialPrimaryAccountLabel } from "../../../utils/providers-display.ts";
 
 const props = defineProps<{
   attempt: UpstreamAttemptLog | RealtimeAttempt;
@@ -180,21 +181,21 @@ const timelineSteps = computed<TimelineStep[]>(() => {
     {
       key: "upstreamFirstByte",
       label: lifecycleLabel("upstreamFirstByte"),
-      value: formatMs(firstByte),
+      value: formatDurationMs(firstByte),
       active: firstByte != null,
       tone: firstByte != null ? "ok" : "muted",
     },
     {
       key: "clientFirstWrite",
       label: lifecycleLabel("clientFirstWrite"),
-      value: formatMs(clientFirstWrite),
+      value: formatDurationMs(clientFirstWrite),
       active: clientFirstWrite != null,
       tone: clientFirstWrite != null ? "ok" : "muted",
     },
     {
       key: "complete",
       label: lifecycleLabel(terminalStepKey.value),
-      value: formatMs(latencyMs.value),
+      value: formatDurationMs(latencyMs.value),
       active: finished,
       tone: attemptOutcome.value === "success" ? "ok" : attemptOutcome.value ? "bad" : "muted",
     },
@@ -259,11 +260,12 @@ const currentTimelineLabel = computed(() => {
 });
 
 const currentTimelineValue = computed(() => {
-  if (currentTimelineIndex.value >= 3) return formatMs(latencyMs.value);
+  if (currentTimelineIndex.value >= 3) return formatDurationMs(latencyMs.value);
   if (currentTimelineIndex.value >= 2)
-    return formatMs(clientFirstWriteMs.value ?? firstTokenMs.value);
-  if (currentTimelineIndex.value >= 1) return formatMs(firstByteMs.value ?? firstTokenMs.value);
-  return formatMs(0);
+    return formatDurationMs(clientFirstWriteMs.value ?? firstTokenMs.value);
+  if (currentTimelineIndex.value >= 1)
+    return formatDurationMs(firstByteMs.value ?? firstTokenMs.value);
+  return formatDurationMs(0);
 });
 
 function formatBytes(b: number): string {
@@ -271,12 +273,6 @@ function formatBytes(b: number): string {
   if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
   if (b >= 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${b} B`;
-}
-
-function formatMs(ms: number | null): string {
-  if (ms == null) return "—";
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${ms}ms`;
 }
 
 function formatTime(ts: number): string {
@@ -315,7 +311,7 @@ function formatTime(ts: number): string {
     <span class="text-vp-muted">
       HTTP {{ attempt.upstream_http_status ?? attempt.status_code ?? "—" }}
     </span>
-    <span class="text-vp-muted">{{ formatMs(latencyMs) }}</span>
+    <span class="text-vp-muted">{{ formatDurationMs(latencyMs) }}</span>
     <span class="text-vp-muted">
       {{ byteLabels?.upstream ?? "upstream in" }} {{ formatBytes(upstreamBytes) }} ·
       {{ byteLabels?.client ?? "client out" }} {{ formatBytes(clientBytes) }}
