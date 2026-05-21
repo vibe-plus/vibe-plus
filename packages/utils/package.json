@@ -1,6 +1,6 @@
 {
   "name": "utils",
-  "version": "0.0.2",
+  "version": "0.0.7",
   "description": "Shared utilities for vibe-plus.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "cheezone <cheezone@163.com>",
