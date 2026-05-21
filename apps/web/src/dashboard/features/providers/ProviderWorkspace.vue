@@ -17,6 +17,7 @@ import {
 } from "../../api/client.ts";
 import { CLIENT_TOOLS, type ClientToolId, type ClientToolInfo } from "../../utils/client-tools.ts";
 import { formatApiError } from "../../utils/api-error.ts";
+import { formatDurationMs } from "../../utils/format-duration.ts";
 import type { ProviderSectionView } from "./types.ts";
 import { useRoute, useRouter } from "vue-router";
 import { hintsFromAuthJsonTokens } from "../../utils/codex-oauth-hints.ts";
@@ -81,7 +82,7 @@ const editProviderSpeedLabel = computed(() => {
   const result = editProviderLive.value?.last_speedtest;
   if (!result) return t("speed.notTested");
   if (result.error) return result.error;
-  return result.latency_ms == null ? t("speed.tested") : `${result.latency_ms}ms`;
+  return result.latency_ms == null ? t("speed.tested") : formatDurationMs(result.latency_ms);
 });
 
 // Credential management (list loads by default; see load())
@@ -492,10 +493,10 @@ const providerSections = computed<ProviderSectionView[]>(() =>
       native: t("section.native"),
       noCredential: t("section.noCredential"),
       notTested: t("section.notTested"),
-      fastest: (ms) => t("section.fastest", { ms }),
+      fastest: (ms) => t("section.fastest", { duration: formatDurationMs(ms) }),
       success: (pct) => t("section.success", { pct }),
       successUnknown: t("section.successUnknown"),
-      first: (ms) => t("section.first", { ms }),
+      first: (ms) => t("section.first", { duration: formatDurationMs(ms) }),
       tokensPerSecond: (value) => t("section.tokensPerSecond", { value }),
     },
     fallbackGroupName: t("groups.ungrouped"),
@@ -1016,8 +1017,8 @@ watch(
     "section": {
       "bridge": "bridge",
       "credentialShort": "cred",
-      "fastest": "{ms}ms best",
-      "first": "{ms}ms first",
+      "fastest": "{duration} best",
+      "first": "{duration} first",
       "models": "models",
       "native": "native",
       "noCredential": "no cred",
@@ -1067,8 +1068,8 @@ watch(
     "section": {
       "bridge": "桥接",
       "credentialShort": "凭证",
-      "fastest": "最快 {ms}ms",
-      "first": "首响 {ms}ms",
+      "fastest": "最快 {duration}",
+      "first": "首响 {duration}",
       "models": "模型",
       "native": "原生",
       "noCredential": "无凭证",

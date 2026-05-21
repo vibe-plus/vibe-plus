@@ -33,7 +33,7 @@ export const router = createRouter({
         {
           path: "observability",
           name: "observability",
-          component: () => import("./dashboard/pages/Observability.vue"),
+          component: () => import("./dashboard/features/observability/Observability.vue"),
         },
         { path: "routes", redirect: "/ui/providers" },
         { path: "monitor", redirect: "/ui/observability" },

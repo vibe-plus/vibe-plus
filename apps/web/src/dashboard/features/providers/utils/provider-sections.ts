@@ -8,6 +8,7 @@ import {
   getToolProtocolSupport,
   type ClientToolInfo,
 } from "../../../utils/client-tools.ts";
+import { formatDurationMs } from "../../../utils/format-duration.ts";
 import { displayProviderName } from "../../../utils/providers-display.ts";
 import { providerSuccessScore } from "../../../utils/provider-health-score.ts";
 import { providerHasKind } from "../../../utils/provider-protocols.ts";
@@ -45,8 +46,8 @@ export type ProviderSectionText = {
 const DEFAULT_TEXT: ProviderSectionText = {
   bridge: "bridge",
   credentialShort: "cred",
-  fastest: (ms) => `${ms}ms best`,
-  first: (ms) => `${ms}ms first`,
+  fastest: (ms) => `${formatDurationMs(ms)} best`,
+  first: (ms) => `${formatDurationMs(ms)} first`,
   models: "models",
   native: "native",
   noCredential: "no cred",

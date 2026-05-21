@@ -256,6 +256,10 @@ export interface RealtimeRequest {
   app: string | null;
   provider_id: string | null;
   credential_id: string | null;
+  thread_id?: string | null;
+  turn_id?: string | null;
+  trace_id?: string | null;
+  session_id?: string | null;
   requested_model: string | null;
   upstream_model: string | null;
   wire: string | null;
@@ -422,6 +426,8 @@ export interface CodexThreadMeta {
 export type ObservabilityConversationSource = "codex" | "claude";
 export type ObservabilityConversationStatus = "running" | "failed" | "ok" | "no-data";
 
+export type ObservabilityThreadKind = "user" | "subagent";
+
 export interface ObservabilityConversation {
   source: ObservabilityConversationSource;
   conversation_id: string;
@@ -434,6 +440,19 @@ export interface ObservabilityConversation {
   attempt_count: number;
   latest_request_id: string | null;
   preview: string;
+  estimated_cost_usd: string;
+  input_tokens: number;
+  output_tokens: number;
+  archived: boolean;
+  parent_conversation_id: string | null;
+  thread_kind: ObservabilityThreadKind;
+  agent_nickname: string | null;
+  local_tokens_used: number;
+  local_estimated_cost_usd: string;
+  models_used: string[];
+  provider_ids: string[];
+  credential_ids: string[];
+  duration_seconds: number;
 }
 
 export type UpstreamAttemptOutcome =

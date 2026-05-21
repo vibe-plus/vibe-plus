@@ -1313,6 +1313,67 @@ pub struct ObservabilityConversation {
     pub attempt_count: i64,
     pub latest_request_id: Option<String>,
     pub preview: String,
+    /// Total estimated USD cost across gateway-observed requests for this chat.
+    /// Stringified to avoid f64 imprecision over JSON; "" when no requests.
+    #[serde(default)]
+    pub estimated_cost_usd: String,
+    /// Sum of input tokens across gateway requests.
+    #[serde(default)]
+    pub input_tokens: i64,
+    /// Sum of output tokens across gateway requests.
+    #[serde(default)]
+    pub output_tokens: i64,
+    /// Whether the source app marks this conversation as archived.
+    #[serde(default)]
+    pub archived: bool,
+    /// Conversation id of the spawning parent thread (subagents only).
+    /// None for top-level user threads.
+    #[serde(default)]
+    pub parent_conversation_id: Option<String>,
+    /// 'user' for top-level conversations, 'subagent' for child threads.
+    #[serde(default)]
+    pub thread_kind: ObservabilityThreadKind,
+    /// Best-effort display nickname (Codex assigns these to subagents).
+    #[serde(default)]
+    pub agent_nickname: Option<String>,
+    /// Total tokens used as reported by the source app (Codex's `tokens_used`
+    /// column, or sum of Claude assistant `usage.{input,output,cache_*}_tokens`).
+    /// Available even when the conversation never went through the gateway.
+    #[serde(default)]
+    pub local_tokens_used: i64,
+    /// Best-effort USD estimate from the source app's per-message usage data,
+    /// priced against a built-in model price table. Empty string when no
+    /// pricing data was available. Stringified to avoid f64 imprecision.
+    #[serde(default)]
+    pub local_estimated_cost_usd: String,
+    /// Distinct model identifiers seen on this conversation (Codex thread's
+    /// `model` column, Claude assistant `message.model` values).
+    #[serde(default)]
+    pub models_used: Vec<String>,
+    /// Distinct gateway provider IDs seen on this conversation. Empty for
+    /// conversations that never went through the gateway.
+    #[serde(default)]
+    pub provider_ids: Vec<String>,
+    /// Distinct gateway credential IDs seen on this conversation.
+    #[serde(default)]
+    pub credential_ids: Vec<String>,
+    /// Duration from first to last source-app activity, in seconds. For Codex
+    /// that's `updated_at - created_at`; for Claude it's the span of
+    /// timestamps in the project jsonl. Zero when we can't compute.
+    #[serde(default)]
+    pub duration_seconds: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../packages/protocol/types/ObservabilityThreadKind.ts"
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservabilityThreadKind {
+    #[default]
+    User,
+    Subagent,
 }
 
 /// Enhanced stats for the dashboard.

@@ -54,7 +54,20 @@ export type vp_icon_name =
   | "clock"
   | "scan-search"
   | "palette"
-  | "languages";
+  | "languages"
+  | "chevron-right"
+  | "chevron-left"
+  | "filter"
+  | "arrow-up-down"
+  | "eye"
+  | "eye-off"
+  | "search"
+  | "panel-left"
+  | "panel-left-close"
+  | "dollar-sign"
+  | "folder"
+  | "message-square"
+  | "more-horizontal";
 
 const props = defineProps<{
   name: vp_icon_name;
@@ -118,6 +131,19 @@ const iconClassByName: Record<vp_icon_name, string> = {
   "scan-search": "i-[lucide--scan-search]",
   palette: "i-[lucide--palette]",
   languages: "i-[lucide--languages]",
+  "chevron-right": "i-[lucide--chevron-right]",
+  "chevron-left": "i-[lucide--chevron-left]",
+  filter: "i-[lucide--filter]",
+  "arrow-up-down": "i-[lucide--arrow-up-down]",
+  eye: "i-[lucide--eye]",
+  "eye-off": "i-[lucide--eye-off]",
+  search: "i-[lucide--search]",
+  "panel-left": "i-[lucide--panel-left]",
+  "panel-left-close": "i-[lucide--panel-left-close]",
+  "dollar-sign": "i-[lucide--dollar-sign]",
+  folder: "i-[lucide--folder]",
+  "message-square": "i-[lucide--message-square]",
+  "more-horizontal": "i-[lucide--more-horizontal]",
 };
 
 const iconClass = computed(() => iconClassByName[props.name]);

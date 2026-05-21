@@ -21,9 +21,13 @@ use vibe_db::Db;
 use vibe_plugin_api::{EventSink, GatewayEvent, Plugin};
 use vibe_protocol::{
     AppLogEvent, CodexThreadMeta, LogPage, ObservabilityConversation,
-    ObservabilityConversationSource, ObservabilityConversationStatus, RequestLog,
-    UpstreamAttemptLog, UsageRollupPage,
+    ObservabilityConversationSource, ObservabilityConversationStatus, ObservabilityThreadKind,
+    RequestLog, UpstreamAttemptLog, UsageRollupPage,
 };
+
+mod db;
+use db::ObservabilityDb;
+pub use db::{PruneStats, RetentionPolicy};
 
 #[derive(Debug, Deserialize)]
 pub struct AppLogRecordsQuery {
@@ -75,44 +79,44 @@ pub struct UsageRollupsQuery {
 
 #[derive(Clone)]
 pub struct ObservabilityStore {
-    db: Db,
+    db: ObservabilityDb,
 }
 
 impl ObservabilityStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
-            db: Db::open_observability(path)?,
+            db: ObservabilityDb::open(path)?,
         })
     }
 
     pub fn memory() -> Result<Self> {
         Ok(Self {
-            db: Db::observability_memory()?,
+            db: ObservabilityDb::memory()?,
         })
     }
 
     pub fn migrate_from_legacy(&self, legacy_db: &Db) -> Result<()> {
-        self.db.copy_observability_from(legacy_db)
+        self.db.migrate_from_legacy(legacy_db)
     }
 
     pub fn migrate_from_legacy_path(&self, legacy_db_path: impl AsRef<Path>) -> Result<()> {
-        self.db.copy_observability_from_path(legacy_db_path)
+        self.db.migrate_from_legacy_path(legacy_db_path)
     }
 
     pub fn insert_request(&self, log: &RequestLog) -> Result<()> {
-        self.db.log_insert(log)
+        self.db.insert_request(log)
     }
 
     pub fn update_request_client_trace(&self, log: &RequestLog) -> Result<()> {
-        self.db.log_update_client_trace_and_stream_fields(log)
+        self.db.update_request_client_trace(log)
     }
 
     pub fn insert_upstream_attempt(&self, attempt: &UpstreamAttemptLog) -> Result<()> {
-        self.db.upstream_attempt_insert(attempt)
+        self.db.insert_upstream_attempt(attempt)
     }
 
     pub fn insert_app_log(&self, event: &AppLogEvent) -> Result<()> {
-        self.db.app_log_insert(event)
+        self.db.insert_app_log(event)
     }
 
     pub fn request_list(
@@ -135,7 +139,7 @@ impl ObservabilityStore {
             || trace_id.is_some()
             || session_id.is_some()
         {
-            self.db.log_list_filtered(
+            self.db.request_list_filtered(
                 limit,
                 offset,
                 since,
@@ -147,12 +151,12 @@ impl ObservabilityStore {
                 session_id,
             )
         } else {
-            self.db.log_list(limit, offset)
+            self.db.request_list(limit, offset)
         }
     }
 
     pub fn request_get(&self, id: &str) -> Result<Option<RequestLog>> {
-        self.db.log_get(id)
+        self.db.request_get(id)
     }
 
     pub fn network_for_request(&self, id: &str) -> Result<Vec<UpstreamAttemptLog>> {
@@ -168,7 +172,7 @@ impl ObservabilityStore {
     }
 
     pub fn conversation_list(&self) -> Result<Vec<ObservabilityConversation>> {
-        let requests = self.db.log_list(i64::MAX / 4, 0)?.items;
+        let requests = self.db.request_list(i64::MAX / 4, 0)?.items;
         let attempts = self.db.upstream_attempt_list(i64::MAX / 4, 0)?;
         conversations_from_local_history_and_logs(&requests, &attempts)
     }
@@ -177,11 +181,8 @@ impl ObservabilityStore {
         self.db.app_log_list(limit, since)
     }
 
-    pub fn prune(
-        &self,
-        policy: &vibe_db::ShortLogRetentionPolicy,
-    ) -> Result<vibe_db::ShortLogPruneStats> {
-        self.db.prune_short_logs(policy)
+    pub fn prune(&self, policy: &RetentionPolicy) -> Result<PruneStats> {
+        self.db.prune(policy)
     }
 
     pub fn usage_rollup_list(
@@ -217,6 +218,10 @@ impl ObservabilityStore {
             trace_id,
             session_id,
         )
+    }
+
+    pub fn with_legacy_db<R>(&self, f: impl FnOnce(&Db) -> Result<R>) -> Result<R> {
+        f(self.db.legacy())
     }
 }
 
@@ -449,6 +454,25 @@ struct LocalConversationSeed {
     project_name: Option<String>,
     updated_at: i64,
     preview: String,
+    archived: bool,
+    parent_conversation_id: Option<String>,
+    thread_kind: ObservabilityThreadKind,
+    agent_nickname: Option<String>,
+    /// Tokens used per source-app records (no gateway involvement required).
+    local_tokens_used: i64,
+    /// USD estimated against a built-in price table.
+    local_estimated_cost_usd: f64,
+    /// Distinct models seen on this conversation.
+    models_used: Vec<String>,
+    /// Distinct provider IDs from gateway logs (None for local-only chats).
+    provider_ids: Vec<String>,
+    /// Distinct credential IDs from gateway logs.
+    credential_ids: Vec<String>,
+    /// Source-app-reported lifespan in seconds.
+    duration_seconds: i64,
+    /// Earliest source-app timestamp seen for this conversation, used to
+    /// derive duration when only per-entry timestamps are available (Claude).
+    local_first_seen_at: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -459,6 +483,9 @@ struct ConversationLogStats {
     latest_started_at: i64,
     latest_status_code: Option<i32>,
     active: bool,
+    input_tokens: i64,
+    output_tokens: i64,
+    estimated_cost_usd: f64,
 }
 
 fn conversations_from_local_history_and_logs(
@@ -481,18 +508,29 @@ fn conversations_from_local_history_and_logs(
 
     let mut stats: HashMap<(String, String), ConversationLogStats> = HashMap::new();
     for request in requests {
+        let cost = request.estimated_cost_usd.parse::<f64>().unwrap_or(0.0);
+        let model = request
+            .upstream_model
+            .as_deref()
+            .or(request.requested_model.as_deref())
+            .map(str::to_string);
         if let Some(thread_id) = request.thread_id.as_deref().filter(|v| !v.is_empty()) {
             let key = ("codex".to_string(), thread_id.to_string());
             let entry = stats.entry(key.clone()).or_default();
             entry.request_count += 1;
+            entry.input_tokens += request.input_tokens;
+            entry.output_tokens += request.output_tokens;
+            entry.estimated_cost_usd += cost;
             if request.started_at >= entry.latest_started_at {
                 entry.latest_started_at = request.started_at;
                 entry.latest_request_id = Some(request.id.clone());
                 entry.latest_status_code = request.status_code;
             }
-            by_key.entry(key).or_insert_with(|| {
+            let seed = by_key.entry(key).or_insert_with(|| {
                 seed_from_request(ObservabilityConversationSource::Codex, thread_id, request)
             });
+            record_model(seed, model.as_deref());
+            record_provider_credential(seed, request);
         }
         if let Some(session_id) = request.session_id.as_deref().filter(|v| !v.is_empty()) {
             let source = if looks_like_codex_id(session_id) {
@@ -503,14 +541,19 @@ fn conversations_from_local_history_and_logs(
             let key = (source_key(&source), session_id.to_string());
             let entry = stats.entry(key.clone()).or_default();
             entry.request_count += 1;
+            entry.input_tokens += request.input_tokens;
+            entry.output_tokens += request.output_tokens;
+            entry.estimated_cost_usd += cost;
             if request.started_at >= entry.latest_started_at {
                 entry.latest_started_at = request.started_at;
                 entry.latest_request_id = Some(request.id.clone());
                 entry.latest_status_code = request.status_code;
             }
-            by_key
+            let seed = by_key
                 .entry(key)
                 .or_insert_with(|| seed_from_request(source, session_id, request));
+            record_model(seed, model.as_deref());
+            record_provider_credential(seed, request);
         }
     }
     for attempt in attempts {
@@ -549,6 +592,25 @@ fn conversations_from_local_history_and_logs(
         } else {
             ObservabilityConversationStatus::Failed
         };
+        let estimated_cost_usd = if stat.request_count > 0 {
+            format!("{:.6}", stat.estimated_cost_usd)
+        } else {
+            String::new()
+        };
+        let local_estimated_cost_usd = if seed.local_estimated_cost_usd > 0.0 {
+            format!("{:.6}", seed.local_estimated_cost_usd)
+        } else {
+            String::new()
+        };
+        // Duration: prefer the seed's existing value (Codex), otherwise span
+        // first-seen → updated_at (Claude).
+        let duration_seconds = if seed.duration_seconds > 0 {
+            seed.duration_seconds
+        } else if seed.local_first_seen_at > 0 && seed.updated_at > seed.local_first_seen_at {
+            seed.updated_at - seed.local_first_seen_at
+        } else {
+            0
+        };
         out.push(ObservabilityConversation {
             source: seed.source,
             conversation_id: seed.conversation_id,
@@ -561,6 +623,19 @@ fn conversations_from_local_history_and_logs(
             attempt_count: stat.attempt_count,
             latest_request_id: stat.latest_request_id,
             preview: seed.preview,
+            estimated_cost_usd,
+            input_tokens: stat.input_tokens,
+            output_tokens: stat.output_tokens,
+            archived: seed.archived,
+            parent_conversation_id: seed.parent_conversation_id,
+            thread_kind: seed.thread_kind,
+            agent_nickname: seed.agent_nickname,
+            local_tokens_used: seed.local_tokens_used,
+            local_estimated_cost_usd,
+            models_used: seed.models_used,
+            provider_ids: seed.provider_ids,
+            credential_ids: seed.credential_ids,
+            duration_seconds,
         });
     }
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -585,6 +660,17 @@ fn seed_from_request(
         project_name: None,
         updated_at: request.started_at,
         preview: request.app.clone().unwrap_or_default(),
+        archived: false,
+        parent_conversation_id: None,
+        thread_kind: ObservabilityThreadKind::User,
+        agent_nickname: None,
+        local_tokens_used: 0,
+        local_estimated_cost_usd: 0.0,
+        models_used: Vec::new(),
+        provider_ids: Vec::new(),
+        credential_ids: Vec::new(),
+        duration_seconds: 0,
+        local_first_seen_at: 0,
     }
 }
 
@@ -608,18 +694,63 @@ fn read_codex_conversation_seeds() -> Result<Vec<LocalConversationSeed>> {
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )?;
+    let mut parent_by_child: HashMap<String, String> = HashMap::new();
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges")
+    {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            let p: String = r.get(0)?;
+            let c: String = r.get(1)?;
+            Ok((p, c))
+        }) {
+            for entry in rows.flatten() {
+                parent_by_child.insert(entry.1, entry.0);
+            }
+        }
+    }
     let mut stmt = conn.prepare(
-        "SELECT id, title, cwd, source, model, updated_at, updated_at_ms, preview, first_user_message
-         FROM threads WHERE archived = 0 ORDER BY updated_at DESC LIMIT 1000",
+        "SELECT id, title, cwd, source, model, updated_at, updated_at_ms, preview, first_user_message, archived, thread_source, agent_nickname, tokens_used, created_at
+         FROM threads ORDER BY updated_at DESC LIMIT 1000",
     )?;
     let rows = stmt.query_map([], |r| {
         let id: String = r.get(0)?;
         let title: String = r.get(1)?;
         let cwd: String = r.get(2)?;
+        let model: Option<String> = r.get(4).ok();
+        let created_at: i64 = r.get(13).unwrap_or(0);
         let updated_at_ms: Option<i64> = r.get(6)?;
         let updated_at: i64 = updated_at_ms.map(|v| v / 1000).unwrap_or(r.get(5)?);
         let preview: String = r.get::<_, String>(7).or_else(|_| r.get(8))?;
+        let archived: i64 = r.get(9).unwrap_or(0);
+        let thread_source: Option<String> = r.get(10).ok();
+        let agent_nickname: Option<String> = r.get(11).ok();
+        let tokens_used: i64 = r.get(12).unwrap_or(0);
+        let duration_seconds = (updated_at - created_at).max(0);
         let title = compact_title(&title, &preview);
+        let kind = match thread_source.as_deref() {
+            Some("subagent") => ObservabilityThreadKind::Subagent,
+            _ => ObservabilityThreadKind::User,
+        };
+        let parent_conversation_id = parent_by_child.get(&id).cloned();
+        let model_name = model.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let models_used = match model_name {
+            Some(m) => vec![m.to_string()],
+            None => Vec::new(),
+        };
+        // Codex stores `tokens_used` as a total. Without an input/output
+        // split, estimate cost by assuming ~30% input / 70% output, which is
+        // a defensible average for chat workloads.
+        let estimated_cost = if tokens_used > 0 {
+            if let Some(model) = model_name {
+                let input_share = (tokens_used as f64 * 0.30) as i64;
+                let output_share = tokens_used - input_share;
+                local_estimate_cost_usd(model, input_share, output_share, 0, 0).unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
         Ok(LocalConversationSeed {
             source: ObservabilityConversationSource::Codex,
             conversation_id: id,
@@ -628,6 +759,17 @@ fn read_codex_conversation_seeds() -> Result<Vec<LocalConversationSeed>> {
             project_name: (!cwd.trim().is_empty()).then(|| project_name_for_cwd(&cwd)),
             updated_at,
             preview,
+            archived: archived != 0,
+            parent_conversation_id,
+            thread_kind: kind,
+            agent_nickname: agent_nickname.filter(|s| !s.is_empty()),
+            local_tokens_used: tokens_used.max(0),
+            local_estimated_cost_usd: estimated_cost,
+            models_used,
+            provider_ids: Vec::new(),
+            credential_ids: Vec::new(),
+            duration_seconds,
+            local_first_seen_at: created_at,
         })
     })?;
     let mut out = Vec::new();
@@ -664,7 +806,14 @@ fn read_claude_history_file(map: &mut HashMap<String, LocalConversationSeed>) ->
             .and_then(Value::as_i64)
             .map(|v| v / 1000)
             .unwrap_or(0);
-        upsert_claude_seed(map, session_id, display, project.as_deref(), updated_at);
+        upsert_claude_seed(
+            map,
+            session_id,
+            display,
+            None,
+            project.as_deref(),
+            updated_at,
+        );
     }
     Ok(())
 }
@@ -700,36 +849,153 @@ fn read_claude_project_jsonl_file(
     path: &Path,
 ) -> Result<()> {
     let file = fs::File::open(path)?;
+    let file_mtime: i64 = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // ai-title/last-prompt entries don't carry sessionId in some shapes; fall
+    // back to deriving it from the file stem (Claude names jsonl files after
+    // the session UUID).
+    let file_session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
     for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let Some(session_id) = v.get("sessionId").and_then(Value::as_str) else {
+        let session_id = v
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| file_session_id.clone());
+        let Some(session_id) = session_id else {
             continue;
         };
         let cwd = v.get("cwd").and_then(Value::as_str);
-        let content = claude_user_content(&v).unwrap_or_default();
+        let entry_type = v.get("type").and_then(Value::as_str).unwrap_or("");
         let updated_at = v
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339_seconds)
-            .unwrap_or_else(|| {
-                fs::metadata(path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0)
-            });
-        if !content.is_empty() || cwd.is_some() {
-            upsert_claude_seed(map, session_id, &content, cwd, updated_at);
+            .unwrap_or(file_mtime);
+        let (title_override, content) = match entry_type {
+            "ai-title" => {
+                let t = v.get("aiTitle").and_then(Value::as_str).unwrap_or("");
+                (Some(t.to_string()), String::new())
+            }
+            "last-prompt" => {
+                let t = v.get("lastPrompt").and_then(Value::as_str).unwrap_or("");
+                (None, t.to_string())
+            }
+            "queue-operation" => {
+                let t = v.get("content").and_then(Value::as_str).unwrap_or("");
+                (None, t.to_string())
+            }
+            "user" => (None, claude_user_content(&v).unwrap_or_default()),
+            _ => (None, String::new()),
+        };
+        if title_override.is_some() || !content.is_empty() || cwd.is_some() {
+            upsert_claude_seed(
+                map,
+                &session_id,
+                &content,
+                title_override.as_deref(),
+                cwd,
+                updated_at,
+            );
+        }
+        // Pick up local usage data from assistant messages so we can show
+        // tokens + estimated cost even when the chat never went through the
+        // gateway.
+        if entry_type == "assistant" {
+            apply_claude_assistant_usage(map, &session_id, &v);
         }
     }
     Ok(())
 }
 
+fn apply_claude_assistant_usage(
+    map: &mut HashMap<String, LocalConversationSeed>,
+    session_id: &str,
+    v: &Value,
+) {
+    let Some(seed) = map.get_mut(session_id) else {
+        // Caller hasn't seeded this session yet (first encounter); create a
+        // bare seed so we don't lose the usage data.
+        map.insert(
+            session_id.to_string(),
+            LocalConversationSeed {
+                source: ObservabilityConversationSource::Claude,
+                conversation_id: session_id.to_string(),
+                title: session_id.to_string(),
+                project_path: None,
+                project_name: None,
+                updated_at: 0,
+                preview: String::new(),
+                archived: false,
+                parent_conversation_id: None,
+                thread_kind: ObservabilityThreadKind::User,
+                agent_nickname: None,
+                local_tokens_used: 0,
+                local_estimated_cost_usd: 0.0,
+                models_used: Vec::new(),
+                provider_ids: Vec::new(),
+                credential_ids: Vec::new(),
+                duration_seconds: 0,
+                local_first_seen_at: 0,
+            },
+        );
+        return apply_claude_assistant_usage(map, session_id, v);
+    };
+    let model = v
+        .pointer("/message/model")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    record_model(seed, model.as_deref());
+    let Some(usage) = v.pointer("/message/usage") else {
+        return;
+    };
+    let input = usage
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    seed.local_tokens_used = seed
+        .local_tokens_used
+        .saturating_add(input + output + cache_read + cache_creation);
+    if let Some(m) = model.as_deref() {
+        if let Some(cost) =
+            local_estimate_cost_usd(m, input, output, cache_read, cache_creation)
+        {
+            seed.local_estimated_cost_usd += cost;
+        }
+    }
+}
+
 fn claude_user_content(v: &Value) -> Option<String> {
     if v.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    // Skip tool-result echoes that pollute the title.
+    if v.get("toolUseResult").is_some() {
         return None;
     }
     let content = v.pointer("/message/content")?;
@@ -752,6 +1018,7 @@ fn upsert_claude_seed(
     map: &mut HashMap<String, LocalConversationSeed>,
     session_id: &str,
     text: &str,
+    title_override: Option<&str>,
     project_path: Option<&str>,
     updated_at: i64,
 ) {
@@ -760,27 +1027,44 @@ fn upsert_claude_seed(
         .or_insert_with(|| LocalConversationSeed {
             source: ObservabilityConversationSource::Claude,
             conversation_id: session_id.to_string(),
-            title: compact_title(text, text),
+            title: compact_title(title_override.unwrap_or(text), session_id),
             project_path: project_path.map(str::to_string),
             project_name: project_path.map(project_name_for_cwd),
             updated_at,
             preview: text.to_string(),
+            archived: false,
+            parent_conversation_id: None,
+            thread_kind: ObservabilityThreadKind::User,
+            agent_nickname: None,
+            local_tokens_used: 0,
+            local_estimated_cost_usd: 0.0,
+            models_used: Vec::new(),
+            provider_ids: Vec::new(),
+            credential_ids: Vec::new(),
+            duration_seconds: 0,
+            local_first_seen_at: updated_at,
         });
     if updated_at >= entry.updated_at {
         entry.updated_at = updated_at;
         if !text.trim().is_empty() {
             entry.preview = text.to_string();
-            if entry.title == "Untitled thread" || entry.title == entry.conversation_id {
-                entry.title = compact_title(text, text);
-            }
         }
+    }
+    if updated_at > 0 && (entry.local_first_seen_at == 0 || updated_at < entry.local_first_seen_at)
+    {
+        entry.local_first_seen_at = updated_at;
+    }
+    // ai-title is the highest-quality title source: always overwrite.
+    if let Some(ai_title) = title_override.filter(|s| !s.trim().is_empty()) {
+        entry.title = compact_title(ai_title, ai_title);
+    } else if (entry.title == "Untitled thread" || entry.title == entry.conversation_id)
+        && !text.trim().is_empty()
+    {
+        entry.title = compact_title(text, text);
     }
     if entry.project_path.is_none() {
         entry.project_path = project_path.map(str::to_string);
         entry.project_name = project_path.map(project_name_for_cwd);
-    }
-    if entry.title.trim().is_empty() || entry.title == "Untitled thread" {
-        entry.title = compact_title(text, session_id);
     }
 }
 
@@ -870,6 +1154,112 @@ fn project_name_for_cwd(cwd: &str) -> String {
         .to_string()
 }
 
+/// Pricing duplicated from [`vibe_core::usage::model_pricing`] to keep this
+/// crate free of a circular dependency on vibe-core. Keep in sync.
+fn local_model_pricing(model: &str) -> Option<(f64, f64)> {
+    let m = model.to_ascii_lowercase();
+    let m = if let Some(pos) = m.rfind('/') {
+        &m[pos + 1..]
+    } else {
+        &m
+    };
+    let pair = if m.starts_with("o1-mini") {
+        (3.00, 12.00)
+    } else if m.starts_with("o1") {
+        (15.00, 60.00)
+    } else if m.starts_with("o3-mini") {
+        (1.10, 4.40)
+    } else if m.starts_with("o3") {
+        (10.00, 40.00)
+    } else if m.starts_with("o4-mini") {
+        (1.10, 4.40)
+    } else if m.starts_with("o4") {
+        (6.00, 24.00)
+    } else if m.starts_with("gpt-4o-mini") {
+        (0.15, 0.60)
+    } else if m.starts_with("gpt-4o") {
+        (2.50, 10.00)
+    } else if m.starts_with("gpt-4.1-nano") {
+        (0.10, 0.40)
+    } else if m.starts_with("gpt-4.1-mini") {
+        (0.40, 1.60)
+    } else if m.starts_with("gpt-4.1") {
+        (2.00, 8.00)
+    } else if m.starts_with("gpt-5") {
+        (3.00, 12.00)
+    } else if m.starts_with("claude-opus-4") {
+        (15.00, 75.00)
+    } else if m.starts_with("claude-sonnet-4") {
+        (3.00, 15.00)
+    } else if m.starts_with("claude-haiku-4") {
+        (0.80, 4.00)
+    } else if m.starts_with("deepseek-r1") || m.contains("deepseek-reasoner") {
+        (0.55, 2.19)
+    } else if m.starts_with("deepseek-v3") || m.starts_with("deepseek-chat") {
+        (0.27, 1.10)
+    } else if m.starts_with("kimi-k2") {
+        (0.15, 0.60)
+    } else if m.starts_with("gemini-2.5-pro") {
+        (1.25, 10.00)
+    } else if m.starts_with("gemini-2.5-flash") {
+        (0.30, 2.50)
+    } else if m.starts_with("gemini-2.0") {
+        (0.10, 0.40)
+    } else if m.starts_with("gemini-1.5-pro") {
+        (1.25, 5.00)
+    } else if m.starts_with("gemini-1.5-flash") {
+        (0.075, 0.30)
+    } else if m.starts_with("qwen3") {
+        (0.40, 1.60)
+    } else if m.starts_with("qwen2") {
+        (0.20, 0.60)
+    } else {
+        return None;
+    };
+    Some(pair)
+}
+
+/// Compute USD cost for `(input, output)` tokens against the local price table.
+/// Cache-read tokens are charged at ~10% of input price (rough Anthropic/OpenAI
+/// convention) and cache-creation tokens at input price.
+fn local_estimate_cost_usd(
+    model: &str,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_creation_tokens: i64,
+) -> Option<f64> {
+    let (input_per_m, output_per_m) = local_model_pricing(model)?;
+    let cost = (input_tokens as f64 * input_per_m
+        + output_tokens as f64 * output_per_m
+        + cache_creation_tokens as f64 * input_per_m
+        + cache_read_tokens as f64 * input_per_m * 0.1)
+        / 1_000_000.0;
+    Some(cost)
+}
+
+fn record_model(seed: &mut LocalConversationSeed, model: Option<&str>) {
+    let Some(name) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if !seed.models_used.iter().any(|m| m == name) {
+        seed.models_used.push(name.to_string());
+    }
+}
+
+fn record_provider_credential(seed: &mut LocalConversationSeed, request: &RequestLog) {
+    if let Some(p) = request.provider_id.as_deref().filter(|s| !s.is_empty()) {
+        if !seed.provider_ids.iter().any(|x| x == p) {
+            seed.provider_ids.push(p.to_string());
+        }
+    }
+    if let Some(c) = request.credential_id.as_deref().filter(|s| !s.is_empty()) {
+        if !seed.credential_ids.iter().any(|x| x == c) {
+            seed.credential_ids.push(c.to_string());
+        }
+    }
+}
+
 fn compact_title(title: &str, fallback: &str) -> String {
     let raw = if title.trim().is_empty() {
         fallback
@@ -896,9 +1286,13 @@ fn compact_title(title: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use vibe_protocol::{
         RequestLog, UpstreamAttemptLog, UpstreamAttemptOutcome, UpstreamAttemptPhase,
     };
+
+    // Serializes tests that mutate the shared CLAUDE_HOME process-global env var.
+    static CLAUDE_HOME_LOCK: Mutex<()> = Mutex::new(());
 
     fn sample_request(id: &str) -> RequestLog {
         RequestLog {
@@ -980,6 +1374,9 @@ mod tests {
             wave_index: 0,
             wave_size: 1,
             upstream_id: None,
+            network_scheme: None,
+            network_host: None,
+            network_path: None,
             started_at: 1,
             ended_at: Some(2),
             provider_id: Some("p1".into()),
@@ -1068,5 +1465,114 @@ mod tests {
         );
         assert_eq!(store.network_for_request("r1").unwrap().len(), 1);
         assert_eq!(store.network_attempt_list(10, 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn claude_project_jsonl_picks_up_ai_title() {
+        let _guard = CLAUDE_HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_root = tmp.path().join(".claude");
+        let projects = claude_root.join("projects").join("proj");
+        std::fs::create_dir_all(&projects).unwrap();
+        let session_id = "00000000-0000-0000-0000-aaaabbbbcccc";
+        let file_path = projects.join(format!("{session_id}.jsonl"));
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"2026-05-20T10:00:00Z","sessionId":"{session_id}","content":"raw first prompt"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","timestamp":"2026-05-20T10:00:01Z","sessionId":"{session_id}","cwd":"/Users/me/proj","message":{{"content":"raw first prompt"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"ai-title","sessionId":"{session_id}","aiTitle":"Streamline gateway features"}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        std::env::set_var("CLAUDE_HOME", claude_root.to_str().unwrap());
+        let seeds = read_claude_conversation_seeds().unwrap();
+        std::env::remove_var("CLAUDE_HOME");
+
+        let seed = seeds
+            .into_iter()
+            .find(|s| s.conversation_id == session_id)
+            .expect("session should be discovered");
+        assert_eq!(seed.title, "Streamline gateway features");
+        assert_eq!(seed.project_path.as_deref(), Some("/Users/me/proj"));
+        assert_eq!(seed.project_name.as_deref(), Some("proj"));
+    }
+
+    #[test]
+    fn conversation_log_stats_include_cost_and_tokens() {
+        let mut req = sample_request("r1");
+        req.thread_id = Some("019deadbeef".into());
+        req.input_tokens = 100;
+        req.output_tokens = 50;
+        req.estimated_cost_usd = "0.005".into();
+        req.upstream_model = Some("gpt-5".into());
+
+        let mut attempt = sample_attempt("a1", "r1");
+        attempt.thread_id = Some("019deadbeef".into());
+
+        let out = conversations_from_local_history_and_logs(&[req], &[attempt]).unwrap();
+        let conv = out
+            .iter()
+            .find(|c| c.conversation_id == "019deadbeef")
+            .expect("conversation should be present");
+        assert_eq!(conv.request_count, 1);
+        assert_eq!(conv.attempt_count, 1);
+        assert_eq!(conv.input_tokens, 100);
+        assert_eq!(conv.output_tokens, 50);
+        assert!(conv.estimated_cost_usd.starts_with("0.005"));
+        // Model collected from gateway request even without local-history seed.
+        assert_eq!(conv.models_used, vec!["gpt-5".to_string()]);
+    }
+
+    #[test]
+    fn claude_assistant_usage_populates_tokens_and_cost() {
+        let _guard = CLAUDE_HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_root = tmp.path().join(".claude");
+        let projects = claude_root.join("projects").join("proj");
+        std::fs::create_dir_all(&projects).unwrap();
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let file_path = projects.join(format!("{session_id}.jsonl"));
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","timestamp":"2026-05-21T10:00:00Z","sessionId":"{session_id}","cwd":"/p","message":{{"content":"hello"}}}}"#
+        )
+        .unwrap();
+        // Two assistant turns with usage data on claude-opus-4.
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-05-21T10:00:01Z","sessionId":"{session_id}","message":{{"model":"claude-opus-4-7","usage":{{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":2000,"cache_creation_input_tokens":3000}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-05-21T10:00:02Z","sessionId":"{session_id}","message":{{"model":"claude-opus-4-7","usage":{{"input_tokens":500,"output_tokens":250,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        std::env::set_var("CLAUDE_HOME", claude_root.to_str().unwrap());
+        let seeds = read_claude_conversation_seeds().unwrap();
+        std::env::remove_var("CLAUDE_HOME");
+        let seed = seeds
+            .into_iter()
+            .find(|s| s.conversation_id == session_id)
+            .expect("session present");
+        // sum of input+output+cache_read+cache_creation across both turns
+        assert_eq!(seed.local_tokens_used, 1000 + 500 + 2000 + 3000 + 500 + 250);
+        assert!(seed.local_estimated_cost_usd > 0.0);
+        assert_eq!(seed.models_used, vec!["claude-opus-4-7".to_string()]);
     }
 }
