@@ -23,7 +23,8 @@ use super::{
     maybe_record_codex_plan, needs_chat_to_responses_bridge, new_attempt_ctx, persist_log,
     persist_upstream_attempt_log, publish_upstream_attempt_started,
     remember_codex_sticky_route_for_pick, resolve_oauth_token, sanitized_headers_json,
-    stream_response, LogCtx, VibeCodexClientKind, VibeCodexVisual, VibeRequestLogId,
+    stream_response, CredentialDisableReason, LogCtx, VibeCodexClientKind, VibeCodexVisual,
+    VibeRequestLogId,
 };
 use crate::cache;
 use crate::claude_summary::ClaudeClientKind;
@@ -486,7 +487,10 @@ pub(crate) async fn try_one_pick(
                     fire_credential_disable(
                         &state,
                         cid.to_string(),
-                        format!("HTTP {status} from {}", provider.id),
+                        CredentialDisableReason::from_upstream_status(
+                            status.as_u16(),
+                            provider.id.clone(),
+                        ),
                     );
                 }
                 None => {

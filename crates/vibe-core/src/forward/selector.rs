@@ -209,11 +209,11 @@ pub fn shuffle_candidates(
 
 /// Maximum number of scheduler waves for the 123 policy.
 ///
-/// Wave 0 is a single pick chosen by the caller's existing load-balancing /
-/// sticky-priority ordering. Wave 1 races up to two picks (prefer 1 sick + 1
-/// healthy). Wave 2 races up to three picks (prefer 1 sick + 2 healthy). Any
-/// remaining candidates are intentionally not dispatched; the forwarder will
-/// aggregate the collected retry / circuit-skip failures into its normal 503.
+/// Wave 0 prefers `1 healthy + 1 sick`, or just `1 healthy` when no sick pick
+/// is available. Wave 1 races up to two picks (prefer 1 sick + 1 healthy).
+/// Wave 2 races up to three picks (prefer 1 sick + 2 healthy). Any remaining
+/// candidates are intentionally not dispatched; the forwarder will aggregate
+/// the collected retry / circuit-skip failures into its normal 503.
 const MAX_123_WAVES: usize = 3;
 
 /// Build scheduler waves using Vibe Plus's 123 policy.
@@ -237,16 +237,28 @@ pub fn build_waves(picks: Vec<ExpandedPick>, cb: &CircuitBreakers) -> Vec<Vec<Ex
         return Vec::new();
     };
 
-    let mut waves = Vec::with_capacity(MAX_123_WAVES);
-    waves.push(vec![first]);
-
     let mut sick = VecDeque::new();
     let mut healthy = VecDeque::new();
+    match cb.state_of(&first.upstream.cb_key) {
+        State::Open | State::HalfOpen => sick.push_back(first),
+        State::Closed => healthy.push_back(first),
+    }
     for pick in iter {
         match cb.state_of(&pick.upstream.cb_key) {
             State::Open | State::HalfOpen => sick.push_back(pick),
             State::Closed => healthy.push_back(pick),
         }
+    }
+
+    let mut waves = Vec::with_capacity(MAX_123_WAVES);
+    let mut first_wave = Vec::with_capacity(2);
+    take_from_queue(&mut first_wave, &mut healthy, 1, 2);
+    take_from_queue(&mut first_wave, &mut sick, 1, 2);
+    if first_wave.is_empty() {
+        take_from_queue(&mut first_wave, &mut sick, 1, 2);
+    }
+    if !first_wave.is_empty() {
+        waves.push(first_wave);
     }
 
     push_123_wave(&mut waves, &mut sick, &mut healthy, 1, 1, 2);
@@ -299,11 +311,12 @@ fn take_from_queue(
 // Sticky routing
 // ---------------------------------------------------------------------------
 
-/// Re-order `picks` so that the sticky provider/credential comes first.
-/// This is pure — resolve the route from AppState before calling this.
+/// Re-order `picks` so that the sticky provider/credential comes first,
+/// unless that pick is currently blocked by the circuit breaker.
 pub fn apply_sticky_priority(
     route: Option<&CodexStickyRoute>,
     picks: Vec<ExpandedPick>,
+    cb: &CircuitBreakers,
 ) -> Vec<ExpandedPick> {
     let Some(route) = route else {
         return picks;
@@ -314,7 +327,13 @@ pub fn apply_sticky_priority(
     if sticky.is_empty() {
         return rest;
     }
-    sticky.into_iter().chain(rest).collect()
+    let (healthy, blocked): (Vec<_>, Vec<_>) = sticky
+        .into_iter()
+        .partition(|p| !cb.is_blocking(&p.upstream.cb_key));
+    if healthy.is_empty() {
+        return rest.into_iter().chain(blocked).collect();
+    }
+    healthy.into_iter().chain(rest).chain(blocked).collect()
 }
 
 fn pick_matches_sticky(pick: &ExpandedPick, route: &CodexStickyRoute) -> bool {
@@ -688,7 +707,7 @@ mod tests {
             provider_id: "p-b".into(),
             credential_id: Some("c-b".into()),
         };
-        let result = apply_sticky_priority(Some(&route), picks);
+        let result = apply_sticky_priority(Some(&route), picks, &cb_for_tests());
         assert_eq!(result[0].provider.id, "p-b");
         assert_eq!(result.len(), 3);
     }
@@ -703,15 +722,32 @@ mod tests {
             provider_id: "p-x".into(),
             credential_id: Some("c-x".into()),
         };
-        let result = apply_sticky_priority(Some(&route), picks);
+        let result = apply_sticky_priority(Some(&route), picks, &cb_for_tests());
         assert_eq!(result[0].provider.id, "p-a");
     }
 
     #[test]
     fn apply_sticky_none_route_returns_unchanged() {
         let picks = vec![make_epick("p-a", None), make_epick("p-b", None)];
-        let result = apply_sticky_priority(None, picks);
+        let result = apply_sticky_priority(None, picks, &cb_for_tests());
         assert_eq!(result[0].provider.id, "p-a");
+    }
+
+    #[test]
+    fn apply_sticky_does_not_promote_blocked_pick_ahead_of_healthy_candidates() {
+        let cb = cb_for_tests();
+        cb.force_open("c-b");
+        let picks = vec![
+            make_epick("p-b", Some("c-b")),
+            make_epick("p-a", Some("c-a")),
+        ];
+        let route = CodexStickyRoute {
+            provider_id: "p-b".into(),
+            credential_id: Some("c-b".into()),
+        };
+        let result = apply_sticky_priority(Some(&route), picks, &cb);
+        assert_eq!(result[0].provider.id, "p-a");
+        assert_eq!(result[1].provider.id, "p-b");
     }
 
     // --- shuffle_candidates (CB awareness) ---
@@ -827,9 +863,9 @@ mod tests {
         assert_eq!(
             wave_ids(&waves),
             vec![
-                vec!["h-first".to_string()],
-                vec!["s-0".to_string(), "h-0".to_string()],
-                vec!["s-1".to_string(), "h-1".to_string(), "h-2".to_string()],
+                vec!["h-first".to_string(), "s-0".to_string()],
+                vec!["s-1".to_string(), "h-0".to_string()],
+                vec!["s-2".to_string(), "h-1".to_string(), "h-2".to_string()],
             ]
         );
     }
@@ -854,9 +890,9 @@ mod tests {
         assert_eq!(
             wave_ids(&waves),
             vec![
-                vec!["h-first".to_string()],
-                vec!["s-0".to_string(), "s-1".to_string()],
-                vec!["s-2".to_string(), "s-3".to_string()],
+                vec!["h-first".to_string(), "s-0".to_string()],
+                vec!["s-1".to_string(), "s-2".to_string()],
+                vec!["s-3".to_string()],
             ]
         );
     }
@@ -880,9 +916,30 @@ mod tests {
         assert_eq!(
             wave_ids(&waves),
             vec![
-                vec!["h-first".to_string()],
-                vec!["s-open".to_string(), "h-0".to_string()],
-                vec!["s-half".to_string(), "h-1".to_string()],
+                vec!["h-first".to_string(), "s-open".to_string()],
+                vec!["s-half".to_string(), "h-0".to_string()],
+                vec!["h-1".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn build_waves_prefers_healthy_over_sick_for_first_wave() {
+        let cb = cb_for_tests();
+        cb.force_open("s-0");
+        let picks = vec![
+            make_epick("s-0", None),
+            make_epick("h-0", None),
+            make_epick("h-1", None),
+        ];
+
+        let waves = build_waves(picks, &cb);
+
+        assert_eq!(
+            wave_ids(&waves),
+            vec![
+                vec!["h-0".to_string(), "s-0".to_string()],
+                vec!["h-1".to_string()],
             ]
         );
     }
