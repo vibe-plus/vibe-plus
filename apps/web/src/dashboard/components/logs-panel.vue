@@ -6,7 +6,11 @@ import { renderAppLogEvent } from "../utils/app-log-renderer.ts";
 import { providerMatchesWorkspaceView, type WorkspaceView } from "../utils/workspace-view.ts";
 
 const props = withDefaults(
-  defineProps<{ compact?: boolean; view?: WorkspaceView; providers?: Provider[] }>(),
+  defineProps<{
+    compact?: boolean;
+    view?: WorkspaceView;
+    providers?: Provider[];
+  }>(),
   { compact: false, view: "overview", providers: () => [] },
 );
 const MAX_LINES = 500;
@@ -154,27 +158,29 @@ function formatTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
-function levelClass(level: AppLogEvent["level"]): string {
+function levelTextClass(level: AppLogEvent["level"]): string {
   switch (level) {
     case "error":
-      return "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-400";
+      return "text-red-600 dark:text-red-400";
     case "warn":
-      return "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400";
+      return "text-amber-600 dark:text-amber-400";
     case "info":
-      return "bg-sky-100 text-sky-700 dark:bg-sky-950/60 dark:text-sky-400";
+      return "text-sky-600 dark:text-sky-400";
     default:
-      return "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400";
+      return "text-vp-muted";
   }
 }
 
-function rowBgClass(level: AppLogEvent["level"]): string {
+function rowStripeClass(level: AppLogEvent["level"]): string {
   switch (level) {
     case "error":
-      return "hover:bg-red-50/40 dark:hover:bg-red-950/10";
+      return "border-l-2 border-l-red-400 hover:bg-red-50/40 dark:hover:bg-red-950/10";
     case "warn":
-      return "hover:bg-amber-50/40 dark:hover:bg-amber-950/10";
+      return "border-l-2 border-l-amber-400 hover:bg-amber-50/40 dark:hover:bg-amber-950/10";
+    case "info":
+      return "border-l-2 border-l-sky-300/60 hover:bg-[color-mix(in_srgb,var(--vp-text)_2%,transparent)]";
     default:
-      return "hover:bg-[color-mix(in_srgb,var(--vp-text)_2%,transparent)]";
+      return "border-l-2 border-l-transparent hover:bg-[color-mix(in_srgb,var(--vp-text)_2%,transparent)]";
   }
 }
 
@@ -185,8 +191,11 @@ function clear() {
 
 <template>
   <div class="w-full">
-    <div v-if="!props.compact" class="mb-3 flex items-center gap-3 flex-wrap">
-      <label class="flex items-center gap-2 text-sm text-vp-muted cursor-pointer select-none">
+    <div
+      v-if="!props.compact"
+      class="flex flex-wrap items-center gap-3 border-b border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2.5%,var(--vp-surface))] px-4 py-2 text-xs"
+    >
+      <label class="flex cursor-pointer select-none items-center gap-2 text-vp-muted">
         <input
           v-model="live"
           type="checkbox"
@@ -194,40 +203,28 @@ function clear() {
         />
         <span>{{ t("status.live") }}</span>
         <span
-          v-if="live"
-          class="live-dot size-1.5 rounded-full bg-emerald-400 shadow-lg shadow-emerald-400/40"
+          class="size-1.5 rounded-full transition-colors"
+          :class="
+            live ? 'live-dot bg-emerald-400 shadow-lg shadow-emerald-400/40' : 'bg-vp-muted/30'
+          "
         />
       </label>
       <button
         type="button"
-        class="text-xs text-vp-muted hover:text-vp-text transition-colors"
+        class="rounded border border-vp-border bg-vp-surface px-2 py-0.5 text-vp-muted transition-colors hover:border-vp-text/30 hover:text-vp-text disabled:cursor-not-allowed disabled:opacity-50"
+        :disabled="!lines.length"
         @click="clear"
       >
         {{ t("actions.clear") }}
       </button>
-      <span class="ml-auto font-mono text-xs text-vp-muted"
-        >{{ lines.length }} / {{ MAX_LINES }}</span
-      >
+      <span class="ml-auto text-vp-muted">
+        {{ t("status.recorded") }}
+        <span class="ml-1 font-mono text-vp-text">{{ lines.length }}</span>
+        <span class="text-vp-muted/60"> / {{ MAX_LINES }}</span>
+      </span>
     </div>
 
-    <div
-      :class="
-        props.compact
-          ? 'w-full overflow-hidden rounded-xl border border-vp-border'
-          : 'card-base w-full overflow-hidden'
-      "
-    >
-      <div
-        :class="[
-          props.compact ? 'px-3 py-1.5' : 'px-4 py-2',
-          'hidden border-b border-vp-border bg-[color-mix(in_srgb,var(--vp-text)_2.5%,var(--vp-surface))] text-[11px] font-medium uppercase tracking-wide text-vp-muted sm:grid',
-        ]"
-        style="grid-template-columns: 8rem 1fr"
-      >
-        <span>{{ t("columns.time") }}</span>
-        <span>{{ t("columns.event") }}</span>
-      </div>
-
+    <div :class="props.compact ? 'w-full overflow-hidden' : 'w-full'">
       <div v-if="loading" class="px-4 py-16 text-center font-mono text-sm text-vp-muted">
         <span class="live-dot inline-block size-1.5 rounded-full bg-slate-400 mr-2" />
         {{ t("states.loading") }}
@@ -248,12 +245,17 @@ function clear() {
           v-for="({ line, rendered }, i) in renderedLines"
           :key="`${line.ts}:${line.event_type ?? line.message}:${i}`"
           class="transition-colors"
-          :class="rowBgClass(line.level)"
+          :class="rowStripeClass(line.level)"
         >
           <!-- mobile: stacked -->
-          <div class="flex items-start gap-3 px-4 py-2 sm:hidden">
+          <div class="flex items-start gap-3 px-3 py-2 sm:hidden">
             <div class="min-w-0 font-mono text-[11px]">
               <div class="flex items-center gap-2 text-vp-muted">
+                <span
+                  class="text-[10px] font-semibold uppercase tracking-wide"
+                  :class="levelTextClass(line.level)"
+                  >{{ line.level }}</span
+                >
                 <span>{{ formatTime(line.ts) }}</span>
               </div>
               <div class="mt-0.5 text-vp-text">
@@ -267,45 +269,78 @@ function clear() {
                   <template v-else>{{ token.text }}</template>
                 </template>
               </div>
-              <div v-if="rendered.detail" class="mt-0.5 text-vp-muted text-[10px]">
+              <div v-if="rendered.reason" class="mt-1 text-vp-muted text-[10px] leading-snug">
+                <span class="text-vp-text/70">{{ t("events.reasonPrefix") }}</span>
+                {{ rendered.reason }}
+                <code
+                  v-if="rendered.code"
+                  class="ml-1 rounded bg-vp-border/40 px-1 py-px text-[9px] text-vp-muted"
+                  >{{ rendered.code }}</code
+                >
+              </div>
+              <div v-if="rendered.hint" class="mt-0.5 text-vp-muted text-[10px] leading-snug">
+                <span class="text-vp-text/70">{{ t("events.hintPrefix") }}</span>
+                {{ rendered.hint }}
+              </div>
+              <div
+                v-if="!rendered.reason && !rendered.hint && rendered.detail"
+                class="mt-1 text-vp-muted text-[10px]"
+              >
                 {{ rendered.detail }}
               </div>
             </div>
           </div>
 
-          <!-- desktop: single row -->
+          <!-- desktop: time + content -->
           <div
             :class="[
-              props.compact ? 'px-3 py-1' : 'px-4 py-1.5',
-              'hidden items-start gap-0 font-mono text-xs sm:grid',
+              props.compact ? 'px-3 py-1.5' : 'px-4 py-2',
+              'hidden items-start gap-3 font-mono text-xs sm:flex',
             ]"
-            style="grid-template-columns: 8rem 1fr"
           >
-            <span class="text-vp-muted text-[11px] pt-px">{{ formatTime(line.ts) }}</span>
-            <span class="min-w-0 text-vp-text">
-              <template v-for="(token, tokenIndex) in rendered.title" :key="tokenIndex">
-                <RouterLink
-                  v-if="token.type === 'link'"
-                  :to="token.to"
-                  class="text-sky-600 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-500 dark:text-sky-400"
-                  >{{ token.text }}</RouterLink
-                >
-                <template v-else>{{ token.text }}</template>
-              </template>
-              <span
-                class="ml-3 inline-flex items-center gap-1 align-middle text-vp-muted text-[11px]"
-              >
+            <span class="w-28 shrink-0 pt-px text-[11px] text-vp-muted">{{
+              formatTime(line.ts)
+            }}</span>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-baseline gap-2 text-vp-text">
                 <span
-                  class="rounded px-1 py-0.5 text-[10px] font-semibold uppercase"
-                  :class="levelClass(line.level)"
+                  class="shrink-0 text-[10px] font-semibold uppercase tracking-wide"
+                  :class="levelTextClass(line.level)"
                   >{{ line.level }}</span
                 >
-                <span>{{ line.category }}</span>
-              </span>
-              <span v-if="rendered.detail" class="ml-2 text-vp-muted text-[11px]"
-                >— {{ rendered.detail }}</span
+                <span class="min-w-0">
+                  <template v-for="(token, tokenIndex) in rendered.title" :key="tokenIndex">
+                    <RouterLink
+                      v-if="token.type === 'link'"
+                      :to="token.to"
+                      class="text-sky-600 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-500 dark:text-sky-400"
+                      >{{ token.text }}</RouterLink
+                    >
+                    <template v-else>{{ token.text }}</template>
+                  </template>
+                </span>
+              </div>
+              <div v-if="rendered.reason" class="mt-1 text-[11px] leading-snug text-vp-muted">
+                <span class="text-vp-text/70">{{ t("events.reasonPrefix") }}</span>
+                {{ rendered.reason }}
+                <code
+                  v-if="rendered.code"
+                  class="ml-1 rounded bg-vp-border/40 px-1 py-px text-[10px] text-vp-muted"
+                  :title="t('events.codeChipTooltip')"
+                  >{{ rendered.code }}</code
+                >
+              </div>
+              <div v-if="rendered.hint" class="mt-0.5 text-[11px] leading-snug text-vp-muted">
+                <span class="text-vp-text/70">{{ t("events.hintPrefix") }}</span>
+                {{ rendered.hint }}
+              </div>
+              <div
+                v-if="!rendered.reason && !rendered.hint && rendered.detail"
+                class="mt-1 text-[11px] leading-snug text-vp-muted"
               >
-            </span>
+                {{ rendered.detail }}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -316,8 +351,7 @@ function clear() {
 <i18n lang="json">
 {
   "en": {
-    "actions": { "clear": "clear" },
-    "columns": { "event": "event", "time": "time" },
+    "actions": { "clear": "Clear" },
     "events": {
       "circuitOpenedAfterFailures": "opened a {minutes}-minute circuit after {count} failures",
       "circuitOpenedAfterFailuresNoDuration": "opened the circuit after {count} failures",
@@ -353,18 +387,34 @@ function clear() {
       "providerDeleted": "was deleted",
       "providerDisabled": "was disabled",
       "providerEnabled": "was enabled",
-      "providerUpdated": "was updated"
+      "providerUpdated": "was updated",
+      "reasonPrefix": "Why:",
+      "hintPrefix": "Next:",
+      "codeChipTooltip": "Reason code emitted by the gateway",
+      "autoDisable": {
+        "reason": {
+          "upstream_auth_failed": "Upstream {provider_id} returned HTTP {status} — authentication failed.",
+          "upstream_forbidden": "Upstream {provider_id} returned HTTP {status} — permission denied.",
+          "upstream_http_error": "Upstream {provider_id} returned HTTP {status}.",
+          "unknown": "Upstream rejected the request — {detail}"
+        },
+        "hint": {
+          "upstream_auth_failed": "The API key likely expired or was rotated. Update it on the credential page, then re-enable.",
+          "upstream_forbidden": "The key may be revoked or missing scopes. Replace it on the credential page, then re-enable.",
+          "upstream_http_error": "Re-enable the credential from its page once the upstream issue is fixed.",
+          "unknown": "Re-enable the credential from its page once the issue is fixed."
+        }
+      }
     },
     "states": {
-      "empty": "empty",
-      "loading": "loading event records…",
-      "waiting": "waiting for event records…"
+      "empty": "No events yet.",
+      "loading": "Loading events…",
+      "waiting": "Waiting for events…"
     },
-    "status": { "live": "Live" }
+    "status": { "live": "Live", "recorded": "Recorded" }
   },
   "zh-CN": {
     "actions": { "clear": "清空" },
-    "columns": { "event": "事件", "time": "时间" },
     "events": {
       "circuitOpenedAfterFailures": "因为 {count} 次失败触发 {minutes} 分钟熔断",
       "circuitOpenedAfterFailuresNoDuration": "因为 {count} 次失败触发熔断",
@@ -389,7 +439,7 @@ function clear() {
       },
       "changeSeparator": "、",
       "credential": "凭证",
-      "credentialAutoDisabled": "已自动禁用",
+      "credentialAutoDisabled": "已被网关自动禁用",
       "credentialCreated": "已添加",
       "credentialDeleted": "已删除",
       "credentialDisabled": "已禁用",
@@ -400,10 +450,27 @@ function clear() {
       "providerDeleted": "已删除",
       "providerDisabled": "已禁用",
       "providerEnabled": "已启用",
-      "providerUpdated": "已更新"
+      "providerUpdated": "已更新",
+      "reasonPrefix": "原因：",
+      "hintPrefix": "建议：",
+      "codeChipTooltip": "网关上报的原因代码",
+      "autoDisable": {
+        "reason": {
+          "upstream_auth_failed": "上游 {provider_id} 返回 HTTP {status}（认证失败）。",
+          "upstream_forbidden": "上游 {provider_id} 返回 HTTP {status}（权限被拒）。",
+          "upstream_http_error": "上游 {provider_id} 返回 HTTP {status}。",
+          "unknown": "上游拒绝请求：{detail}"
+        },
+        "hint": {
+          "upstream_auth_failed": "API Key 可能已过期或被轮换，请在凭证页更新 Key 后手动重新启用。",
+          "upstream_forbidden": "Key 可能被吊销或权限不足，请在凭证页替换后手动重新启用。",
+          "upstream_http_error": "排查上游问题后，请在凭证页手动重新启用。",
+          "unknown": "排查完成后请在凭证页手动重新启用。"
+        }
+      }
     },
-    "states": { "empty": "空", "loading": "正在加载事件记录…", "waiting": "等待事件记录…" },
-    "status": { "live": "实时" }
+    "states": { "empty": "暂无事件。", "loading": "正在加载事件…", "waiting": "等待事件…" },
+    "status": { "live": "实时", "recorded": "已记录" }
   }
 }
 </i18n>
