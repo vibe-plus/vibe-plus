@@ -1,6 +1,6 @@
 # Vibe Plus
 
-本地 AI API 网关，给 Claude Code / Codex / OpenCode 用。**控制台是网页**。
+本地 AI API 网关，解锁 Codex 的威力。
 
 [控制台](https://vibe-plus.github.io/vibe-plus/) · [![LINUX DO @cheezone](assets/linux-do.svg)](https://linux.do/u/cheezone)
 
