@@ -1,6 +1,7 @@
 const CANDIDATES = [
   "https://vibe-plus.github.io/vibe-plus",
-  "https://vibe-plus.cheez.tech/vibe-plus",
+  // TODO: cheez.tech mirror not yet published — restore when ready:
+  // "https://vibe-plus.cheez.tech/vibe-plus",
 ] as const;
 
 const CACHE_KEY = "vp-cdn-origin";
@@ -42,8 +43,8 @@ export async function redirectToFastestCDN(
 ): Promise<void> {
   const { hostname } = window.location;
   const isGhPages = hostname === "vibe-plus.github.io";
-  const isCheezTech = hostname === "vibe-plus.cheez.tech";
-  if (!isGhPages && !isCheezTech) return; // local dev or custom domain — skip
+  // TODO: re-add cheez.tech when the mirror is published.
+  if (!isGhPages) return; // local dev or custom domain — skip
 
   const best = await pickFastestOrigin();
   if (!window.location.href.startsWith(best)) {

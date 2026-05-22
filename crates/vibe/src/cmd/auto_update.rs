@@ -111,14 +111,40 @@ pub async fn check_once_and_spawn_updater(port: u16) -> Result<bool> {
     Ok(true)
 }
 
-async fn fetch_latest_version() -> Result<Option<String>> {
-    let registry = std::env::var_os(REGISTRY_URL_ENV)
+/// Always query the official npm registry for version metadata first. Mirrors
+/// (npmmirror, tencent, huawei) routinely lag the upstream by hours-to-days, and
+/// trusting whichever one happens to be fastest would silently skip real updates
+/// — exactly the "0.0.7 stays on 0.0.7" failure mode. Mirrors are still used for
+/// the tarball install in `install_global` where bandwidth dominates. Falls back
+/// to the fastest mirror only when the official registry is unreachable.
+pub async fn fetch_latest_version() -> Result<Option<String>> {
+    if let Some(override_url) = std::env::var_os(REGISTRY_URL_ENV)
         .and_then(|v| v.into_string().ok())
-        .unwrap_or_else(|| {
+        .filter(|s| !s.is_empty())
+    {
+        return fetch_latest_from(&override_url).await;
+    }
+
+    match fetch_latest_from(npm_registry::DEFAULT_NPM_REGISTRY).await {
+        Ok(v) => Ok(v),
+        Err(official_err) => {
+            tracing::warn!(
+                error = ?official_err,
+                "official npm registry unreachable; falling back to mirror (may be stale)"
+            );
             let manager = npm_registry::package_manager();
-            npm_registry::pick_registry(manager)
-                .unwrap_or_else(|| npm_registry::DEFAULT_NPM_REGISTRY.to_owned())
-        });
+            let mirror = npm_registry::pick_registry(manager)
+                .unwrap_or_else(|| npm_registry::DEFAULT_NPM_REGISTRY.to_owned());
+            if mirror.trim_end_matches('/') == npm_registry::DEFAULT_NPM_REGISTRY.trim_end_matches('/')
+            {
+                return Err(official_err);
+            }
+            fetch_latest_from(&mirror).await
+        }
+    }
+}
+
+async fn fetch_latest_from(registry: &str) -> Result<Option<String>> {
     let url = format!(
         "{}{}/latest",
         registry.trim_end_matches('/'),
@@ -359,7 +385,7 @@ fn release_update_lock() {
     }
 }
 
-fn is_newer(remote: &str, local: &str) -> bool {
+pub fn is_newer(remote: &str, local: &str) -> bool {
     semver_cmp(remote, local) > 0
 }
 

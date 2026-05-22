@@ -1,4 +1,5 @@
 pub mod auto_update;
+pub mod autostart;
 pub mod ccswitch_extract;
 pub mod daemon;
 pub mod db;
@@ -7,6 +8,7 @@ pub mod gateway;
 pub mod install;
 mod install_codex_app;
 pub mod logs;
+pub mod setup;
 pub mod status;
 pub mod statusline;
 pub mod stop;

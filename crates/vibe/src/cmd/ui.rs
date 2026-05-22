@@ -1,16 +1,11 @@
 use anyhow::Result;
 use std::time::Instant;
-use vibe_core::{
-    UI_CDN_BASE_URL, UI_CDN_MIRROR_BASE_URL, UI_DASHBOARD_MIRROR_URL, UI_DASHBOARD_URL,
-};
+use vibe_core::{UI_CDN_BASE_URL, UI_DASHBOARD_URL};
 
 const CDN_BASES: &[(&str, &str, &str)] = &[
     ("github", UI_CDN_BASE_URL, UI_DASHBOARD_URL),
-    (
-        "cheez.tech",
-        UI_CDN_MIRROR_BASE_URL,
-        UI_DASHBOARD_MIRROR_URL,
-    ),
+    // TODO: cheez.tech mirror not yet published — restore when ready:
+    // ("cheez.tech", UI_CDN_MIRROR_BASE_URL, UI_DASHBOARD_MIRROR_URL),
 ];
 
 /// Probe each CDN `version.json` and return the dashboard URL for the fastest healthy origin.

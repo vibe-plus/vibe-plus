@@ -40,6 +40,11 @@ fn jwt_sub_claim(token: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Unix expiry timestamp from a JWT `exp` claim.
+pub fn jwt_exp_claim(token: &str) -> Option<i64> {
+    jwt_payload_json(token)?.get("exp").and_then(|x| x.as_i64())
+}
+
 /// `chatgpt_account_id` for `ChatGPT-Account-Id` on `wham/usage` (matches cc-switch token parsing).
 pub fn chatgpt_account_id_from_access_token(access_token: &str) -> Option<String> {
     let v = jwt_payload_json(access_token)?;
@@ -176,5 +181,22 @@ mod tests {
         let out = chatgpt_oauth_hints_from_access_token(&jwt);
         assert_eq!(out.email.as_deref(), Some("prof@example.com"));
         assert_eq!(out.chatgpt_plan_slug.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn jwt_exp_claim_reads_unix_timestamp() {
+        let header = JwtHeader {
+            alg: "none",
+            typ: "JWT",
+        };
+        let payload = json!({
+            "sub": "s",
+            "exp": 1_779_999_999_i64,
+        });
+        let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let jwt = format!("{h}.{p}.x");
+
+        assert_eq!(jwt_exp_claim(&jwt), Some(1_779_999_999));
     }
 }

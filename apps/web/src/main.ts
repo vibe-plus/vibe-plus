@@ -11,7 +11,8 @@ import { i18n, syncI18nWithUiLanguage } from "./dashboard/i18n.ts";
 import { syncDocumentTitle } from "./lib/page-title.ts";
 
 const { hostname } = window.location;
-if (hostname === "vibe-plus.github.io" || hostname === "vibe-plus.cheez.tech") {
+// TODO: re-add "vibe-plus.cheez.tech" when the mirror is published.
+if (hostname === "vibe-plus.github.io") {
   void redirectToFastestCDN();
 }
 

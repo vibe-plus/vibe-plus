@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::{configured_port, daemon, gateway, ui};
+use super::{autostart, configured_port, daemon, gateway, setup, ui};
 
 #[derive(clap::Args)]
 pub struct UpArgs {
@@ -27,8 +27,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let port = configured_port();
     let base_url = gateway::ensure_running(port).await?;
     println!("vibe is ready at {base_url}");
+    // Silently register login-item on first run so the gateway survives reboots
+    // and accidental kills. No-op when already registered or user opted out.
+    let _ = autostart::ensure_enabled_silent();
     auto_takeover(&base_url);
     auto_unify_codex_history();
+    setup::print_greeter_hint();
     ui::open_dashboard().await
 }
 

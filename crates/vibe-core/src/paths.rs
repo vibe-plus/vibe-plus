@@ -66,6 +66,20 @@ pub fn auto_update_lock_path() -> Result<PathBuf> {
     Ok(vibe_dir()?.join("auto-update.lock"))
 }
 
+pub fn state_dir() -> Result<PathBuf> {
+    let p = vibe_dir()?.join("state");
+    std::fs::create_dir_all(&p).ok();
+    Ok(p)
+}
+
+pub fn autostart_state_path() -> Result<PathBuf> {
+    Ok(state_dir()?.join("autostart.json"))
+}
+
+pub fn setup_state_path() -> Result<PathBuf> {
+    Ok(state_dir()?.join("setup.json"))
+}
+
 pub fn log_path() -> Result<PathBuf> {
     Ok(vibe_dir()?.join("vibe.log"))
 }

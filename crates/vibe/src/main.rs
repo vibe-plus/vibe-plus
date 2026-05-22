@@ -33,6 +33,29 @@ enum CcSwitchCommand {
 }
 
 #[derive(Subcommand)]
+enum AutostartCommand {
+    /// Register Vibe Plus to start at login (idempotent).
+    Enable,
+    /// Remove the login-item registration; future `vibe` runs won't re-add it.
+    Disable,
+    /// Show whether autostart is registered and live.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum SetupCommand {
+    /// List all setup steps and their state.
+    Status,
+    /// Run every pending setup step (interactive prompts kept to a minimum).
+    All,
+    /// Run a single setup step by id (see `vibe setup status`).
+    Run {
+        /// The step id, e.g. `cc-switch-import` or `autostart`.
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Internal helper used by the detached auto-updater.
     #[command(name = "auto-update-child", hide = true)]
@@ -61,6 +84,12 @@ enum Command {
     Update,
     /// Open the vibe+ dashboard in the browser (picks fastest CDN).
     Ui,
+    /// Manage Vibe Plus login-item / autostart registration.
+    #[command(subcommand)]
+    Autostart(AutostartCommand),
+    /// Versioned post-install / post-upgrade setup steps (CC Switch import, etc).
+    #[command(subcommand)]
+    Setup(SetupCommand),
     /// Local DB maintenance (slim / vacuum).
     #[command(subcommand)]
     Db(cmd::db::DbCommand),
@@ -87,8 +116,18 @@ async fn main() -> Result<()> {
         Some(Command::Takeover(a)) => cmd::takeover::run(a).await,
         Some(Command::Logs(a)) => cmd::logs::run(a).await,
         Some(Command::Install(a)) => cmd::install::run(a).await,
-        Some(Command::Update) => cmd::update::run(),
+        Some(Command::Update) => cmd::update::run().await,
         Some(Command::Ui) => cmd::ui::run().await,
+        Some(Command::Autostart(c)) => match c {
+            AutostartCommand::Enable => cmd::autostart::enable(),
+            AutostartCommand::Disable => cmd::autostart::disable(),
+            AutostartCommand::Status => cmd::autostart::status(),
+        },
+        Some(Command::Setup(c)) => match c {
+            SetupCommand::Status => cmd::setup::print_status(),
+            SetupCommand::All => cmd::setup::run_all_pending(),
+            SetupCommand::Run { id } => cmd::setup::run_step(&id),
+        },
         Some(Command::Db(c)) => cmd::db::run(c).await,
     }
 }

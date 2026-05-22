@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use vibe_protocol::CredentialInput;
 
-use crate::auth_fingerprint::chatgpt_oauth_hints_from_access_token;
+use crate::auth_fingerprint::{chatgpt_oauth_hints_from_access_token, jwt_exp_claim};
 
 /// Tokens extracted from a single `auth.json` body (file read happens only in import code).
 #[derive(Debug, Clone)]
@@ -49,7 +49,8 @@ fn oauth_triple_from_json(v: &Value) -> Option<(String, Option<String>, Option<i
     let exp = v
         .pointer("/tokens/expires_at")
         .and_then(|x| x.as_i64())
-        .or_else(|| v.pointer("/tokens/expiry").and_then(|x| x.as_i64()));
+        .or_else(|| v.pointer("/tokens/expiry").and_then(|x| x.as_i64()))
+        .or_else(|| jwt_exp_claim(&access));
     Some((access, refresh, exp))
 }
 
@@ -154,6 +155,22 @@ mod tests {
         assert!(!t.is_api_key_mode);
         assert_eq!(t.oauth_access_token, "at");
         assert_eq!(t.oauth_refresh_token.as_deref(), Some("rt"));
+    }
+
+    #[test]
+    fn chatgpt_oauth_mode_uses_access_token_exp_when_explicit_expiry_missing() {
+        let header = r#"{"alg":"none","typ":"JWT"}"#;
+        let payload = r#"{"sub":"sid-99","exp":1779999999}"#;
+        let h = URL_SAFE_NO_PAD.encode(header.as_bytes());
+        let p = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        let access_jwt = format!("{h}.{p}.sig");
+        let body = format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{access_jwt}","refresh_token":"rt"}}}}"#
+        );
+
+        let t = parse_codex_auth_json(&body).unwrap();
+
+        assert_eq!(t.oauth_expires_at, Some(1_779_999_999));
     }
 
     #[test]

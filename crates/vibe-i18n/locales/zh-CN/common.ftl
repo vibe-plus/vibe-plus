@@ -40,6 +40,13 @@ auto-update-relaunch-previous = 正在重新拉起旧版网关…
 auto-update-check-error = 自动更新检查已跳过：{ $error }。
 auto-update-package-name = @vibe-plus/cli@latest
 
+cli-update-checking = 正在查询 npm 上的最新版 Vibe Plus CLI…
+cli-update-already-latest = 已经是最新版（当前 { $current }，npm 报告 { $remote }），无需更新。
+cli-update-upgrading = 正在更新 Vibe Plus CLI：{ $current } → { $remote }
+cli-update-no-latest = 无法从 npm 读取最新版本号；仍将尝试安装。
+cli-update-check-failed = 版本检查失败（{ $error }）；仍将尝试安装。
+cli-update-done = 完成。执行 `vibe`（或 `vibe up`）启动更新后的网关。如旧网关仍在监听，`vibe` 会自动替换。
+
 gateway-listening = 网关已监听 { $addr }
 gateway-no-credentials = 已经没有可用的凭证。所有凭证都已被禁用（通常是因为上游 401/403 鉴权失败）。请到面板中手动启用一个凭证后再重试。
 gateway-all-providers-blocked = 所有供应商目前都被熔断器暂时阻断。请在面板中重置一个供应商，或稍后重试。

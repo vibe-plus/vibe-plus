@@ -40,6 +40,13 @@ auto-update-relaunch-previous = Relaunching previous gateway binary…
 auto-update-check-error = Auto-update check skipped: { $error }.
 auto-update-package-name = @vibe-plus/cli@latest
 
+cli-update-checking = Checking npm for the latest Vibe Plus CLI…
+cli-update-already-latest = Already on the latest version ({ $current }); npm reports { $remote }. Nothing to do.
+cli-update-upgrading = Updating Vibe Plus CLI: { $current } → { $remote }
+cli-update-no-latest = Could not read the latest version from npm; running install anyway.
+cli-update-check-failed = Version check failed ({ $error }); running install anyway.
+cli-update-done = Done. Run `vibe` (or `vibe up`) to launch the updated gateway. If an older gateway is still listening, `vibe` will replace it automatically.
+
 gateway-listening = vibe-core listening on { $addr }
 gateway-no-credentials = No usable credentials. All have been disabled (typically after upstream 401/403 auth errors). Re-enable one in the dashboard before retrying.
 gateway-all-providers-blocked = All providers are temporarily unavailable because the circuit breaker is open. Reset one provider in the dashboard or wait for recovery.
