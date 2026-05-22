@@ -13,7 +13,7 @@
     },
     "apps/web": {
       "name": "web",
-      "version": "0.0.6",
+      "version": "0.0.8",
       "dependencies": {
         "diff": "^9.0.0",
         "pinia": "^2.3.1",
@@ -48,31 +48,31 @@
     },
     "packages/app-npm": {
       "name": "@vibe-plus/app",
-      "version": "0.0.2",
+      "version": "0.0.8",
       "bin": {
         "vibe-app": "./bin/vibe-app.js",
       },
       "optionalDependencies": {
-        "@vibe-plus/app-darwin-arm64": "0.0.2",
-        "@vibe-plus/app-win32-x64": "0.0.2",
+        "@vibe-plus/app-darwin-arm64": "0.0.8",
+        "@vibe-plus/app-win32-x64": "0.0.8",
       },
     },
     "packages/cli-npm": {
       "name": "@vibe-plus/cli",
-      "version": "0.0.6",
+      "version": "0.0.8",
       "bin": {
         "v": "bin/vibe.js",
         "vibe": "bin/vibe.js",
         "vibe-plus": "bin/vibe.js",
       },
       "optionalDependencies": {
-        "@vibe-plus/cli-darwin-arm64": "0.0.6",
-        "@vibe-plus/cli-win32-x64": "0.0.6",
+        "@vibe-plus/cli-darwin-arm64": "0.0.8",
+        "@vibe-plus/cli-win32-x64": "0.0.8",
       },
     },
     "packages/mcp": {
       "name": "@vibe-plus/mcp",
-      "version": "0.0.2",
+      "version": "0.0.8",
       "bin": {
         "vibe-plus-mcp": "./src/index.ts",
       },
@@ -87,7 +87,7 @@
     },
     "packages/utils": {
       "name": "utils",
-      "version": "0.0.2",
+      "version": "0.0.8",
       "devDependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@types/node": "^25.5.0",
