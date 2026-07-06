@@ -1,6 +1,6 @@
 {
   "name": "@vibe-plus/cli-darwin-arm64",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "vibe binary for darwin-arm64",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "cheezone <cheezone@163.com>",
