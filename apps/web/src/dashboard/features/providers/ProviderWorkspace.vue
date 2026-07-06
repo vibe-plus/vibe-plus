@@ -27,6 +27,7 @@ import UiSkeleton from "../../components/ui/skeleton.vue";
 import ProviderSections from "./components/ProviderSections.vue";
 import ProviderSmartModal from "./components/provider-smart-modal.vue";
 import ProviderImportModal from "./components/provider-import-modal.vue";
+import ProviderClipboardModal from "./components/provider-clipboard-modal.vue";
 import CredentialFormModal from "./components/CredentialFormModal.vue";
 
 import {
@@ -72,6 +73,8 @@ const editTarget = ref<Provider | null>(null);
 
 // Import modal
 const showImportModal = ref(false);
+const showClipboardModal = ref(false);
+const clipboardModalMode = ref<"export" | "import">("import");
 
 const editProviderLive = computed(() => {
   if (!editTarget.value) return null;
@@ -842,6 +845,34 @@ watch(
         type="button"
         variant="outline"
         class="min-h-11 sm:min-h-9"
+        :title="t('actions.exportClipboard')"
+        :aria-label="t('actions.exportClipboard')"
+        @click="
+          clipboardModalMode = 'export';
+          showClipboardModal = true;
+        "
+      >
+        <VpIcon name="copy" size-class="size-4 shrink-0" />
+        <span class="hidden sm:inline">{{ t("actions.export") }}</span>
+      </UiButton>
+      <UiButton
+        type="button"
+        variant="outline"
+        class="min-h-11 sm:min-h-9"
+        :title="t('actions.importClipboard')"
+        :aria-label="t('actions.importClipboard')"
+        @click="
+          clipboardModalMode = 'import';
+          showClipboardModal = true;
+        "
+      >
+        <VpIcon name="clipboard" size-class="size-4 shrink-0" />
+        <span class="hidden sm:inline">{{ t("actions.importClipboardShort") }}</span>
+      </UiButton>
+      <UiButton
+        type="button"
+        variant="outline"
+        class="min-h-11 sm:min-h-9"
         :title="t('actions.localImport')"
         :aria-label="t('actions.localImport')"
         @click="showImportModal = true"
@@ -941,6 +972,15 @@ watch(
       @imported="load()"
     />
 
+    <ProviderClipboardModal
+      :open="showClipboardModal"
+      :mode="clipboardModalMode"
+      :providers="providers"
+      :creds-by-provider="credsByProvider"
+      @close="showClipboardModal = false"
+      @imported="load()"
+    />
+
     <CredentialFormModal
       :open="showCredForm"
       :edit-cred="editCred"
@@ -981,7 +1021,11 @@ watch(
   "en": {
     "actions": {
       "addProvider": "Add provider",
+      "export": "Export",
+      "exportClipboard": "Export providers to clipboard",
       "import": "Import",
+      "importClipboard": "Import providers from clipboard",
+      "importClipboardShort": "Clipboard",
       "localImport": "Local import"
     },
     "errors": {
@@ -1032,7 +1076,11 @@ watch(
   "zh-CN": {
     "actions": {
       "addProvider": "添加供应商",
+      "export": "导出",
+      "exportClipboard": "导出供应商到剪贴板",
       "import": "导入",
+      "importClipboard": "从剪贴板导入供应商",
+      "importClipboardShort": "剪贴板",
       "localImport": "本地导入"
     },
     "errors": {

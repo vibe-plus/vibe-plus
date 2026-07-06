@@ -149,10 +149,9 @@ fn read_state() -> Result<Option<AutostartState>> {
     if !path.exists() {
         return Ok(None);
     }
-    let raw =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let state: AutostartState = serde_json::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let state: AutostartState =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     Ok(Some(state))
 }
 
@@ -188,8 +187,7 @@ fn platform_supported() -> bool {
 fn launch_agent_path() -> Result<PathBuf> {
     let home = vibe_core::paths::real_home_dir()?;
     let dir = home.join("Library").join("LaunchAgents");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     Ok(dir.join(format!("{LAUNCH_AGENT_LABEL}.plist")))
 }
 
@@ -200,8 +198,8 @@ fn register_platform(exe: &Path) -> Result<()> {
     let log_dir = vibe_core::paths::vibe_dir()?;
     let stdout_log = log_dir.join("launchd.out.log");
     let stderr_log = log_dir.join("launchd.err.log");
-    let path_env = std::env::var("PATH").unwrap_or_else(|_|
-        "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin".to_string());
+    let path_env = std::env::var("PATH")
+        .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin".to_string());
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -373,9 +371,7 @@ mod tests {
         assert!(looks_like_dev_build(&PathBuf::from(
             "/tmp/vibe-auto-updater-1234"
         )));
-        assert!(!looks_like_dev_build(&PathBuf::from(
-            "/usr/local/bin/vibe"
-        )));
+        assert!(!looks_like_dev_build(&PathBuf::from("/usr/local/bin/vibe")));
         assert!(!looks_like_dev_build(&PathBuf::from(
             "/Users/x/.nvm/versions/node/v20/bin/vibe"
         )));

@@ -982,9 +982,7 @@ fn apply_claude_assistant_usage(
         .local_tokens_used
         .saturating_add(input + output + cache_read + cache_creation);
     if let Some(m) = model.as_deref() {
-        if let Some(cost) =
-            local_estimate_cost_usd(m, input, output, cache_read, cache_creation)
-        {
+        if let Some(cost) = local_estimate_cost_usd(m, input, output, cache_read, cache_creation) {
             seed.local_estimated_cost_usd += cost;
         }
     }

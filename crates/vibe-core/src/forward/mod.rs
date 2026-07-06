@@ -1307,9 +1307,18 @@ impl CredentialDisableReason {
     pub(crate) fn from_upstream_status(status: u16, provider_id: impl Into<String>) -> Self {
         let provider_id = provider_id.into();
         match status {
-            401 => Self::UpstreamAuthFailed { status, provider_id },
-            403 => Self::UpstreamForbidden { status, provider_id },
-            _ => Self::UpstreamHttpError { status, provider_id },
+            401 => Self::UpstreamAuthFailed {
+                status,
+                provider_id,
+            },
+            403 => Self::UpstreamForbidden {
+                status,
+                provider_id,
+            },
+            _ => Self::UpstreamHttpError {
+                status,
+                provider_id,
+            },
         }
     }
 
@@ -1323,9 +1332,18 @@ impl CredentialDisableReason {
 
     pub(crate) fn params(&self) -> serde_json::Value {
         match self {
-            Self::UpstreamAuthFailed { status, provider_id }
-            | Self::UpstreamForbidden { status, provider_id }
-            | Self::UpstreamHttpError { status, provider_id } => serde_json::json!({
+            Self::UpstreamAuthFailed {
+                status,
+                provider_id,
+            }
+            | Self::UpstreamForbidden {
+                status,
+                provider_id,
+            }
+            | Self::UpstreamHttpError {
+                status,
+                provider_id,
+            } => serde_json::json!({
                 "status": status,
                 "provider_id": provider_id,
             }),
@@ -1334,9 +1352,18 @@ impl CredentialDisableReason {
 
     pub(crate) fn human(&self) -> String {
         match self {
-            Self::UpstreamAuthFailed { status, provider_id }
-            | Self::UpstreamForbidden { status, provider_id }
-            | Self::UpstreamHttpError { status, provider_id } => {
+            Self::UpstreamAuthFailed {
+                status,
+                provider_id,
+            }
+            | Self::UpstreamForbidden {
+                status,
+                provider_id,
+            }
+            | Self::UpstreamHttpError {
+                status,
+                provider_id,
+            } => {
                 format!("HTTP {status} from {provider_id}")
             }
         }
@@ -2141,18 +2168,34 @@ pub(crate) fn codex_sticky_key(wire: Wire, headers: &HeaderMap, body: &[u8]) -> 
         return None;
     }
 
-    fn header_key(headers: &HeaderMap, name: &str) -> Option<String> {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| format!("hdr:{name}:{s}"))
+    fn header_value(headers: &HeaderMap, names: &[&str]) -> Option<String> {
+        names.iter().find_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
     }
 
-    header_key(headers, "thread_id")
-        .or_else(|| header_key(headers, "session_id"))
-        .or_else(|| selector::sticky_key_from_body(body))
+    fn header_key(headers: &HeaderMap, canonical: &str, names: &[&str]) -> Option<String> {
+        header_value(headers, names).map(|s| format!("hdr:{canonical}:{s}"))
+    }
+
+    header_key(
+        headers,
+        "thread_id",
+        &["thread_id", "thread-id", "x-vibe-thread-id"],
+    )
+    .or_else(|| {
+        header_key(
+            headers,
+            "session_id",
+            &["session_id", "session-id", "x-vibe-session-id"],
+        )
+    })
+    .or_else(|| selector::sticky_key_from_body(body))
 }
 
 fn extract_thread_turn_trace_session_from_headers(
@@ -2181,7 +2224,9 @@ fn extract_thread_turn_trace_session_from_headers(
         h(headers, "trace_id")
             .or_else(|| h(headers, "x-vibe-trace-id"))
             .or_else(|| h(headers, "x-request-id")),
-        h(headers, "session_id").or_else(|| h(headers, "x-vibe-session-id")),
+        h(headers, "session_id")
+            .or_else(|| h(headers, "session-id"))
+            .or_else(|| h(headers, "x-vibe-session-id")),
     )
 }
 
@@ -2626,6 +2671,37 @@ mod tests {
             codex_sticky_key(Wire::OpenaiResponses, &headers, body).as_deref(),
             Some("body:/previous_response_id:resp-123")
         );
+    }
+
+    #[test]
+    fn codex_sticky_key_accepts_dash_header_variants() {
+        let body = br#"{"previous_response_id":"resp-123"}"#;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", header_value("session-dash"));
+        assert_eq!(
+            codex_sticky_key(Wire::OpenaiResponses, &headers, body).as_deref(),
+            Some("hdr:session_id:session-dash")
+        );
+
+        headers.insert("thread-id", header_value(" thread-dash "));
+        assert_eq!(
+            codex_sticky_key(Wire::OpenaiResponses, &headers, body).as_deref(),
+            Some("hdr:thread_id:thread-dash")
+        );
+    }
+
+    #[test]
+    fn extract_thread_turn_trace_session_accepts_dash_session_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("thread-id", header_value("thread-dash"));
+        headers.insert("session-id", header_value("session-dash"));
+
+        let (thread, _turn, _trace, session) =
+            extract_thread_turn_trace_session(&headers, br#"{}"#);
+
+        assert_eq!(thread.as_deref(), Some("thread-dash"));
+        assert_eq!(session.as_deref(), Some("session-dash"));
     }
 
     #[test]

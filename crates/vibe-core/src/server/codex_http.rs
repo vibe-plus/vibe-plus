@@ -250,6 +250,16 @@ pub(super) fn codex_sse_block_extract_response_id(block: &str) -> Option<String>
     None
 }
 
+pub(super) fn codex_sse_block_has_terminal_data(block: &str) -> bool {
+    block.lines().any(|raw_line| {
+        let line = raw_line.trim_end_matches('\r');
+        let Some(payload) = line.strip_prefix("data:") else {
+            return false;
+        };
+        transforms::upstream_sse_data_is_terminal(payload.trim_start())
+    })
+}
+
 /// Inspect one SSE frame (delimiter `\n\n`) and decide whether it looks like **Chat Completions** JSON.
 ///
 /// Returns:
@@ -489,6 +499,11 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
                                 "codex http-sse summary transformed block"
                             );
                         }
+                        if codex_sse_block_has_terminal_data(event_block)
+                            || codex_sse_block_has_terminal_data(&block_to_forward)
+                        {
+                            *terminal_done = true;
+                        }
                         if !emit_raw_frame(tx, trace, trace_stats, started, &block_to_forward).await
                         {
                             return false;
@@ -643,7 +658,7 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
             }
         }
 
-        if mode == CodexHttpSseMode::C2r && !terminal_done {
+        if !terminal_done {
             let detail = if stream_broken {
                 "upstream SSE read error before a terminal chunk (no finish_reason / [DONE] seen)"
             } else {
@@ -654,13 +669,15 @@ pub(super) async fn codex_plain_http_maybe_chat_to_responses_sse(
                 "upstream_stream_truncated",
                 detail,
             );
-            append_codex_ws_client_trace(&mut trace, &payload);
-            let sse_line = format!("data: {}\n\n", payload);
             trace_stats.mark_terminal_injected();
-            let bytes = sse_line.len();
-            if tx.send(Ok(Bytes::from(sse_line))).await.is_ok() {
-                trace_stats.record_client_chunk(&request_started_instant, bytes);
-            }
+            let _ = emit_c2r_frame(
+                &tx,
+                &mut trace,
+                &mut trace_stats,
+                &request_started_instant,
+                &payload,
+            )
+            .await;
         }
 
         if trace_stats.terminal_seen() {
@@ -853,7 +870,8 @@ pub(super) fn codex_sse_block_to_ws_frames(
     let mut frames = Vec::new();
     for raw_line in event_block.lines() {
         let line = raw_line.trim_end_matches('\r');
-        if let Some(data) = line.strip_prefix("data: ") {
+        if let Some(data) = line.strip_prefix("data:") {
+            let data = data.trim_start();
             if data.trim() == "[DONE]" {
                 continue;
             }
@@ -876,4 +894,115 @@ pub(super) fn codex_sse_block_to_ws_frames(
         }
     }
     frames
+}
+
+#[cfg(test)]
+mod codex_http_sse_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    fn test_state() -> AppState {
+        AppState::init(
+            vibe_db::Db::memory().expect("db"),
+            crate::config::Config::default(),
+            0,
+        )
+        .expect("state")
+    }
+
+    async fn wrap_sse_body(body: &'static str) -> String {
+        let upstream = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(body))
+            .expect("response");
+        let response = codex_plain_http_maybe_chat_to_responses_sse(
+            test_state(),
+            upstream,
+            Instant::now(),
+            false,
+            None,
+            None,
+        )
+        .await;
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        String::from_utf8(bytes.to_vec()).expect("utf8")
+    }
+
+    #[test]
+    fn codex_sse_block_to_ws_frames_accepts_data_without_space() {
+        let mut accumulator = transforms::ChatCompletionsC2rAccumulator::default();
+        let mut terminal_done = false;
+        let frames = codex_sse_block_to_ws_frames(
+            r#"data:{"type":"response.completed","response":{"id":"resp_1"}}"#,
+            "resp-local",
+            "msg-local",
+            &mut accumulator,
+            &mut terminal_done,
+        );
+
+        assert!(terminal_done);
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains(r#""type":"response.completed""#));
+    }
+
+    #[test]
+    fn codex_sse_block_terminal_detection_accepts_failed_and_incomplete() {
+        assert!(codex_sse_block_has_terminal_data(
+            r#"event: response.failed
+data:{"type":"response.failed","response":{"id":"resp_1","error":{"message":"nope"}}}"#
+        ));
+        assert!(codex_sse_block_has_terminal_data(
+            r#"event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"resp_1"}}"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn passthrough_truncated_responses_sse_injects_failed_event() {
+        let out = wrap_sse_body(
+            r#"event: response.created
+data: {"type":"response.created","response":{"id":"resp_1"}}
+
+"#,
+        )
+        .await;
+
+        assert!(out.contains("event: response.created"));
+        assert!(out.contains("event: response.failed"));
+        assert!(out.contains("upstream_stream_truncated"));
+    }
+
+    #[tokio::test]
+    async fn passthrough_response_failed_counts_as_terminal() {
+        let out = wrap_sse_body(
+            r#"event: response.created
+data: {"type":"response.created","response":{"id":"resp_1"}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_1","error":{"code":"rate_limit_exceeded","message":"limited"}}}
+
+"#,
+        )
+        .await;
+
+        assert_eq!(out.matches("response.failed").count(), 2);
+        assert!(!out.contains("upstream_stream_truncated"));
+    }
+
+    #[tokio::test]
+    async fn c2r_truncated_chat_sse_injects_typed_failed_event() {
+        let out = wrap_sse_body(
+            r#"data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}
+
+"#,
+        )
+        .await;
+
+        assert!(out.contains("event: response.created"));
+        assert!(out.contains("event: response.failed"));
+        assert!(out.contains("upstream_stream_truncated"));
+    }
 }

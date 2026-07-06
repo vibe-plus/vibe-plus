@@ -8,6 +8,7 @@ pub mod gateway;
 pub mod install;
 mod install_codex_app;
 pub mod logs;
+pub mod observe;
 pub mod setup;
 pub mod status;
 pub mod statusline;

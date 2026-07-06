@@ -21,6 +21,7 @@ pub mod codex_upstream_ws;
 pub mod codex_visual;
 pub mod codex_wham_usage;
 pub mod config;
+pub mod diagnostics;
 pub mod forward;
 pub mod gateway_maintenance;
 pub mod model_defaults;

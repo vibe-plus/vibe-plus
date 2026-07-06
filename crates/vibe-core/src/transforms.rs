@@ -1302,13 +1302,14 @@ pub fn append_response_message_text(body: &[u8], text: &str) -> Bytes {
 // ---------------------------------------------------------------------------
 
 /// One SSE `data:` line indicates the upstream has finished the assistant turn
-/// (Chat Completions `finish_reason`, or native Responses `response.completed` / `response.done`).
+/// in a way Codex can consume: Chat Completions `finish_reason`, or native
+/// Responses `response.completed` / `response.failed` / `response.incomplete`.
 pub fn upstream_sse_data_is_terminal(data: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
         return false;
     };
     match v.get("type").and_then(|t| t.as_str()) {
-        Some(t) if t == "response.completed" || t == "response.done" => return true,
+        Some("response.completed" | "response.failed" | "response.incomplete") => return true,
         _ => {}
     }
     if let Some(fr) = v
@@ -2099,6 +2100,19 @@ mod tests {
     fn upstream_sse_data_is_terminal_chat_finish() {
         assert!(upstream_sse_data_is_terminal(
             r#"{"choices":[{"finish_reason":"stop"}]}"#
+        ));
+    }
+
+    #[test]
+    fn upstream_sse_data_is_terminal_for_codex_consumable_responses_errors() {
+        assert!(upstream_sse_data_is_terminal(
+            r#"{"type":"response.failed","response":{"id":"resp_1"}}"#
+        ));
+        assert!(upstream_sse_data_is_terminal(
+            r#"{"type":"response.incomplete","response":{"id":"resp_1"}}"#
+        ));
+        assert!(!upstream_sse_data_is_terminal(
+            r#"{"type":"response.done","response":{"id":"resp_1"}}"#
         ));
     }
 

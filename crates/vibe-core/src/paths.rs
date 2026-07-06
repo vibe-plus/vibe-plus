@@ -84,6 +84,17 @@ pub fn log_path() -> Result<PathBuf> {
     Ok(vibe_dir()?.join("vibe.log"))
 }
 
+pub fn logs_dir() -> Result<PathBuf> {
+    let p = vibe_dir()?.join("logs");
+    std::fs::create_dir_all(&p).ok();
+    Ok(p)
+}
+
+/// Combined stdout/stderr from `vibe up --foreground` when started in the background.
+pub fn gateway_log_path() -> Result<PathBuf> {
+    Ok(logs_dir()?.join("gateway.log"))
+}
+
 pub fn backups_dir() -> Result<PathBuf> {
     let p = vibe_dir()?.join("backups");
     std::fs::create_dir_all(&p).ok();

@@ -12,6 +12,8 @@ cli-up-running-background = Vibe Plus is up in the background.
 cli-stop-not-running = Vibe Plus is not running.
 cli-stop-stopped = Vibe Plus stopped.
 cli-doctor-title = Vibe Plus doctor
+cli-gateway-not-ready = Gateway not ready at { $url } within { $timeout }
+cli-gateway-log-hint = Background log: { $path } (`tail -f`; foreground: `vibe up --foreground`)
 
 auto-update-checker-scheduled = Auto-update checker scheduled.
 auto-update-check-tick = Checking for Vibe Plus updates…

@@ -498,6 +498,12 @@ pub(crate) async fn try_one_pick(
                     emit_circuit_event(&state, &cb_key, change);
                 }
             }
+        } else if let Some(change) = state.cb.record_failure(&cb_key) {
+            // 404-on-Responses, 402, and 5xx are retryable for this request but
+            // should still cool down the failing slot. Without this, race mode
+            // keeps selecting the same broken upstreams and Codex sees repeated
+            // reconnects.
+            emit_circuit_event(&state, &cb_key, change);
         }
         fire_health(
             &state,
@@ -1210,16 +1216,24 @@ mod tests {
     async fn pick_retries_on_404_when_wire_is_openai_responses() {
         let base = start_mock(404, "no route").await;
         let state = make_state();
-        let provider = make_provider("p-404resp", ProviderKind::OpenaiResponses, base);
-        let epick = make_epick_passthrough(provider);
-        let body = Bytes::from(r#"{"model":"gpt-test","input":"hi"}"#);
-        let ctx = make_ctx(Wire::OpenaiResponses, body);
+        let cb_key = "p-404resp".to_string();
 
-        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
+        for attempt in 1..=3 {
+            let provider = make_provider("p-404resp", ProviderKind::OpenaiResponses, base.clone());
+            let epick = make_epick_passthrough(provider);
+            let body = Bytes::from(r#"{"model":"gpt-test","input":"hi"}"#);
+            let ctx = make_ctx(Wire::OpenaiResponses, body);
+
+            let result = try_one_pick(state.clone(), epick, attempt, 0, 1, ctx).await;
+            assert!(
+                matches!(result, PickResult::Retry { .. }),
+                "expected Retry, got {}",
+                variant_name(&result)
+            );
+        }
         assert!(
-            matches!(result, PickResult::Retry { .. }),
-            "expected Retry, got {}",
-            variant_name(&result)
+            !state.cb.allow(&cb_key),
+            "Responses 404 should eventually open the circuit"
         );
     }
 
@@ -1430,12 +1444,20 @@ mod tests {
     async fn pick_retries_on_500_server_error() {
         let base = start_mock(500, "oops").await;
         let state = make_state();
-        let provider = make_provider("p-500", ProviderKind::OpenaiChat, base);
-        let epick = make_epick_passthrough(provider);
-        let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
+        let cb_key = "p-500".to_string();
 
-        let result = try_one_pick(state, epick, 1, 0, 1, ctx).await;
-        assert!(matches!(result, PickResult::Retry { .. }));
+        for attempt in 1..=3 {
+            let provider = make_provider("p-500", ProviderKind::OpenaiChat, base.clone());
+            let epick = make_epick_passthrough(provider);
+            let ctx = make_ctx(Wire::OpenaiChat, openai_chat_body());
+
+            let result = try_one_pick(state.clone(), epick, attempt, 0, 1, ctx).await;
+            assert!(matches!(result, PickResult::Retry { .. }));
+        }
+        assert!(
+            !state.cb.allow(&cb_key),
+            "5xx retries should eventually open the circuit"
+        );
     }
 
     // ── 9. 502 bad gateway — retryable ──────────────────────────────────

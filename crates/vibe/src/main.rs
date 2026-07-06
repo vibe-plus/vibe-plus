@@ -82,8 +82,11 @@ enum Command {
     Install(cmd::install::InstallArgs),
     /// Update to the latest version via npm.
     Update,
-    /// Open the vibe+ dashboard in the browser (picks fastest CDN).
+    /// Open the vibe+ dashboard in the browser.
     Ui,
+    /// Open observability; starts the Rust gateway if needed, without takeover.
+    #[command(name = "o", visible_aliases = ["observe", "observability"])]
+    Observe,
     /// Manage Vibe Plus login-item / autostart registration.
     #[command(subcommand)]
     Autostart(AutostartCommand),
@@ -118,6 +121,7 @@ async fn main() -> Result<()> {
         Some(Command::Install(a)) => cmd::install::run(a).await,
         Some(Command::Update) => cmd::update::run().await,
         Some(Command::Ui) => cmd::ui::run().await,
+        Some(Command::Observe) => cmd::observe::run().await,
         Some(Command::Autostart(c)) => match c {
             AutostartCommand::Enable => cmd::autostart::enable(),
             AutostartCommand::Disable => cmd::autostart::disable(),

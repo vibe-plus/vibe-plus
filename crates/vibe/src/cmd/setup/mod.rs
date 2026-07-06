@@ -35,7 +35,10 @@ pub enum Recurrence {
 pub enum CheckResult {
     /// Step is applicable and not yet completed. `reason` is a short Chinese hint
     /// shown in the greeter, e.g. "在 CC Switch 中发现 8 个供应商".
-    Pending { reason_zh: String, reason_en: String },
+    Pending {
+        reason_zh: String,
+        reason_en: String,
+    },
     /// Already done according to state file (and, where cheap, verified live).
     Completed,
     /// Not applicable — nothing to import, nothing to set up. Skipped silently.
@@ -95,13 +98,11 @@ fn read_state() -> Result<SetupState> {
     if !path.exists() {
         return Ok(SetupState::default());
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     if raw.trim().is_empty() {
         return Ok(SetupState::default());
     }
-    let state = serde_json::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let state = serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     Ok(state)
 }
 
@@ -152,7 +153,10 @@ pub fn pending_steps() -> Vec<PendingStep> {
             continue;
         }
         match (step.check)() {
-            CheckResult::Pending { reason_zh, reason_en } => out.push(PendingStep {
+            CheckResult::Pending {
+                reason_zh,
+                reason_en,
+            } => out.push(PendingStep {
                 id: step.id,
                 title: pick(step.title_zh, step.title_en),
                 reason: pick(&reason_zh, &reason_en).to_string(),
@@ -170,8 +174,14 @@ pub fn print_greeter_hint() {
         return;
     }
     let header = pick(
-        &format!("[setup] {} 项 setup 待办（vibe setup 查看 / 执行）：", pending.len()),
-        &format!("[setup] {} pending step(s) — run `vibe setup` to inspect or execute:", pending.len()),
+        &format!(
+            "[setup] {} 项 setup 待办（vibe setup 查看 / 执行）：",
+            pending.len()
+        ),
+        &format!(
+            "[setup] {} pending step(s) — run `vibe setup` to inspect or execute:",
+            pending.len()
+        ),
     )
     .to_string();
     println!("  {header}");
@@ -224,7 +234,11 @@ pub fn print_status() -> Result<()> {
         let title = pick(step.title_zh, step.title_en);
         println!("  {status:<24} {} [{recurrence}]", step.id);
         println!("                          {title}");
-        if let CheckResult::Pending { reason_zh, reason_en } = &check {
+        if let CheckResult::Pending {
+            reason_zh,
+            reason_en,
+        } = &check
+        {
             println!("                          → {}", pick(reason_zh, reason_en));
         }
         if let Some(rec) = state.steps.get(step.id) {

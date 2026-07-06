@@ -3,8 +3,14 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
-use vibe_core::paths;
+use vibe_core::{diagnostics, paths, VERSION};
 use vibe_i18n::{detect_locale_from_env, ZH_CN_LOCALE};
+
+#[derive(Debug, Clone, Copy)]
+pub struct BackgroundGatewaySpawn {
+    pub child_pid: u32,
+    pub log_offset: u64,
+}
 
 pub fn local_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
@@ -51,15 +57,67 @@ pub async fn fetch_running_version(base_url: &str) -> Option<String> {
         .map(|status| status.version)
 }
 
-pub async fn wait_until_ready(base_url: &str, timeout: Duration) -> Result<()> {
+pub async fn wait_until_ready(
+    base_url: &str,
+    port: u16,
+    timeout: Duration,
+    spawn: Option<BackgroundGatewaySpawn>,
+) -> Result<()> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if is_responsive(base_url).await {
             return Ok(());
         }
+        if let Some(spawn) = spawn {
+            if let Some(message) = spawn_failure_message(port, spawn) {
+                anyhow::bail!("gateway failed to start at {base_url}\n\n{message}");
+            }
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    anyhow::bail!("gateway did not become ready at {base_url} within {timeout:?}");
+    let hint = diagnostics::startup_failure_message(port, VERSION);
+    anyhow::bail!("gateway did not become ready at {base_url} within {timeout:?}\n\n{hint}");
+}
+
+fn spawn_failure_message(port: u16, spawn: BackgroundGatewaySpawn) -> Option<String> {
+    if process_alive(spawn.child_pid) {
+        return None;
+    }
+    let log_tail = diagnostics::read_gateway_log_since(spawn.log_offset, 60);
+    Some(diagnostics::gateway_spawn_failed_message(
+        port,
+        VERSION,
+        log_tail.as_deref(),
+    ))
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    pid > 0 && unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = format!(
+        "(Get-Process -Id {pid} -ErrorAction SilentlyContinue) -ne $null"
+    );
+    Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_alive(pid: u32) -> bool {
+    let _ = pid;
+    false
 }
 
 pub async fn wait_until_stopped(base_url: &str, timeout: Duration) -> Result<()> {
@@ -128,8 +186,15 @@ pub async fn ensure_running(port: u16) -> Result<String> {
         let _ = std::fs::remove_file(&pid_path);
     }
 
-    super::daemon::spawn_background(port)?;
-    wait_until_ready(&base_url, Duration::from_secs(30)).await?;
+    diagnostics::preflight_gateway_start(VERSION)?;
+    let spawn = super::daemon::spawn_background(port)?;
+    wait_until_ready(
+        &base_url,
+        port,
+        Duration::from_secs(30),
+        Some(spawn),
+    )
+    .await?;
     Ok(base_url)
 }
 

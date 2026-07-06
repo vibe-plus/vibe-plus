@@ -12,6 +12,8 @@ cli-up-running-background = Vibe Plus 已在后台运行。
 cli-stop-not-running = Vibe Plus 未在运行。
 cli-stop-stopped = Vibe Plus 已停止。
 cli-doctor-title = Vibe Plus 检查
+cli-gateway-not-ready = 网关在 { $timeout } 内未就绪：{ $url }
+cli-gateway-log-hint = 后台日志：{ $path }（`tail -f` 查看；前台：`vibe up --foreground`）
 
 auto-update-checker-scheduled = 自动更新检查器已启动。
 auto-update-check-tick = 正在检查 Vibe Plus 更新…

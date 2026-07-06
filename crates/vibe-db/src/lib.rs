@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod body_store;
 pub mod dao;
@@ -18,6 +18,24 @@ pub use body_store::*;
 pub use dao::*;
 pub use gateway_maintenance::*;
 pub use maintenance::*;
+
+/// Schema compatibility snapshot for CLI doctor / startup diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DbSchemaInspect {
+    pub db_user_version: usize,
+    pub embedded_max_version: usize,
+}
+
+impl DbSchemaInspect {
+    pub fn is_too_far_ahead(&self) -> bool {
+        self.db_user_version > self.embedded_max_version
+    }
+
+    pub fn pending_upgrades(&self) -> usize {
+        self.embedded_max_version
+            .saturating_sub(self.db_user_version)
+    }
+}
 
 #[derive(Clone)]
 pub struct Db {
@@ -100,6 +118,56 @@ impl Db {
             short_conn: Arc::new(Mutex::new(short_conn)),
             body_store: None,
         })
+    }
+
+    pub fn embedded_schema_version() -> usize {
+        static VERSION: OnceLock<usize> = OnceLock::new();
+        *VERSION.get_or_init(|| {
+            let mut conn = Connection::open_in_memory().expect("in-memory sqlite");
+            Self::migrations()
+                .to_latest(&mut conn)
+                .expect("embedded migrations apply cleanly");
+            let raw: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("user_version");
+            usize::try_from(raw.max(0)).unwrap_or(usize::MAX)
+        })
+    }
+
+    /// Read `PRAGMA user_version` without running migrations (readonly open).
+    pub fn inspect_schema_at(path: impl AsRef<Path>) -> Result<Option<DbSchemaInspect>> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("open sqlite (readonly) at {}", path.display()))?;
+        let raw: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .context("read user_version")?;
+        let db_user_version = usize::try_from(raw.max(0)).unwrap_or(usize::MAX);
+        Ok(Some(DbSchemaInspect {
+            db_user_version,
+            embedded_max_version: Self::embedded_schema_version(),
+        }))
+    }
+
+    /// Main `vibe.db` plus sibling short-log DB if present.
+    pub fn inspect_related_schemas(
+        main_path: impl AsRef<Path>,
+    ) -> Result<Vec<(PathBuf, DbSchemaInspect)>> {
+        let main_path = main_path.as_ref().to_path_buf();
+        let mut out = Vec::new();
+        if let Some(inspect) = Self::inspect_schema_at(&main_path)? {
+            out.push((main_path.clone(), inspect));
+        }
+        let short_path = short_logs_path_for_db(&main_path);
+        if short_path != main_path {
+            if let Some(inspect) = Self::inspect_schema_at(&short_path)? {
+                out.push((short_path, inspect));
+            }
+        }
+        Ok(out)
     }
 
     fn migrations() -> Migrations<'static> {

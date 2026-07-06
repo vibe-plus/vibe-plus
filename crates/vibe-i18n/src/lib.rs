@@ -43,15 +43,13 @@ fn parse_env_locale(value: &str) -> Option<LanguageIdentifier> {
     if trimmed.is_empty() || trimmed == "C" || trimmed == "POSIX" {
         return None;
     }
-    Some(
-        normalize_locale(
-            trimmed
-                .split('.')
-                .next()
-                .unwrap_or(trimmed)
-                .replace('_', "-"),
-        ),
-    )
+    Some(normalize_locale(
+        trimmed
+            .split('.')
+            .next()
+            .unwrap_or(trimmed)
+            .replace('_', "-"),
+    ))
 }
 
 /// macOS GUI language preference (`defaults read -g AppleLanguages`).
@@ -111,11 +109,7 @@ pub fn text(locale: &LanguageIdentifier, key: &str) -> String {
     LOCALES.lookup(locale, key)
 }
 
-pub fn text_with_args(
-    locale: &LanguageIdentifier,
-    key: &str,
-    args: &[(&str, String)],
-) -> String {
+pub fn text_with_args(locale: &LanguageIdentifier, key: &str, args: &[(&str, String)]) -> String {
     let mut map: HashMap<Cow<'static, str>, FluentValue> = HashMap::new();
     for (name, value) in args {
         map.insert(
@@ -137,10 +131,7 @@ pub fn text_env(key: &str) -> String {
 }
 
 pub fn text_env_args(key: &str, args: &[(&str, &str)]) -> String {
-    let owned: Vec<(&str, String)> = args
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let owned: Vec<(&str, String)> = args.iter().map(|(k, v)| (*k, v.to_string())).collect();
     text_env_args_owned(key, owned)
 }
 

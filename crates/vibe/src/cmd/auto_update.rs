@@ -83,10 +83,7 @@ pub async fn check_once_and_spawn_updater(port: u16) -> Result<bool> {
     if !is_newer(&latest, vibe_core::VERSION) {
         log_update_msg(&text_env_args(
             "auto-update-no-update",
-            &[
-                ("current", vibe_core::VERSION),
-                ("remote", latest.as_str()),
-            ],
+            &[("current", vibe_core::VERSION), ("remote", latest.as_str())],
         ));
         release_update_lock();
         return Ok(false);
@@ -94,10 +91,7 @@ pub async fn check_once_and_spawn_updater(port: u16) -> Result<bool> {
 
     log_update_msg(&text_env_args(
         "auto-update-available",
-        &[
-            ("current", vibe_core::VERSION),
-            ("remote", latest.as_str()),
-        ],
+        &[("current", vibe_core::VERSION), ("remote", latest.as_str())],
     ));
     if let Err(err) = spawn_detached_updater(port, &latest) {
         log_update_msg(&text_env_args(
@@ -135,7 +129,8 @@ pub async fn fetch_latest_version() -> Result<Option<String>> {
             let manager = npm_registry::package_manager();
             let mirror = npm_registry::pick_registry(manager)
                 .unwrap_or_else(|| npm_registry::DEFAULT_NPM_REGISTRY.to_owned());
-            if mirror.trim_end_matches('/') == npm_registry::DEFAULT_NPM_REGISTRY.trim_end_matches('/')
+            if mirror.trim_end_matches('/')
+                == npm_registry::DEFAULT_NPM_REGISTRY.trim_end_matches('/')
             {
                 return Err(official_err);
             }
@@ -194,10 +189,7 @@ pub fn run_updater_child(port: u16, expected_version: Option<String>) -> Result<
         Ok(Some(latest)) => {
             log_update_msg(&text_env_args(
                 "auto-update-preflight-no-update",
-                &[
-                    ("current", vibe_core::VERSION),
-                    ("remote", latest.as_str()),
-                ],
+                &[("current", vibe_core::VERSION), ("remote", latest.as_str())],
             ));
             relaunch_previous_gateway(port)?;
             return Ok(());

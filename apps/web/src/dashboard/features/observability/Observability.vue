@@ -52,10 +52,18 @@ type RouteFocus =
   | { kind: "attempt"; id: string }
   | { kind: "wave"; id: string };
 
+type SourceView = "all" | "codex" | "claude";
+
 function queryString(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value) && typeof value[0] === "string") return value[0];
   return "";
+}
+
+function sourceViewFromQuery(): SourceView {
+  const view = queryString(route.query.view);
+  if (view === "codex" || view === "claude") return view;
+  return "all";
 }
 
 function selectionFromQuery(): SidebarSelection {
@@ -104,6 +112,11 @@ function focusFromQuery(): RouteFocus | null {
 const selection = ref<SidebarSelection>(selectionFromQuery());
 const detailTab = ref<DetailTab>(detailTabFromQuery());
 const routeFocus = computed(focusFromQuery);
+const sourceView = computed(sourceViewFromQuery);
+const visibleConversations = computed(() => {
+  if (sourceView.value === "all") return conversations.value;
+  return conversations.value.filter((conversation) => conversation.source === sourceView.value);
+});
 
 function selectionToQuery(sel: SidebarSelection): Record<string, string | undefined> {
   if (sel.kind === "conversation") {
@@ -463,7 +476,7 @@ function goBack() {
       ]"
     >
       <ObservabilitySidebar
-        :conversations="conversations"
+        :conversations="visibleConversations"
         :loading="conversationsLoading"
         :error="conversationsError"
         :selection="selection"

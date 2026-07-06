@@ -125,5 +125,8 @@ pub fn run() -> Result<StepOutcome> {
     let summary_en = format!(
         "imported {imported} providers ({with_credential} with credential), {skipped_dup} duplicates, {skipped_no_url} without base_url, {errors} errors"
     );
-    Ok(StepOutcome { summary_zh, summary_en })
+    Ok(StepOutcome {
+        summary_zh,
+        summary_en,
+    })
 }

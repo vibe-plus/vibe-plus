@@ -65,6 +65,14 @@ pub(super) async fn client_doctor(
             status.model_overrides_present.join(", ")
         },
     });
+    if status.taken_over {
+        let proxy = crate::diagnostics::local_proxy_bypass_check(state.port);
+        checks.push(ClientDoctorCheck {
+            name: proxy.name.into(),
+            ok: proxy.ok,
+            detail: proxy.detail,
+        });
+    }
     let ok = checks.iter().all(|c| c.ok);
     Ok(Json(ClientDoctorResponse { client, ok, checks }))
 }

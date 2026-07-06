@@ -69,6 +69,16 @@ pub fn expand_picks(
                 let start = if n > 0 { counter % n } else { 0 };
                 for i in 0..n {
                     let c = &creds[(start + i) % n];
+                    if c.disabled_reason.is_some() {
+                        // A credential that carries an auto-disable reason should
+                        // never participate, even if an older DB row still has
+                        // `enabled = 1`.
+                        tracing::debug!(
+                            cred_id = %c.id, label = %c.label,
+                            "skipping credential: auto-disabled reason present"
+                        );
+                        continue;
+                    }
                     let (auth_ref, oauth) = if c.oauth_access_token.is_some() {
                         (
                             None,
@@ -209,8 +219,8 @@ pub fn shuffle_candidates(
 
 /// Maximum number of scheduler waves for the 123 policy.
 ///
-/// Wave 0 prefers `1 healthy + 1 sick`, or just `1 healthy` when no sick pick
-/// is available. Wave 1 races up to two picks (prefer 1 sick + 1 healthy).
+/// Wave 0 sends one pick only so load-balancing / sticky routing decides the
+/// first upstream. Wave 1 races up to two picks (prefer 1 sick + 1 healthy).
 /// Wave 2 races up to three picks (prefer 1 sick + 2 healthy). Any remaining
 /// candidates are intentionally not dispatched; the forwarder will aggregate
 /// the collected retry / circuit-skip failures into its normal 503.
@@ -219,17 +229,17 @@ const MAX_123_WAVES: usize = 3;
 /// Build scheduler waves using Vibe Plus's 123 policy.
 ///
 /// The input is already ordered by routing, CB-aware shuffling, credential
-/// expansion, and sticky priority. We therefore preserve the very first pick as
+/// expansion, and sticky priority. We therefore run the first healthy pick as
 /// the solo first wave so load-balancing / sticky routing decides the first
-/// upstream. Remaining picks are split into sick (CB Open or HalfOpen) and
-/// healthy (CB Closed) queues while preserving relative order inside each queue.
+/// upstream. Remaining picks are split into sick (CB Open or HalfOpen, or
+/// persisted failures) and healthy queues while preserving relative order
+/// inside each queue.
 ///
 /// Wave 1 prefers `1 sick + 1 healthy`; wave 2 prefers `1 sick + 2 healthy`.
 /// If a preferred bucket is short, the wave is backfilled from whatever
 /// remaining candidates are available, up to the wave's cap. No wave is
 /// generated after wave 2.
 pub fn build_waves(picks: Vec<ExpandedPick>, cb: &CircuitBreakers) -> Vec<Vec<ExpandedPick>> {
-    use crate::circuit_breaker::State;
     use std::collections::VecDeque;
 
     let mut iter = picks.into_iter();
@@ -239,23 +249,24 @@ pub fn build_waves(picks: Vec<ExpandedPick>, cb: &CircuitBreakers) -> Vec<Vec<Ex
 
     let mut sick = VecDeque::new();
     let mut healthy = VecDeque::new();
-    match cb.state_of(&first.upstream.cb_key) {
-        State::Open | State::HalfOpen => sick.push_back(first),
-        State::Closed => healthy.push_back(first),
+    if pick_is_sick(&first, cb) {
+        sick.push_back(first);
+    } else {
+        healthy.push_back(first);
     }
     for pick in iter {
-        match cb.state_of(&pick.upstream.cb_key) {
-            State::Open | State::HalfOpen => sick.push_back(pick),
-            State::Closed => healthy.push_back(pick),
+        if pick_is_sick(&pick, cb) {
+            sick.push_back(pick);
+        } else {
+            healthy.push_back(pick);
         }
     }
 
     let mut waves = Vec::with_capacity(MAX_123_WAVES);
     let mut first_wave = Vec::with_capacity(2);
-    take_from_queue(&mut first_wave, &mut healthy, 1, 2);
-    take_from_queue(&mut first_wave, &mut sick, 1, 2);
+    take_from_queue(&mut first_wave, &mut healthy, 1, 1);
     if first_wave.is_empty() {
-        take_from_queue(&mut first_wave, &mut sick, 1, 2);
+        take_from_queue(&mut first_wave, &mut sick, 1, 1);
     }
     if !first_wave.is_empty() {
         waves.push(first_wave);
@@ -264,6 +275,18 @@ pub fn build_waves(picks: Vec<ExpandedPick>, cb: &CircuitBreakers) -> Vec<Vec<Ex
     push_123_wave(&mut waves, &mut sick, &mut healthy, 1, 1, 2);
     push_123_wave(&mut waves, &mut sick, &mut healthy, 1, 2, 3);
     waves
+}
+
+fn pick_is_sick(pick: &ExpandedPick, cb: &CircuitBreakers) -> bool {
+    use crate::circuit_breaker::State;
+
+    matches!(
+        cb.state_of(&pick.upstream.cb_key),
+        State::Open | State::HalfOpen
+    ) || pick
+        .credential
+        .as_ref()
+        .is_some_and(|c| c.consecutive_failures > 0)
 }
 
 fn push_123_wave(
@@ -374,6 +397,13 @@ pub fn sticky_key_from_body(body: &[u8]) -> Option<String> {
         }
     }
 
+    if let Some(thread_id) = crate::codex_summary::thread_id_from_value(&v) {
+        let trimmed = thread_id.trim();
+        if !trimmed.is_empty() {
+            return Some(format!("body:codex_thread_id:{trimmed}"));
+        }
+    }
+
     crate::codex_summary::turn_id_from_value(&v).map(|t| format!("turn:{t}"))
 }
 
@@ -468,6 +498,14 @@ mod tests {
                 priority: 10,
             },
         }
+    }
+
+    fn make_epick_with_failures(provider_id: &str, cred_id: &str, failures: i32) -> ExpandedPick {
+        let mut pick = make_epick(provider_id, Some(cred_id));
+        let mut credential = make_cred(cred_id, provider_id, "env:KEY");
+        credential.consecutive_failures = failures;
+        pick.credential = Some(credential);
+        pick
     }
 
     fn snap(pp: Option<f64>, h5: Option<f64>, h7: Option<f64>) -> CredentialPlanSnapshot {
@@ -646,6 +684,23 @@ mod tests {
     }
 
     #[test]
+    fn expand_skips_auto_disabled_credential_even_if_enabled() {
+        let mut disabled = make_cred("disabled", "p1", "env:KEY");
+        disabled.disabled_reason = Some("HTTP 403 from upstream".into());
+        disabled.disabled_at = Some(123);
+        disabled.enabled = true;
+
+        let ok_cred = make_cred("ok", "p1", "env:KEY2");
+
+        let mut creds_map = HashMap::new();
+        creds_map.insert("p1".to_string(), vec![disabled, ok_cred]);
+
+        let result = expand_picks(vec![make_pick("p1", None)], &creds_map, &HashMap::new(), 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].credential_id.as_deref(), Some("ok"));
+    }
+
+    #[test]
     fn expand_skips_provider_entirely_when_all_creds_rate_limited() {
         let future = chrono::Utc::now().timestamp() + 3600;
         let mut rl_cred = make_cred("rl", "p1", "env:KEY");
@@ -686,6 +741,16 @@ mod tests {
     fn sticky_key_falls_back_to_turn_id() {
         let body = br#"{"client_metadata":{"turn_id":"turn-123"}}"#;
         assert_eq!(sticky_key_from_body(body).as_deref(), Some("turn:turn-123"));
+    }
+
+    #[test]
+    fn sticky_key_prefers_codex_metadata_thread_over_turn() {
+        let body =
+            br#"{"client_metadata":{"x-codex-turn-metadata":"{\"thread_id\":\"thread-123\",\"turn_id\":\"turn-123\"}"}}"#;
+        assert_eq!(
+            sticky_key_from_body(body).as_deref(),
+            Some("body:codex_thread_id:thread-123")
+        );
     }
 
     #[test]
@@ -863,9 +928,29 @@ mod tests {
         assert_eq!(
             wave_ids(&waves),
             vec![
-                vec!["h-first".to_string(), "s-0".to_string()],
-                vec!["s-1".to_string(), "h-0".to_string()],
-                vec!["s-2".to_string(), "h-1".to_string(), "h-2".to_string()],
+                vec!["h-first".to_string()],
+                vec!["s-0".to_string(), "h-0".to_string()],
+                vec!["s-1".to_string(), "h-1".to_string(), "h-2".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn build_waves_treats_persisted_failures_as_sick() {
+        let cb = cb_for_tests();
+        let picks = vec![
+            make_epick_with_failures("p-bad", "c-bad", 12),
+            make_epick_with_failures("p-good", "c-good", 0),
+            make_epick_with_failures("p-another-good", "c-another-good", 0),
+        ];
+
+        let waves = build_waves(picks, &cb);
+
+        assert_eq!(
+            wave_ids(&waves),
+            vec![
+                vec!["p-good".to_string()],
+                vec!["p-bad".to_string(), "p-another-good".to_string()],
             ]
         );
     }
@@ -890,9 +975,9 @@ mod tests {
         assert_eq!(
             wave_ids(&waves),
             vec![
-                vec!["h-first".to_string(), "s-0".to_string()],
-                vec!["s-1".to_string(), "s-2".to_string()],
-                vec!["s-3".to_string()],
+                vec!["h-first".to_string()],
+                vec!["s-0".to_string(), "s-1".to_string()],
+                vec!["s-2".to_string(), "s-3".to_string()],
             ]
         );
     }
@@ -916,9 +1001,9 @@ mod tests {
         assert_eq!(
             wave_ids(&waves),
             vec![
-                vec!["h-first".to_string(), "s-open".to_string()],
-                vec!["s-half".to_string(), "h-0".to_string()],
-                vec!["h-1".to_string()],
+                vec!["h-first".to_string()],
+                vec!["s-open".to_string(), "h-0".to_string()],
+                vec!["s-half".to_string(), "h-1".to_string()],
             ]
         );
     }
@@ -938,8 +1023,8 @@ mod tests {
         assert_eq!(
             wave_ids(&waves),
             vec![
-                vec!["h-0".to_string(), "s-0".to_string()],
-                vec!["h-1".to_string()],
+                vec!["h-0".to_string()],
+                vec!["s-0".to_string(), "h-1".to_string()],
             ]
         );
     }

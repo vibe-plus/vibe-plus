@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::process::Stdio;
 use std::time::Duration;
-use vibe_core::{config::Config, paths, state::AppState};
+use vibe_core::{config::Config, diagnostics, paths, state::AppState, VERSION};
 use vibe_db::Db;
 use vibe_i18n::text_env;
 
@@ -52,8 +53,15 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
 
     if !args.foreground {
-        spawn_background(args.port)?;
-        gateway::wait_until_ready(&base_url, Duration::from_secs(30)).await?;
+        diagnostics::preflight_gateway_start(VERSION)?;
+        let spawn = spawn_background(args.port)?;
+        gateway::wait_until_ready(
+            &base_url,
+            args.port,
+            Duration::from_secs(30),
+            Some(spawn),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -61,7 +69,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
 }
 
 /// Spawn `vibe up --foreground` detached from this terminal.
-pub fn spawn_background(port: u16) -> Result<()> {
+pub fn spawn_background(port: u16) -> Result<gateway::BackgroundGatewaySpawn> {
+    let log_offset = diagnostics::gateway_log_len().unwrap_or(0);
+    let log_file = diagnostics::open_gateway_log_append()?;
+    {
+        let mut header = log_file
+            .try_clone()
+            .context("clone gateway log handle for startup banner")?;
+        let _ = writeln!(header, "\n--- vibe up --foreground port={port} ---");
+    }
+    let log_stderr = log_file
+        .try_clone()
+        .context("clone gateway log handle for stderr")?;
+
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("up")
@@ -69,24 +89,32 @@ pub fn spawn_background(port: u16) -> Result<()> {
         .arg("--port")
         .arg(port.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_stderr));
 
     #[cfg(unix)]
-    cmd.spawn()?;
+    let child_pid = {
+        let child = cmd.spawn()?;
+        child.id()
+    };
 
     #[cfg(windows)]
-    {
+    let child_pid = {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
-        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        let child = cmd
+            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
             .spawn()?;
-    }
+        child.id()
+    };
 
     println!("{}", text_env("cli-up-running-background"));
     println!("  endpoint: {}", gateway::local_base_url(port));
-    Ok(())
+    Ok(gateway::BackgroundGatewaySpawn {
+        child_pid,
+        log_offset,
+    })
 }
 
 pub async fn run_server(port: u16) -> Result<()> {

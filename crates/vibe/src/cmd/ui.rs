@@ -1,57 +1,5 @@
 use anyhow::Result;
-use std::time::Instant;
 use vibe_core::{UI_CDN_BASE_URL, UI_DASHBOARD_URL};
-
-const CDN_BASES: &[(&str, &str, &str)] = &[
-    ("github", UI_CDN_BASE_URL, UI_DASHBOARD_URL),
-    // TODO: cheez.tech mirror not yet published — restore when ready:
-    // ("cheez.tech", UI_CDN_MIRROR_BASE_URL, UI_DASHBOARD_MIRROR_URL),
-];
-
-/// Probe each CDN `version.json` and return the dashboard URL for the fastest healthy origin.
-async fn pick_dashboard_url() -> &'static str {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(4))
-        .build()
-        .unwrap_or_default();
-
-    let mut handles = Vec::new();
-    for (label, base, dashboard) in CDN_BASES {
-        let c = client.clone();
-        let probe_url = format!("{base}version.json");
-        handles.push(tokio::spawn(async move {
-            let t = Instant::now();
-            let ok = c
-                .head(&probe_url)
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            (label, dashboard, t.elapsed().as_millis(), ok)
-        }));
-    }
-
-    let mut best = CDN_BASES[0].2;
-    let mut best_ms = u128::MAX;
-    let mut any_ok = false;
-    for h in handles {
-        if let Ok((label, dashboard, ms, true)) = h.await {
-            any_ok = true;
-            if ms < best_ms {
-                best_ms = ms;
-                best = dashboard;
-            }
-            tracing::debug!("CDN probe {label}: {ms}ms");
-        }
-    }
-    if !any_ok {
-        eprintln!(
-            "warning: no CDN responded; opening default {}",
-            CDN_BASES[0].2
-        );
-    }
-    best
-}
 
 pub fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
@@ -67,10 +15,17 @@ pub fn open_url(url: &str) -> Result<()> {
 
 /// Open the hosted dashboard in the default browser.
 pub async fn open_dashboard() -> Result<()> {
-    println!("Probing CDN speed…");
-    let url = pick_dashboard_url().await;
+    println!("Opening {UI_DASHBOARD_URL}");
+    open_url(UI_DASHBOARD_URL)
+}
+
+/// Open a hosted dashboard route in the default browser.
+pub async fn open_dashboard_path(path: &str) -> Result<()> {
+    let base = UI_CDN_BASE_URL.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    let url = format!("{base}/{path}");
     println!("Opening {url}");
-    open_url(url)
+    open_url(&url)
 }
 
 pub async fn run() -> Result<()> {
